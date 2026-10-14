@@ -9,6 +9,7 @@ pub mod palette;
 mod project;
 pub mod report;
 pub mod review;
+pub mod slash;
 pub mod state;
 mod transcript;
 

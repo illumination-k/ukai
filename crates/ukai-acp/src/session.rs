@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
-    EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
-    InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus, PromptRequest,
-    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionId, SessionNotification, SessionUpdate, TextResourceContents, ToolCallContent,
-    ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
+    AvailableCommandInput, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
+    EmbeddedResource, EmbeddedResourceResource, FileSystemCapabilities, ImageContent,
+    Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus,
+    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextResourceContents,
+    ToolCallContent, ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
 use base64::Engine as _;
@@ -77,6 +77,9 @@ pub enum SessionEvent {
     },
     /// The agent's current plan, replacing any earlier one.
     Plan { entries: Vec<PlanItem> },
+    /// The slash commands the agent offers, replacing any earlier list. Run
+    /// one by sending a prompt that starts with `/name`.
+    Commands { commands: Vec<SlashCommand> },
     /// Answer with [`SessionHandle::resolve_permission`].
     PermissionRequested {
         id: PermissionId,
@@ -190,6 +193,16 @@ pub struct PlanItem {
     pub content: String,
     pub done: bool,
     pub active: bool,
+}
+
+/// A command from the agent's `available_commands_update`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommand {
+    /// Without the leading `/`.
+    pub name: String,
+    pub description: String,
+    /// What to write after the name, when the command takes input.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,8 +671,21 @@ fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEve
                 })
                 .collect(),
         },
-        // Echoes of our own prompt, mode/command lists, usage, and the rest
-        // are not shown yet.
+        SessionUpdate::AvailableCommandsUpdate(update) => SessionEvent::Commands {
+            commands: update
+                .available_commands
+                .into_iter()
+                .map(|command| SlashCommand {
+                    hint: match command.input {
+                        Some(AvailableCommandInput::Unstructured(input)) => Some(input.hint),
+                        _ => None,
+                    },
+                    name: command.name,
+                    description: command.description,
+                })
+                .collect(),
+        },
+        // Echoes of our own prompt, modes, usage, and the rest are not shown yet.
         _ => return None,
     })
 }
