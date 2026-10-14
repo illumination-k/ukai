@@ -10,6 +10,11 @@
 //! `Ukai-Workspace-Scope: pod` and `Ukai-Workspace: <pane key>`; otherwise
 //! every connection to an agent shares one workspace.
 //!
+//! `GET /agents/<id>/reports` and `/agents/<id>/reports/files/<path>` read
+//! the reports that workspace's agent wrote, from the `ukai-relay` serving
+//! them in its pod. Same token, same workspace headers; a report request
+//! never starts a pod.
+//!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
 //! - `UKAI_GATEWAY_LISTEN`: address to serve (default `0.0.0.0:8080`)
@@ -29,7 +34,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures::stream::{SplitSink, SplitStream};
@@ -105,6 +110,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(|| async { "ok" }))
         .route("/agents", get(list))
         .route("/agents/{id}/acp", get(connect))
+        .route("/agents/{id}/reports", get(reports))
+        .route("/agents/{id}/reports/files/{*path}", get(reports))
         .with_state(gateway);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(%listen, "serving");
@@ -165,6 +172,124 @@ async fn connect(
         }
     })
 }
+
+/// `GET /agents/<id>/reports[/files/<path>]`: what the agent wrote in the
+/// workspace this client asks for, read from the `ukai-relay` in its pod.
+///
+/// The workspace is resolved exactly as for `/acp`, and the same token is
+/// required, but a report request never starts a pod: it is a read of work
+/// that is already there. A workspace whose pod has idled out is 410, so a
+/// pane can say so instead of waiting out an image pull.
+async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: Uri) -> Response {
+    if !authorized(&gateway, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    // The path is read from the URI rather than through `Path`, which cannot
+    // serve both routes at once, and so the file part stays percent-encoded
+    // for the relay to decode exactly once.
+    let Some((id, suffix)) = reports_target(uri.path()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(agent) = gateway.agents.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let pane = match pane_key(&headers) {
+        Ok(pane) => pane,
+        Err(problem) => return (StatusCode::BAD_REQUEST, problem).into_response(),
+    };
+    let plan = Plan::new(
+        agent,
+        &gateway.user,
+        gateway.cluster.namespace(),
+        pane.as_deref(),
+    );
+    let pod = match gateway.cluster.serving_pod(&plan).await {
+        Ok(Some(pod)) => pod,
+        Ok(None) => return gone(),
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot look up the workspace's pod");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    let Some(endpoint) = RelayEndpoint::of(&pod) else {
+        return gone();
+    };
+    match fetch(&endpoint, suffix).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot read the workspace's reports");
+            StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
+}
+
+/// The agent a report request names and the part of it the relay serves
+/// under its own `/reports`: nothing for the listing, `/files/<path>` for one
+/// file. `None` for anything else, so only these two are ever proxied.
+///
+/// The agent id is decoded, as axum decodes it for `/acp`; the file path is
+/// left as it arrived, for the relay to decode once.
+fn reports_target(path: &str) -> Option<(String, &str)> {
+    let (id, rest) = path.strip_prefix("/agents/")?.split_once('/')?;
+    let suffix = rest.strip_prefix("reports")?;
+    let proxied = suffix.is_empty()
+        || suffix
+            .strip_prefix("/files/")
+            .is_some_and(|path| !path.is_empty());
+    if !proxied || id.is_empty() {
+        return None;
+    }
+    let id = percent_encoding::percent_decode_str(id)
+        .decode_utf8()
+        .ok()?;
+    Some((id.into_owned(), suffix))
+}
+
+/// A workspace that is not running: there is nothing to read, and a report
+/// request must not bring its pod back.
+fn gone() -> Response {
+    (
+        StatusCode::GONE,
+        "the agent's workspace is not running; open the agent to start it",
+    )
+        .into_response()
+}
+
+/// Read one report response from the pod's relay and pass it on, with the
+/// headers a web view needs to render it and nothing else.
+async fn fetch(endpoint: &RelayEndpoint, suffix: &str) -> Result<Response, BoxError> {
+    let response = reqwest::Client::new()
+        .get(endpoint.reports_url(suffix))
+        .bearer_auth(&endpoint.token)
+        .timeout(REPORT_TIMEOUT)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(response.status().as_u16())?;
+    let passed = |name: &header::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = passed(&header::CONTENT_TYPE);
+    let etag = passed(&header::ETAG);
+    let body = response.bytes().await?;
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    if let Some(etag) = etag {
+        builder = builder.header(header::ETAG, etag);
+    }
+    Ok(builder.body(body.into())?)
+}
+
+/// How long the gateway waits on the pod for one report.
+const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The pane key when the client asks for a pod of the pane's own.
 fn pane_key(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
@@ -273,7 +398,7 @@ async fn prepare(
 
 async fn connect_relay(pod: &Pod) -> Result<Upstream, BoxError> {
     let endpoint = RelayEndpoint::of(pod).ok_or("the agent pod has no address yet")?;
-    let mut request = endpoint.url.as_str().into_client_request()?;
+    let mut request = endpoint.acp_url().as_str().into_client_request()?;
     request.headers_mut().insert(
         header::AUTHORIZATION,
         format!("Bearer {}", endpoint.token).parse()?,
@@ -343,6 +468,31 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::listing("/agents/claude/reports", Some(("claude", "")))]
+    #[case::file(
+        "/agents/claude/reports/files/reports/run%201.html",
+        Some(("claude", "/files/reports/run%201.html"))
+    )]
+    #[case::encoded_agent_id("/agents/team%2Fclaude/reports", Some(("team/claude", "")))]
+    #[case::acp("/agents/claude/acp", None)]
+    #[case::no_file("/agents/claude/reports/files/", None)]
+    #[case::other_suffix("/agents/claude/reports/../acp", None)]
+    #[case::no_agent("/agents//reports", None)]
+    #[case::elsewhere("/health", None)]
+    fn reads_what_a_report_request_asks_for(
+        #[case] path: &str,
+        #[case] expected: Option<(&str, &str)>,
+    ) {
+        assert_eq!(
+            reports_target(path)
+                .as_ref()
+                .map(|(id, suffix)| (id.as_str(), *suffix)),
+            expected,
+            "{path}"
+        );
+    }
 
     #[rstest]
     #[case::none(None, None, Ok(None))]

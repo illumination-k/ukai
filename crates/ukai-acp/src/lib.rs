@@ -5,11 +5,17 @@
 //! URLs and headers are checked, and the remote/local split is decided here
 //! so the UI never sees transport details. [`spawn_session`] then runs one
 //! ACP session over it.
+//!
+//! [`reports`] is the one thing a gateway agent needs besides its session:
+//! the reports it writes stay in its pod, and are read back from the
+//! endpoint next to its `/acp`.
 
 mod fs;
+pub mod reports;
 mod session;
 
 pub use fs::{FsError, FsRoot};
+pub use reports::ReportsEndpoint;
 pub use session::{
     Attachment, FileDiff, PROGRESS_METHOD, PermissionChoice, PermissionId, PlanItem, Prompt,
     PromptCaps, RestoreOutcome, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
@@ -26,7 +32,7 @@ use ukai_config::{AgentSpec, InterpolateError, interpolate};
 /// The workspace a pane asks a gateway agent for, sent with the connection:
 /// a [`WorkspaceScope::Pod`] pane gets a pod of its own, found again by `key`
 /// when the pane reconnects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneWorkspace {
     pub key: String,
     pub scope: WorkspaceScope,
@@ -60,6 +66,8 @@ pub enum ResolveError {
     InvalidHeader(String),
     #[error(transparent)]
     Http(#[from] HttpClientError),
+    #[error("cannot build an HTTP client: {0}")]
+    Client(String),
 }
 
 /// Resolve `spec`, reading `${env:NAME}` references through `lookup`.
@@ -140,13 +148,28 @@ fn remote(
         });
     }
 
+    let map = header_map(headers, extra, lookup)?;
+    let client = HttpClient::builder(&url)
+        .configure_http(|http| http.default_headers(map))
+        .build()?;
+    Ok(Transport::Remote(client))
+}
+
+/// The declared `headers` with their `${env:NAME}` references expanded, plus
+/// `extra` the app adds itself. Every declared value is marked sensitive:
+/// they are typically credentials and must stay out of `Debug` output and
+/// logs.
+fn header_map(
+    headers: &std::collections::BTreeMap<String, String>,
+    extra: &[(&'static str, String)],
+    lookup: impl Fn(&str) -> Option<String> + Copy,
+) -> Result<HeaderMap, ResolveError> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
         let invalid = || ResolveError::InvalidHeader(name.clone());
         let header = HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid())?;
         let mut value =
             HeaderValue::from_str(&interpolate(value, lookup)?).map_err(|_| invalid())?;
-        // Header values are typically credentials: keep them out of Debug output.
         value.set_sensitive(true);
         map.insert(header, value);
     }
@@ -155,11 +178,7 @@ fn remote(
             .map_err(|_| ResolveError::InvalidHeader((*name).to_owned()))?;
         map.insert(*name, value);
     }
-
-    let client = HttpClient::builder(&url)
-        .configure_http(|http| http.default_headers(map))
-        .build()?;
-    Ok(Transport::Remote(client))
+    Ok(map)
 }
 
 #[cfg(test)]

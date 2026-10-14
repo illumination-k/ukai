@@ -200,6 +200,98 @@ fn refuses_a_report_linked_from_outside_the_project() {
 }
 
 #[rstest]
+#[case::plain("/reports/run.html", "reports/run.html", true)]
+#[case::encoded("/reports/run%201.html", "reports/run 1.html", true)]
+#[case::decoded_by_the_view("/reports/グラフ.svg", "reports/グラフ.svg", true)]
+#[case::encoded_by_the_view("/reports/%E3%82%B0%E3%83%A9%E3%83%95.svg", "reports/グラフ.svg", true)]
+#[case::another_file("/reports/other.html", "reports/run.html", false)]
+fn recognizes_the_url_path_of_a_report(
+    #[case] asked: &str,
+    #[case] report: &str,
+    #[case] expected: bool,
+) {
+    assert_eq!(is_url_path(asked, Path::new(report)), expected, "{asked}");
+}
+
+fn tree(root: &TempDir, dirs: &[&str]) -> ReportTree {
+    ReportTree::open(root.path(), &reports(dirs)).unwrap_or_else(|e| panic!("open tree: {e}"))
+}
+
+#[test]
+fn a_tree_lists_the_same_files_as_a_pane() {
+    let root = project();
+    let tree = tree(&root, &["reports", "missing"]);
+    let mut listed: Vec<_> = tree.list().into_iter().map(|file| file.path).collect();
+    let mut expected = list(root.path(), &reports(&["reports"]));
+    listed.sort();
+    expected.sort();
+    assert_eq!(listed, expected);
+    assert!(
+        tree.list()
+            .iter()
+            .all(|file| file.modified > SystemTime::UNIX_EPOCH)
+    );
+}
+
+#[test]
+fn a_tree_serves_reports_by_project_relative_path() {
+    let root = project();
+    let tree = tree(&root, &["reports"]);
+    let page = tree.serve("/reports/2026/run%201.html");
+    assert_eq!(
+        (page.status, page.content_type),
+        (200, "text/html; charset=utf-8")
+    );
+    // The validator is stable while the file is, and changes when it is
+    // rewritten, so a client can follow an agent's updates.
+    assert!(page.etag.is_some(), "{page:?}");
+    assert_eq!(page.etag, tree.serve("/reports/2026/run 1.html").etag);
+    fs::write(root.path().join("reports/2026/run 1.html"), "<p>again</p>")
+        .unwrap_or_else(|e| panic!("write: {e}"));
+    assert_ne!(page.etag, tree.serve("/reports/2026/run 1.html").etag);
+    let image = tree.serve("/reports/img/plot.png");
+    assert_eq!((image.status, image.body), (200, b"png".to_vec()));
+}
+
+#[rstest]
+// Inside the project but outside every reports dir.
+#[case::outside_the_bases("/notes.html", 403)]
+#[case::secret("/.env", 403)]
+#[case::parent("/reports/../.env", 403)]
+#[case::encoded_parent("/reports/%2e%2e/.env", 403)]
+#[case::backslash("/reports/..\\.env", 403)]
+#[case::root("/", 403)]
+#[case::missing("/reports/nope.html", 404)]
+#[case::not_a_report("/reports/data.bin", 200)]
+#[case::hidden("/reports/.cache/hidden.html", 200)]
+fn a_tree_serves_nothing_outside_the_report_dirs(#[case] path: &str, #[case] status: u16) {
+    let root = project();
+    assert_eq!(
+        tree(&root, &["reports"]).serve(path).status,
+        status,
+        "{path}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_refuses_symlinks_out_of_the_report_dirs() {
+    let root = project();
+    std::os::unix::fs::symlink(root.path().join(".env"), root.path().join("reports/env"))
+        .unwrap_or_else(|e| panic!("symlink: {e}"));
+    let tree = tree(&root, &["reports"]);
+    assert_eq!(tree.serve("/reports/env").status, 403);
+}
+
+#[test]
+fn a_tree_without_report_dirs_serves_nothing() {
+    let root = project();
+    let tree = tree(&root, &[]);
+    assert!(tree.list().is_empty());
+    assert_eq!(tree.serve("/reports/2026/run 1.html").status, 403);
+}
+
+#[rstest]
 #[case::offline(false, true)]
 #[case::online(true, false)]
 fn network_access_is_off_unless_allowed(#[case] allow_network: bool, #[case] has_csp: bool) {
