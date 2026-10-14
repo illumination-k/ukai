@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use ukai_core::{Direction, PaneContent, ProjectId};
+use ukai_core::{Direction, ProjectId};
 
 use crate::Startup;
 use crate::agent_pane::agent_status;
 use crate::icons::{Icon, Svg};
-use crate::layout::{Workbench, close_pane, open_agent, transport_label};
+use crate::layout::{Workbench, close_pane, launch_target, open_agent, transport_label};
 use crate::persist::use_autosave;
 use crate::projects::{
     AppSignals, OpenAgent, Paths, add_project, load_config, open_agents, pick_and_add_project,
     reload_project, remove_project,
 };
+use crate::report_pane::ReportList;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
@@ -119,6 +120,8 @@ fn Sidebar() -> Element {
         })
         .collect();
     let selected_name = projects.selected().map(|p| p.name());
+    let report_project = selected.clone();
+    let report_project_name = selected_name.clone();
     drop(projects);
     let agents: Result<Vec<(String, &'static str)>, String> = match &selected {
         None => Ok(Vec::new()),
@@ -261,6 +264,9 @@ fn Sidebar() -> Element {
                     }
                 }
             }
+            if let (Some(project), Some(name)) = (report_project, report_project_name) {
+                ReportList { key: "{project}", project, name }
+            }
             div { class: "sidebar-footer",
                 span {
                     kbd { "{MOD_KEY}T" }
@@ -287,14 +293,7 @@ pub const MOD_KEY: &str = if cfg!(target_os = "macos") {
 };
 
 fn open_in_focus(app: AppSignals, project: &ProjectId, agent: &str) {
-    let mut layout = app.layout;
-    let focused = layout.peek().focused();
-    let pane = if layout.peek().content(focused) == Some(&PaneContent::Empty) {
-        Some(focused)
-    } else {
-        layout.write().split(focused, Direction::Horizontal)
-    };
-    if let Some(pane) = pane {
+    if let Some(pane) = launch_target(app) {
         open_agent(app, pane, project, agent, None);
     }
 }

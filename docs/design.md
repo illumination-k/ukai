@@ -13,7 +13,7 @@ Status: draft (2026-10-14)
 - **プロジェクトごとの設定ファイル (`ukai.toml`)** で、pane に開けるもの — 各エージェントを開くときに
   起動するコマンド（stdio）や接続先（HTTP/WebSocket）— を宣言する。タブや pane の分割は設定せず、
   ユーザーが実行時に操作して決める。
-- **HTML レポートの描画。** エージェントが生成したレポートを HTML のまま pane に表示し、
+- **HTML レポートと画像の描画。** エージェントが生成したレポート（HTML）や画像を pane に表示し、
   ファイル更新に追従して再描画する。
 - Rust 単一ワークスペース。UI は [Dioxus](https://dioxuslabs.com) 0.7 の desktop renderer。
 
@@ -51,11 +51,11 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 │  │ sidebar  │ pane tree                    │                               │   │
 │  │ agents   │ ┌──────────────┬───────────┐ │  command palette / keymap     │   │
 │  │ sessions │ │ AgentPane    │ReportPane │ │                               │   │
-│  │ reports  │ │ (chat, tools │(sandboxed │ │                               │   │
-│  │          │ │  permissions)│ iframe)   │ │                               │   │
+│  │ reports  │ │ (chat, tools │(child     │ │                               │   │
+│  │          │ │  permissions)│ WebView)  │ │                               │   │
 │  │          │ └──────────────┴───────────┘ │                               │   │
 │  └──────────┴──────────────────────────────┴───────────────────────────────┘   │
-│        ▲ Signals (UiState)                    ▲ ukai://report/... (asset handler)│
+│        ▲ Signals (UiState)                    ▲ ukai-report://... (custom proto)│
 │        │                                      │                                │
 │  ┌─────┴──────────────── ukai-core ───────────┴─────────────────────────────┐  │
 │  │ Layout (tabs + pane trees) + Transcript per pane + ReportIndex           │  │
@@ -78,7 +78,7 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 | -------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                   |
 | `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                     |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`。今後レポート索引）。UI フレームワークに依存しない。                          |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`）。UI フレームワークに依存しない。             |
 | `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                  |
 | `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。        |
 | `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。 |
@@ -263,8 +263,13 @@ decision = "allow"
 
 # ---- レポート ------------------------------------------------------------
 [reports]
-dirs = ["reports"] # 監視して一覧に出すディレクトリ（プロジェクトルート相対）
-globs = ["**/*.html"]
+dirs = [
+  "reports",
+] # サイドバーに一覧するディレクトリ（プロジェクトルート相対。外に出る指定は検証エラー）
+globs = [
+  "**/*.html",
+] # 既定は HTML と画像（html, htm, svg, png, jpg, jpeg, gif, webp）
+allow_network = false # true でレポートからの外部読み込み（CDN の JS など）を許す
 ```
 
 `[layouts]` / `[commands]` のような配置の宣言は意図的に持たない（未知のキーとして拒否する）。
@@ -309,33 +314,51 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   ukai ではリモートエージェントは元々サーバー側で生きている。ローカルの stdio エージェントも `ukai-relay` を
   ローカル常駐させて WebSocket で話す形にすれば同じ扱いにできる。
 
-## HTML レポート
+## HTML レポートと画像
 
-「レポートは HTML で見たい」がこのアプリの主要ユースケースの1つ。
+「レポートは HTML で見たい」がこのアプリの主要ユースケースの1つ。エージェントが書いた画像（プロットなど）も
+同じ pane で見る。pane の中身は `report { project, path }`（`path` はプロジェクトルート相対）。
 
-### レポートの出どころ (`ReportSource`)
+### 開き方
 
-1. **ファイル** … `reports.dirs` 配下の HTML。`notify` で監視し、更新されたら該当 pane を再読込。
-   クラウドエージェントでも、ukai が提供する `fs/write_text_file` 経由で書かせればここに落ちる。
-2. **ACP コンテンツ** … `session/update` 内の embedded resource / resource link で
-   `mimeType = "text/html"` のもの。メモリ上に保持し、エージェント pane に「Open report」チップを出す。
-3. **ツール呼び出しの diff** … `.html` へ書き込む diff を検知したら、適用後のファイルを (1) として扱う。
+1. **サイドバー** … 選択中プロジェクトの `reports.dirs` 配下で `reports.globs` に合うファイルを新しい順に一覧
+   （`ukai_core::report::list`。隠しディレクトリは除外、最大 500 件）。表示中は 2 秒ごとに再走査する。
+   クリックでフォーカス中の pane が空ならそこに、そうでなければ右に分割して開く（エージェントと同じ）。
+2. **エージェント pane** … `fs/write_text_file` で HTML / 画像が書かれたら、その行に「Open」ボタンを出す。
+3. **ファイル選択** … サイドバーの Reports の「+」と空 pane の「Open report or image…」。プロジェクト外の
+   ファイルは開かず、pane にエラーを出す。
+4. （今後）ACP コンテンツ … `session/update` 内の embedded resource / resource link で `text/html` のもの。
+
+開いている pane はファイルの更新時刻を監視し、変わったら再読込する（`notify` ではなくポーリング。
+1 pane につき 1 ファイルの `stat` なので十分安い）。
 
 ### 描画方式
 
 - レポートは**信頼しない**入力として扱う（エージェントが生成した任意の HTML/JS）。
-- ukai-app が Dioxus desktop のアセットハンドラ（wry の custom protocol）で
-  `ukai://report/<id>/…` を配信し、pane 内の `<iframe sandbox="allow-scripts">` で表示する。
-  - `allow-same-origin` を付けない → 不透明オリジンになり、親ドキュメントや IPC に触れない。
-  - 相対パスの CSS/画像はレポートのディレクトリ内に限って配信（パストラバーサル拒否）。
-  - レスポンスに CSP を付与し、外部ネットワークへの fetch は既定で禁止（設定で緩和可）。
-- **Spike 必須:** wry の IPC (`window.ipc` / `webkit.messageHandlers`) がサブフレームから
-  到達可能かをプラットフォームごとに確認する。到達可能なら、レポートは IPC を持たない別ウィンドウ
-  （素の wry WebView）で開く方式に切り替える。
+- **Spike の結論: アプリの WebView 内の iframe では隔離できない。** wry は IPC のメッセージハンドラを
+  全フレームに公開し（macOS では `window.webkit.messageHandlers.ipc`）、Dioxus の IPC ハンドラは送信元フレームを
+  見ないので、`sandbox` 付き iframe からでも UI イベントを偽造できる（パーミッション要求への回答など）。
+- そこで report pane ごとに **IPC ハンドラを持たない子 WebView**（`wry::WebViewBuilder::build_as_child`）を
+  作り、pane 本体の矩形に重ねる（`ukai-app/src/report_pane.rs`）。位置はポーリングで追従し、コンポーネントの
+  アンマウント（タブ切り替え・分割・閉じる）で破棄する。`incognito` なので保存領域はレポート間でも残らない。
+  - wry は IPC ハンドラがなくても `window.ipc` のシムを（再定義不可で）注入する。呼んでも届かないので
+    安全だが、レポートがトップレベルで `ipc` という名前の `const` / `let` を宣言すると構文エラーになる。
+  - 子 WebView はネイティブのビューなので DOM より手前に出る。pane に重なるポップアップは作らないこと。
+    子 WebView にフォーカスがある間はアプリのショートカットが効かない。
+- 子 WebView は `ukai-report://localhost/…`（Windows では `http://ukai-report.localhost/…`）だけを読み、
+  `ukai_core::report::ReportFile::serve` が答える。
+  - 配信範囲はレポートの**ベース**: レポートを含む `reports.dirs` のディレクトリ、なければレポートのディレクトリ。
+    `../img/plot.png` のような相対参照はベース内なら通り、`..`・エンコードされた `..`・ベース外へのシンボリック
+    リンクは拒否（`fs/*` と同じく正規化後のパスで判定）。
+  - 画像はそれを pane に収めて表示する小さなページ（クリックで等倍）で包む。
+  - 応答には `Cache-Control: no-store` と `X-Content-Type-Options: nosniff`、`allow_network = false`（既定）なら
+    同一オリジンと `data:` / `blob:` とインラインのスクリプト・スタイルだけを許す CSP を付ける。
+  - ページ内のナビゲーションはベース内に限り、`http(s)` / `mailto` のリンクと `window.open` は既定のブラウザで
+    開く（pane はレポートのまま）。CSP でネットワークを止めていても、この経路での送信は防げない。
 
 ## UI
 
-- 左: サイドバー（エージェント一覧と接続状態、セッション一覧、レポート一覧）。折りたたみ可能。
+- 左: サイドバー（プロジェクトごとのエージェント一覧と接続状態、起動できるエージェント、レポート一覧）。
 - 中央: タブバーと pane 木。各 pane はヘッダ（タイトル・状態・分割/閉じるボタン）を持つ。
 - `mod+k`（今後）: パレット（エージェントを開く、レポートを開く）。
 - エージェント pane: メッセージのストリーミング表示、ツール呼び出しの折りたたみ、plan のチェックリスト、
@@ -363,7 +386,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - `fs/*` はプロジェクトルート配下に正規化後のパスで制限。シンボリックリンク経由の脱出も拒否。
 - 認証情報は環境変数参照のみ。設定ファイル・state ファイル・ログに値を書かない（ヘッダ値はログでマスク）。
 - HTTP エージェントは `https://` / `wss://` を既定とし、平文は `localhost` 以外で警告。
-- HTML レポートは前述の sandbox + CSP。
+- HTML レポートは前述の IPC を持たない子 WebView + 配信範囲の制限 + CSP。
 
 ## Milestones
 
@@ -373,7 +396,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 | 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み |
 | 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                           |
 | 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元（済み）。リサイズ、パレット                                             |
-| 4     | HTML レポート pane（spike → sandbox iframe or 別ウィンドウ）、ファイル監視、ACP コンテンツからのレポート                                                       |
+| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                    |
 | 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                |
 
 ## Open questions

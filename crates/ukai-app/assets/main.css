@@ -428,6 +428,30 @@ button:focus-visible,
   color: var(--fg);
 }
 
+.report-row {
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  font-size: 12.5px;
+}
+
+.report-row .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-row .meta {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted-fg);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-row.open .row-icon {
+  color: var(--fg);
+}
+
 .hint {
   margin: 4px 8px;
   font-size: 12px;
@@ -685,6 +709,17 @@ button.new-tab {
   color: var(--muted-fg);
 }
 
+/* A report's own web view is laid over this element. */
+.report-host {
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.report-error {
+  padding: 24px;
+  color: var(--muted-fg);
+}
+
 .connect {
   display: flex;
   flex-direction: column;
@@ -738,6 +773,11 @@ button.new-tab {
 .picker-panel p {
   margin: -6px 0 0;
   font-size: 12px;
+}
+
+.picker-panel .open-file {
+  align-self: flex-start;
+  gap: 6px;
 }
 
 .segmented {
@@ -980,6 +1020,12 @@ button.new-tab {
 .tool .name {
   color: color-mix(in srgb, var(--chat-fg) 85%, transparent);
   font: 12px var(--mono);
+}
+
+.tool .open-report {
+  flex: none;
+  gap: 4px;
+  height: 20px;
 }
 
 .plan {

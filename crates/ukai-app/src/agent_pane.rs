@@ -6,16 +6,20 @@
 //! and with it the session.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use ukai_acp::{
     FsRoot, PaneWorkspace, SessionEvent, SessionEvents, SessionHandle, SessionOptions, ToolStatus,
 };
-use ukai_core::{Entry, PaneContent, PaneId, Status, Transcript};
+use ukai_core::report::ReportKind;
+use ukai_core::{Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
 
 use crate::icons::{Icon, Svg};
+use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, ProjectContext, project_context};
+use crate::report_pane::project_relative;
 
 #[derive(Clone)]
 pub struct AgentSession {
@@ -281,7 +285,8 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
 
 #[component]
 fn EntryView(pane: PaneId, entry: Entry) -> Element {
-    let sessions = use_context::<AppSignals>().sessions;
+    let app = use_context::<AppSignals>();
+    let sessions = app.sessions;
     match entry {
         Entry::User { text } => rsx! {
             div { class: "msg user", "{text}" }
@@ -382,15 +387,41 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                 }
             }
         }
-        Entry::FileWritten { path } => rsx! {
-            div { class: "tool done",
-                span { class: "tool-icon" }
-                span { class: "verb", "wrote" }
-                span { class: "name", "{path.display()}" }
+        Entry::FileWritten { path } => {
+            let report = written_report(app, pane, &path);
+            rsx! {
+                div { class: "tool done",
+                    span { class: "tool-icon" }
+                    span { class: "verb", "wrote" }
+                    span { class: "name", "{path.display()}" }
+                    if let Some((project, relative)) = report {
+                        button {
+                            class: "small outline open-report",
+                            title: "Show it in a pane",
+                            onclick: move |_| {
+                                if let Some(target) = launch_target(app) {
+                                    open_report(app, target, &project, relative.clone());
+                                }
+                            },
+                            Svg { icon: Icon::External, size: 12 }
+                            "Open"
+                        }
+                    }
+                }
             }
-        },
+        }
         Entry::Notice { text, error } => rsx! {
             div { class: if error { "notice-line error" } else { "notice-line" }, "{text}" }
         },
     }
+}
+
+/// The project of agent `pane` and `path` relative to its root, when `path`
+/// is a report or image inside it.
+fn written_report(app: AppSignals, pane: PaneId, path: &Path) -> Option<(ProjectId, PathBuf)> {
+    ReportKind::of(path)?;
+    let project = app.layout.peek().content(pane)?.project()?.clone();
+    let root = app.projects.peek().get(&project)?.root.clone();
+    let relative = project_relative(&root, path)?;
+    Some((project, relative))
 }

@@ -618,6 +618,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2446,6 +2456,19 @@ dependencies = [
  "windows-sys 0.59.0",
  "x11rb",
  "xkeysym",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -6518,12 +6541,14 @@ dependencies = [
  "ukai-config",
  "ukai-core",
  "uuid",
+ "webbrowser",
 ]
 
 [[package]]
 name = "ukai-config"
 version = "0.0.0"
 dependencies = [
+ "globset",
  "rstest",
  "serde",
  "tempfile",
@@ -6535,6 +6560,8 @@ dependencies = [
 name = "ukai-core"
 version = "0.0.0"
 dependencies = [
+ "globset",
+ "percent-encoding",
  "proptest",
  "rstest",
  "serde",
@@ -6542,6 +6569,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "ukai-acp",
+ "ukai-config",
 ]
 
 [[package]]

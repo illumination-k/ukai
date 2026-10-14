@@ -6,6 +6,7 @@ mod icons;
 mod layout;
 mod persist;
 mod projects;
+mod report_pane;
 
 use std::path::{Path, PathBuf};
 
