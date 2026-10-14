@@ -41,9 +41,10 @@ jobs:
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
 
       # System libraries the Dioxus desktop renderer links against on Linux,
-      # declared in mise.toml's [bootstrap.packages].
+      # declared in mise.toml's [bootstrap.packages]. `--update` because the
+      # runner image ships stale apt lists, and mise only refreshes empty ones.
       - name: Install webview dependencies
-        run: mise bootstrap packages apply --yes
+        run: mise bootstrap packages apply --yes --update
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
