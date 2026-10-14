@@ -13,7 +13,8 @@ pub use fs::{FsError, FsRoot};
 pub use session::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, FileDiff, PROGRESS_METHOD,
     PermissionChoice, PermissionId, PlanItem, Prompt, PromptCaps, RestoreOutcome, SessionEvent,
-    SessionEvents, SessionHandle, SessionOptions, TURN_STATE_METHOD, ToolStatus, spawn_session,
+    SessionEvents, SessionHandle, SessionOptions, SlashCommand, TURN_STATE_METHOD, ToolStatus,
+    spawn_session,
 };
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig};

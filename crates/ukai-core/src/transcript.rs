@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use ukai_acp::{
     ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome,
-    SessionEvent, ToolStatus,
+    SessionEvent, SlashCommand, ToolStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +67,8 @@ pub struct Transcript {
     pub prompt_caps: PromptCaps,
     /// Settings the agent lets the user change, e.g. model or reasoning effort.
     pub config: Vec<ConfigOption>,
+    /// The slash commands the agent last said it offers.
+    pub commands: Vec<SlashCommand>,
 }
 
 impl Default for Transcript {
@@ -77,6 +79,7 @@ impl Default for Transcript {
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
             config: Vec::new(),
+            commands: Vec::new(),
         }
     }
 }
@@ -292,6 +295,7 @@ impl Transcript {
                     _ => self.entries.push(Entry::Plan { items }),
                 }
             }
+            SessionEvent::Commands { commands } => self.commands = commands,
             SessionEvent::PermissionRequested { id, title, options } => {
                 self.entries.push(Entry::Permission {
                     id,
@@ -569,6 +573,25 @@ mod tests {
             [Entry::Notice { error: true, .. }]
         ));
         assert_eq!(transcript.status, Status::Idle);
+    }
+
+    #[test]
+    fn commands_are_replaced_without_entries() {
+        let command = |name: &str| SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            hint: None,
+        };
+        let transcript = folded([
+            SessionEvent::Commands {
+                commands: vec![command("a"), command("b")],
+            },
+            SessionEvent::Commands {
+                commands: vec![command("c")],
+            },
+        ]);
+        assert_eq!(transcript.commands, vec![command("c")]);
+        assert!(transcript.entries.is_empty());
     }
 
     #[test]

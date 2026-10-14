@@ -1486,6 +1486,51 @@ button.new-tab {
   height: 18px;
 }
 
+.slash-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 26px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.slash-item.selected {
+  background: var(--selected);
+}
+
+.slash-item .name {
+  flex: none;
+  color: var(--chat-strong);
+  font-family: var(--mono);
+}
+
+.slash-item .hint {
+  flex: none;
+  color: var(--muted-fg);
+  font: italic 11.5px var(--mono);
+}
+
+.slash-item .description {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-error {
   padding: 2px 8px;
   color: var(--error);
