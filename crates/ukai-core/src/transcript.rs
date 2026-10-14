@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome, SessionEvent,
-    SlashCommand, ToolStatus,
+    ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome,
+    SessionEvent, SlashCommand, ToolStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +65,8 @@ pub struct Transcript {
     pub entries: Vec<Entry>,
     /// What the agent accepts in a prompt, known once it is ready.
     pub prompt_caps: PromptCaps,
+    /// Settings the agent lets the user change, e.g. model or reasoning effort.
+    pub config: Vec<ConfigOption>,
     /// The slash commands the agent last said it offers.
     pub commands: Vec<SlashCommand>,
 }
@@ -76,6 +78,7 @@ impl Default for Transcript {
             status: Status::Connecting,
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
+            config: Vec::new(),
             commands: Vec::new(),
         }
     }
@@ -176,10 +179,12 @@ impl Transcript {
                 agent,
                 restore,
                 prompt,
+                config,
                 ..
             } => {
                 self.agent = agent;
                 self.prompt_caps = prompt;
+                self.config = config;
                 self.status = Status::Idle;
                 let notice = match restore {
                     RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
@@ -197,6 +202,11 @@ impl Transcript {
                     });
                 }
             }
+            SessionEvent::ConfigChanged { options } => self.config = options,
+            SessionEvent::ConfigFailed { message } => self.entries.push(Entry::Notice {
+                text: format!("could not change the setting: {message}"),
+                error: true,
+            }),
             SessionEvent::UserMessage { text } => match self.entries.last_mut() {
                 Some(Entry::User { text: last, .. }) => last.push_str(&text),
                 _ => self.entries.push(Entry::User {
@@ -351,6 +361,7 @@ mod tests {
             session_id: "s".into(),
             restore,
             prompt: PromptCaps::default(),
+            config: Vec::new(),
         }
     }
 
@@ -521,8 +532,47 @@ mod tests {
             session_id: "s".into(),
             restore: RestoreOutcome::Fresh,
             prompt: caps,
+            config: Vec::new(),
         }]);
         assert_eq!(transcript.prompt_caps, caps);
+    }
+
+    fn effort(current: &str) -> ConfigOption {
+        ConfigOption {
+            id: "effort".into(),
+            name: "Effort".into(),
+            description: None,
+            category: Some("thought_level".into()),
+            value: ukai_acp::ConfigValue::Select {
+                current: current.into(),
+                choices: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn config_follows_ready_and_updates_and_failures_leave_it() {
+        let mut transcript = folded([SessionEvent::Ready {
+            agent: None,
+            session_id: "s".into(),
+            restore: RestoreOutcome::Fresh,
+            prompt: PromptCaps::default(),
+            config: vec![effort("low")],
+        }]);
+        assert_eq!(transcript.config, [effort("low")]);
+        transcript.apply(SessionEvent::ConfigChanged {
+            options: vec![effort("high")],
+        });
+        assert_eq!(transcript.config, [effort("high")]);
+        transcript.apply(SessionEvent::ConfigFailed {
+            message: "no".into(),
+        });
+        assert_eq!(transcript.config, [effort("high")]);
+        assert!(matches!(
+            transcript.entries.as_slice(),
+            [Entry::Notice { error: true, .. }]
+        ));
+        assert_eq!(transcript.status, Status::Idle);
     }
 
     #[test]

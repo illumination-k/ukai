@@ -1376,6 +1376,47 @@ button.new-tab {
   font-size: 11px;
 }
 
+/* The agent's own settings (model, reasoning effort, mode) next to attach. */
+.composer-config {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.config-select {
+  max-width: 160px;
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted-fg);
+  font: inherit;
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.config-select:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.config-select:focus-visible {
+  border-color: var(--ring);
+  outline: none;
+}
+
+.config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-fg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* Dropped files, line comments, and attach errors waiting for the next send. */
 .composer-card.dropping {
   border-color: var(--unread);
