@@ -6,6 +6,11 @@
 //! entry holding it, else the file's own directory. So `../img/plot.png`
 //! works inside a reports tree, and nothing outside it is reachable — after
 //! resolving symlinks, as with ACP `fs/*`.
+//!
+//! An agent working in a pod writes its reports there, not on this machine
+//! (`ukai-relay` advertises no `fs/*` capability). [`ReportTree`] is that
+//! case: the relay serves the whole reports tree by project-relative path
+//! and the gateway proxies it, confined to the `reports.dirs` the same way.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
@@ -17,7 +22,13 @@ use ukai_config::Reports;
 pub const MAX_LISTED: usize = 500;
 
 /// Query that asks [`ReportFile::serve`] for the page framing an image.
-const IMAGE_VIEW_QUERY: &str = "ukai-view";
+pub const IMAGE_VIEW_QUERY: &str = "ukai-view";
+
+/// What a report may load when the project does not allow it the network:
+/// its own origin, inline code, and `data:`/`blob:` URLs. Whatever serves a
+/// report — a file on this machine or a pod through the gateway — sends it.
+pub const CONFINED_CSP: &str = "default-src 'self' ukai-report: data: blob: 'unsafe-inline' \
+                                'unsafe-eval'; form-action 'none'; base-uri 'self'";
 
 /// What a pane can render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,9 +64,26 @@ pub enum ReportError {
     Unsupported(PathBuf),
 }
 
+/// One listed report, with when it last changed so a client following the
+/// listing can tell that it was rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// Relative to the project root.
+    pub path: PathBuf,
+    pub modified: SystemTime,
+}
+
 /// Files under `reports.dirs` matching `reports.globs`, relative to `root`,
 /// newest first. Hidden directories are skipped; unreadable ones are too.
 pub fn list(root: &Path, reports: &Reports) -> Vec<PathBuf> {
+    list_detailed(root, reports)
+        .into_iter()
+        .map(|listed| listed.path)
+        .collect()
+}
+
+/// [`list`], keeping each file's modification time.
+pub fn list_detailed(root: &Path, reports: &Reports) -> Vec<Listed> {
     let mut builder = globset::GlobSetBuilder::new();
     for glob in &reports.globs {
         // Validation reports bad globs; here they just match nothing.
@@ -96,7 +124,10 @@ pub fn list(root: &Path, reports: &Reports) -> Vec<PathBuf> {
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found.dedup_by(|a, b| a.1 == b.1);
-    found.into_iter().map(|(_, path)| path).collect()
+    found
+        .into_iter()
+        .map(|(modified, path)| Listed { path, modified })
+        .collect()
 }
 
 /// One report, ready to be served to its web view.
@@ -116,6 +147,10 @@ pub struct Reply {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// A validator that changes whenever the file does, for an HTTP `ETag`
+    /// when the reply is served over the network. `None` for generated pages
+    /// and for errors.
+    pub etag: Option<String>,
 }
 
 impl ReportFile {
@@ -182,10 +217,7 @@ impl ReportFile {
     /// The `Content-Security-Policy` for every response: same-origin loads
     /// (plus inline code and `data:`/`blob:` URLs) unless `allow_network`.
     pub fn content_security_policy(&self) -> Option<&'static str> {
-        (!self.allow_network).then_some(
-            "default-src 'self' ukai-report: data: blob: 'unsafe-inline' 'unsafe-eval'; \
-             form-action 'none'; base-uri 'self'",
-        )
+        (!self.allow_network).then_some(CONFINED_CSP)
     }
 
     /// Answer a request for `path_and_query` (the URL after the authority).
@@ -198,37 +230,16 @@ impl ReportFile {
             return Reply::status(403);
         };
         if query == IMAGE_VIEW_QUERY && file == self.file && self.kind == ReportKind::Image {
-            return Reply {
-                status: 200,
-                content_type: "text/html; charset=utf-8",
-                body: image_page(&self.file).into_bytes(),
-            };
+            return Reply::page(image_page(&self.file));
         }
-        match std::fs::read(&file) {
-            Ok(body) => Reply {
-                status: 200,
-                content_type: content_type(&file),
-                body,
-            },
-            Err(_) => Reply::status(404),
-        }
+        Reply::file(&file)
     }
 
     /// The file a URL path names, if it lies inside the base. `None` for
     /// traversal attempts and escapes through symlinks; a missing file
     /// resolves to a path that then fails to read.
     fn resolve(&self, path: &str) -> Option<PathBuf> {
-        let decoded = percent_decode_str(path).decode_utf8().ok()?;
-        let mut file = self.base.clone();
-        for segment in decoded.split('/').filter(|s| !s.is_empty()) {
-            let mut components = Path::new(segment).components();
-            match (components.next(), components.next()) {
-                (Some(Component::Normal(name)), None) if !segment.contains('\\') => {
-                    file.push(name);
-                }
-                _ => return None,
-            }
-        }
+        let file = join(&self.base, path)?;
         match file.canonicalize() {
             Ok(resolved) => resolved.starts_with(&self.base).then_some(resolved),
             Err(_) => Some(file),
@@ -236,14 +247,135 @@ impl ReportFile {
     }
 }
 
+/// The reports of one project tree, served by project-relative path.
+///
+/// Where [`ReportFile`] is one report opened for one pane, this is every
+/// report of a checkout a client cannot read itself: `ukai-relay` answers
+/// the gateway's report requests from it. A request is served only if it
+/// resolves inside one of the `reports.dirs` — the base a report's relative
+/// assets may reach — so a path that leaves one through `..` or a symlink is
+/// refused even though it stays in the project.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportTree {
+    root: PathBuf,
+    /// Canonical `reports.dirs` inside the root; a request must land in one.
+    bases: Vec<PathBuf>,
+    reports: Reports,
+}
+
+impl ReportTree {
+    /// The tree at `root`. `Err` only if the root itself cannot be resolved;
+    /// a configuration without `reports.dirs` opens and serves nothing.
+    pub fn open(root: &Path, reports: &Reports) -> Result<Self, ReportError> {
+        let root = root.canonicalize().map_err(|source| ReportError::Io {
+            path: root.to_owned(),
+            source,
+        })?;
+        let bases = reports
+            .dirs
+            .iter()
+            .filter_map(|dir| root.join(dir).canonicalize().ok())
+            .filter(|dir| dir.starts_with(&root))
+            .collect();
+        Ok(Self {
+            root,
+            bases,
+            reports: reports.clone(),
+        })
+    }
+
+    /// The reports to offer, newest first, as [`list_detailed`].
+    pub fn list(&self) -> Vec<Listed> {
+        list_detailed(&self.root, &self.reports)
+    }
+
+    /// Answer a request for a project-relative URL path. 403 for anything
+    /// outside the report directories, 404 for a file that is not there.
+    pub fn serve(&self, path: &str) -> Reply {
+        match self.resolve(path) {
+            Some(file) => Reply::file(&file),
+            None => Reply::status(403),
+        }
+    }
+
+    /// The file a URL path names, if it lies inside one of the bases. `None`
+    /// for traversal attempts and escapes through symlinks; a missing file
+    /// resolves to a path that then fails to read.
+    fn resolve(&self, path: &str) -> Option<PathBuf> {
+        let file = join(&self.root, path)?;
+        let inside = |path: &Path| self.bases.iter().any(|base| path.starts_with(base));
+        match file.canonicalize() {
+            Ok(resolved) => inside(&resolved).then_some(resolved),
+            Err(_) => inside(&file).then_some(file),
+        }
+    }
+}
+
 impl Reply {
+    /// The contents of `file`, or 404 when it cannot be read.
+    fn file(file: &Path) -> Self {
+        match std::fs::read(file) {
+            Ok(body) => Self {
+                status: 200,
+                content_type: content_type(file),
+                etag: etag(file, body.len()),
+                body,
+            },
+            Err(_) => Self::status(404),
+        }
+    }
+
+    /// A page generated here rather than read from the tree.
+    fn page(html: String) -> Self {
+        Self {
+            status: 200,
+            content_type: "text/html; charset=utf-8",
+            body: html.into_bytes(),
+            etag: None,
+        }
+    }
+
     fn status(status: u16) -> Self {
         Self {
             status,
             content_type: "text/plain; charset=utf-8",
             body: Vec::new(),
+            etag: None,
         }
     }
+}
+
+/// A validator of `file`'s contents: its modification time and length. Both
+/// change when an agent rewrites a report; neither reveals anything the
+/// contents do not.
+fn etag(file: &Path, len: usize) -> Option<String> {
+    let modified = std::fs::metadata(file)
+        .and_then(|meta| meta.modified())
+        .ok()?;
+    let since_epoch = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some(format!(
+        "{}.{:09}-{len}",
+        since_epoch.as_secs(),
+        since_epoch.subsec_nanos()
+    ))
+}
+
+/// `base` with the segments of a URL `path` appended, or `None` if a segment
+/// is anything but a plain name (`..`, an absolute path, a Windows
+/// separator). Percent-encoding is decoded first, so `%2e%2e` is refused too.
+fn join(base: &Path, path: &str) -> Option<PathBuf> {
+    let decoded = percent_decode_str(path).decode_utf8().ok()?;
+    let mut file = base.to_owned();
+    for segment in decoded.split('/').filter(|s| !s.is_empty()) {
+        let mut components = Path::new(segment).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) if !segment.contains('\\') => {
+                file.push(name);
+            }
+            _ => return None,
+        }
+    }
+    Some(file)
 }
 
 /// Characters escaped in a URL path segment.
@@ -262,7 +394,7 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'\\');
 
 /// `/`-joined, percent-encoded URL path of a relative file path.
-fn url_path(relative: &Path) -> String {
+pub fn url_path(relative: &Path) -> String {
     relative
         .components()
         .map(|c| utf8_percent_encode(&c.as_os_str().to_string_lossy(), SEGMENT).to_string())
@@ -273,8 +405,24 @@ fn url_path(relative: &Path) -> String {
         })
 }
 
+/// Whether a URL path from a web view names `relative`, however it was
+/// encoded: a view may send back `%E3%82%B0` or the character itself.
+pub fn is_url_path(path: &str, relative: &Path) -> bool {
+    let decode = |path: &str| {
+        percent_decode_str(path)
+            .decode_utf8()
+            .ok()
+            .map(String::from)
+    };
+    match (decode(path), decode(&url_path(relative))) {
+        (Some(asked), Some(named)) => asked == named,
+        _ => false,
+    }
+}
+
 /// A page showing one image fitted to the view; a click toggles actual size.
-fn image_page(file: &Path) -> String {
+/// The image is loaded by name, so the page works wherever it is served from.
+pub fn image_page(file: &Path) -> String {
     let name = file
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

@@ -10,6 +10,7 @@ use ukai_config::Config;
 use ukai_core::{Layout, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
+use crate::remote_reports::Listings;
 
 /// Locations resolved at startup.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +32,9 @@ pub struct AppSignals {
     pub configs: Configs,
     pub layout: Signal<Layout>,
     pub sessions: Sessions,
+    /// What each gateway workspace last listed, kept by
+    /// [`crate::remote_reports::Follow`].
+    pub reports: Listings,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
 }

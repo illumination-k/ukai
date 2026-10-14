@@ -7,11 +7,12 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
-use ukai_core::{Direction, PaneContent, PaneId, ProjectId, keymap, palette, report};
+use ukai_core::{Direction, PaneContent, PaneId, ProjectId, ReportSource, keymap, palette, report};
 
 use crate::icons::{Icon, Svg};
 use crate::layout::{close_pane, launch_agent, launch_target, open_report, pane_label};
 use crate::projects::{AppSignals, Paths, pick_and_add_project, project_context};
+use crate::remote_reports::Listing;
 use crate::shortcuts::Shortcuts;
 
 /// Rows shown at once; the query narrows the rest.
@@ -21,7 +22,7 @@ const LIMIT: usize = 50;
 enum Action {
     Focus(PaneId),
     Launch(ProjectId, String),
-    Report(ProjectId, PathBuf),
+    Report(ProjectId, PathBuf, ReportSource),
     NewTab,
     Split(Direction),
     ClosePane,
@@ -80,9 +81,27 @@ fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
                     kind: "Open report",
                     label: path.display().to_string(),
                     detail: project.name(),
-                    action: Action::Report(project.id.clone(), path),
+                    action: Action::Report(project.id.clone(), path, ReportSource::Project),
                 });
             }
+        }
+    }
+    // What the gateway agents' workspaces last listed; `remote_reports`
+    // keeps it, so the palette does not wait on the network to open.
+    for (workspace, listing) in app.reports.peek().iter() {
+        let Listing::Reports(paths) = listing else {
+            continue;
+        };
+        let project = projects
+            .get(&workspace.project)
+            .map_or_else(|| workspace.project.to_string(), |project| project.name());
+        for path in paths {
+            items.push(Item {
+                kind: "Open report",
+                label: path.display().to_string(),
+                detail: format!("{project} · {}", workspace.label()),
+                action: Action::Report(workspace.project.clone(), path.clone(), workspace.source()),
+            });
         }
     }
     let command = |label: &str, action, shortcut: Option<keymap::Action>| Item {
@@ -121,9 +140,9 @@ fn perform(app: AppSignals, paths: &Paths, action: Action) {
     match action {
         Action::Focus(pane) => layout.write().focus(pane),
         Action::Launch(project, agent) => launch_agent(app, &project, &agent),
-        Action::Report(project, path) => {
+        Action::Report(project, path, source) => {
             if let Some(pane) = launch_target(app) {
-                open_report(app, pane, &project, path);
+                open_report(app, pane, &project, path, source);
             }
         }
         Action::NewTab => {

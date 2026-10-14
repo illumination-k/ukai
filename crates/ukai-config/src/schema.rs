@@ -70,7 +70,7 @@ pub enum AgentSpec {
 }
 
 /// Where a gateway agent's pane works.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceScope {
     /// The pod and checkout every pane of this agent shares.

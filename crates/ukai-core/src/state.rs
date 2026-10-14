@@ -159,9 +159,11 @@ pub fn save(path: &Path, state: &AppState) -> Result<(), StateError> {
 mod tests {
     use rstest::{fixture, rstest};
     use tempfile::TempDir;
+    use ukai_acp::{PaneWorkspace, WorkspaceScope};
 
     use super::*;
     use crate::Direction;
+    use crate::layout::ReportSource;
 
     #[fixture]
     fn dir() -> TempDir {
@@ -200,6 +202,49 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn reads_report_panes_saved_without_a_source() {
+        // Before gateway agents served reports every report pane read the
+        // project, which is what such a file still means.
+        let content: Result<PaneContent, _> =
+            serde_json::from_str(r#"{"kind":"report","project":"p1","path":"reports/run.html"}"#);
+        assert!(
+            matches!(&content, Ok(PaneContent::Report { source, .. }) if source.is_project()),
+            "{content:?}"
+        );
+    }
+
+    #[test]
+    fn a_report_of_a_gateway_workspace_round_trips() {
+        let mut projects = Projects::default();
+        let project = projects.add(Path::new("/work/ukai"));
+        let content = PaneContent::Report {
+            project: project.clone(),
+            path: PathBuf::from("reports/run.html"),
+            source: ReportSource::Agent {
+                agent: "claude".into(),
+                workspace: Some(PaneWorkspace {
+                    key: "k1".into(),
+                    scope: WorkspaceScope::Pod,
+                }),
+            },
+        };
+        let json = serde_json::to_string(&content).unwrap_or_default();
+        assert_eq!(
+            serde_json::from_str::<PaneContent>(&json).ok(),
+            Some(content)
+        );
+        // A project report says nothing about its source.
+        let plain = PaneContent::Report {
+            project,
+            path: PathBuf::from("reports/run.html"),
+            source: ReportSource::Project,
+        };
+        let json = serde_json::to_string(&plain).unwrap_or_default();
+        assert!(!json.contains("source"), "{json}");
+        assert_eq!(serde_json::from_str::<PaneContent>(&json).ok(), Some(plain));
     }
 
     #[rstest]

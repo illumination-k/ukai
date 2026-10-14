@@ -93,7 +93,9 @@ pub struct Hub {
 impl Hub {
     /// A hub and the `initialize` it sends the agent. The relay offers the
     /// agent no client capabilities: `fs/*` and terminals would have to reach
-    /// a client that may not be there.
+    /// a client that may not be there, and an agent's edits belong in the
+    /// checkout it works in. What it writes there is read back over HTTP
+    /// instead (see [`crate::reports`]).
     pub fn new(cwd: Option<String>) -> (Self, Vec<Output>) {
         let mut hub = Self {
             cwd,
