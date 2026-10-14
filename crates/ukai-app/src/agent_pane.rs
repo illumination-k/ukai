@@ -13,11 +13,12 @@ use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
     Attachment, FileDiff, FsRoot, PaneWorkspace, Prompt, SessionEvent, SessionEvents,
-    SessionHandle, SessionOptions, ToolStatus,
+    SessionHandle, SessionOptions, SlashCommand, ToolStatus,
 };
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
+use ukai_core::slash;
 use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
 
 use crate::alert;
@@ -246,6 +247,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     } = composer;
     let status = transcript.read().status.clone();
     let mut dropping = use_signal(|| false);
+    // The highlighted slash command, and whether escape hid the list.
+    let mut picked = use_signal(|| 0_usize);
+    let mut dismissed = use_signal(|| false);
 
     let mut send = {
         let handle = handle.clone();
@@ -289,6 +293,16 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         (false, false) => "composer-card disabled",
     };
     let send_hint = shortcuts.keymap.hint(Action::Send);
+    let commands: Vec<SlashCommand> = if writable && !dismissed() {
+        slash::suggestions(&draft.read(), &transcript.read().commands)
+            .into_iter()
+            .take(MAX_SUGGESTIONS)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let current = picked().min(commands.len().saturating_sub(1));
     let stop_title = shortcuts.title("Stop", Action::Stop);
 
     rsx! {
@@ -387,21 +401,69 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 if let Some(message) = error() {
                     div { class: "composer-error", "{message}" }
                 }
+                if !commands.is_empty() {
+                    div { class: "slash-list",
+                        for (index, command) in commands.iter().enumerate() {
+                            div {
+                                key: "{command.name}",
+                                class: if index == current { "slash-item selected" } else { "slash-item" },
+                                onmouseenter: move |_| picked.set(index),
+                                // Keep the focus in the textarea.
+                                onmousedown: move |event| event.prevent_default(),
+                                onclick: {
+                                    let command = command.clone();
+                                    move |_| {
+                                        draft.set(slash::completion(&command));
+                                        picked.set(0);
+                                    }
+                                },
+                                span { class: "name", "/{command.name}" }
+                                if let Some(hint) = &command.hint {
+                                    span { class: "hint", "{hint}" }
+                                }
+                                span { class: "description", "{command.description}" }
+                            }
+                        }
+                    }
+                }
                 textarea {
                     rows: "2",
                     placeholder: match status {
-                        Status::Idle => "Message the agent — drop files or images here",
+                        Status::Idle => "Message the agent — / for commands, drop files or images here",
                         Status::Busy => "Waiting for the agent…",
                         Status::Connecting => "Connecting…",
                         Status::Closed { .. } => "Disconnected",
                     },
                     disabled: !writable,
                     value: "{draft}",
-                    oninput: move |event| draft.set(event.value()),
+                    oninput: move |event| {
+                        draft.set(event.value());
+                        picked.set(0);
+                        dismissed.set(false);
+                    },
                     onkeydown: {
                         let shortcuts = shortcuts.clone();
                         move |event: KeyboardEvent| {
-                            if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
+                            if !commands.is_empty() && !event.is_composing() {
+                                let len = commands.len() as isize;
+                                match event.key() {
+                                    Key::ArrowDown => {
+                                        picked.set((current as isize + 1).rem_euclid(len) as usize);
+                                    }
+                                    Key::ArrowUp => {
+                                        picked.set((current as isize - 1).rem_euclid(len) as usize);
+                                    }
+                                    Key::Tab | Key::Enter => {
+                                        draft.set(slash::completion(&commands[current]));
+                                        picked.set(0);
+                                    }
+                                    // Not the app's: escape here only hides the list.
+                                    Key::Escape => dismissed.set(true),
+                                    _ => return,
+                                }
+                                event.prevent_default();
+                                event.stop_propagation();
+                            } else if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
                                 event.prevent_default();
                                 event.stop_propagation();
                                 send();
@@ -443,6 +505,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         }
     }
 }
+
+/// Slash commands listed at once while completing.
+const MAX_SUGGESTIONS: usize = 8;
 
 /// Add the file at `path` to the next prompt, in the form the agent accepts.
 fn attach(composer: Composer, transcript: Signal<Transcript>, path: &Path, bytes: Vec<u8>) {

@@ -74,14 +74,14 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate          | kind      | 役割                                                                                                                                                                                                             |
-| -------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                             |
-| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                               |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、差分とレビュー `review`、添付 `attachment`、パレットの照合 `palette`）。UI フレームワークに依存しない。 |
-| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                            |
-| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                  |
-| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                           |
+| crate          | kind      | 役割                                                                                                                                                                                                                                               |
+| -------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                               |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                                                                 |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、差分とレビュー `review`、添付 `attachment`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`）。UI フレームワークに依存しない。 |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                              |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                    |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                             |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -120,7 +120,7 @@ ukai は ACP の "Client" なので、エージェントからの要求に応え
 ### イベント正規化
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
-`Preparing` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` /
+`Preparing` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
 `PermissionRequested` / `FileWritten` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
 UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission`）で操作する。
@@ -128,6 +128,8 @@ UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission`）で�
 - `Ready` はエージェントの `promptCapabilities`（`image` / `embeddedContext`）を `PromptCaps` として運ぶ。
 - `ToolCall` / `ToolCallUpdate` はツール呼び出しの `content` のうち `diff`（パス・変更前・変更後）を `FileDiff` として運ぶ。
   更新に `content` があれば差分を置き換え、なければ残す。
+- `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、
+  届くたびに前の一覧を置き換える。ACP にコマンド実行の専用メソッドはなく、`/name 入力` で始まる prompt がそれになる。
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
   `PromptCaps` を見て決める（`ukai_core::attachment`）: 画像は `image`（8 MiB まで、非対応なら添付を断る）、
   `embeddedContext` があれば 256 KiB 以下の UTF-8 テキストは `resource` に埋め込み、それ以外は `resource_link`
@@ -422,6 +424,9 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと 📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には
   添付のファイル名を出す。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
+- **スラッシュコマンド。** 下書きが `/` と名前の途中だけのとき、エージェントが `Commands` で知らせたコマンドを
+  あいまい一致（`palette` と同じ照合）で入力欄の上に出す。↑↓ で選び、Tab / Enter で `/name` に置き換え、
+  Escape で閉じる。送るのは普通の prompt で、relay は `session/update` として記録するので `session/load` で一覧も戻る。
 - 会話は最大幅 46rem で中央寄せ。ユーザー発言は右寄せの淡いバブル、エージェント発言は地のまま、ツール呼び出しは
   1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。ターン中も次の発言を書いておけて、
   送信はターンが終わってから。
@@ -442,14 +447,14 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 
 ## Milestones
 
-| Phase | 内容                                                                                                                                                           |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル     |
-| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み |
-| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                           |
-| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付（済み）。リサイズ             |
-| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                    |
-| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                |
+| Phase | 内容                                                                                                                                                                   |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル             |
+| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み         |
+| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                   |
+| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド（済み）。リサイズ |
+| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                            |
+| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                        |
 
 ## Open questions
 
