@@ -112,101 +112,30 @@ impl Transcript {
 
     pub fn apply(&mut self, event: SessionEvent) {
         match event {
-            SessionEvent::Preparing { message } => self.entries.push(Entry::Notice {
-                text: message,
-                error: false,
-            }),
+            SessionEvent::Preparing { message } => self.notice(message, false),
             SessionEvent::TurnRunning => self.status = Status::Busy,
             SessionEvent::Ready { agent, restore, .. } => {
                 self.agent = agent;
                 self.status = Status::Idle;
-                let notice = match restore {
-                    RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
-                    RestoreOutcome::Resumed => {
-                        Some("session resumed; earlier messages were not replayed")
-                    }
-                    RestoreOutcome::Unsupported => {
-                        Some("this agent cannot restore sessions; started a new one")
-                    }
-                };
-                if let Some(text) = notice {
-                    self.entries.push(Entry::Notice {
-                        text: text.to_owned(),
-                        error: false,
-                    });
+                if let Some(text) = restore_notice(restore) {
+                    self.notice(text, false);
                 }
             }
-            SessionEvent::UserMessage { text } => match self.entries.last_mut() {
-                Some(Entry::User { text: last }) => last.push_str(&text),
-                _ => self.entries.push(Entry::User { text }),
-            },
-            SessionEvent::AgentMessage { text } => match self.entries.last_mut() {
-                Some(Entry::Agent { text: last }) => last.push_str(&text),
-                _ => self.entries.push(Entry::Agent { text }),
-            },
-            SessionEvent::AgentThought { text } => match self.entries.last_mut() {
-                Some(Entry::Thought { text: last }) => last.push_str(&text),
-                _ => self.entries.push(Entry::Thought { text }),
-            },
+            SessionEvent::UserMessage { text } => self.stream(text, |text| Entry::User { text }),
+            SessionEvent::AgentMessage { text } => self.stream(text, |text| Entry::Agent { text }),
+            SessionEvent::AgentThought { text } => {
+                self.stream(text, |text| Entry::Thought { text });
+            }
             SessionEvent::ToolCall {
                 id,
                 title,
                 kind,
                 status,
-            } => match self.tool_mut(&id) {
-                Some(Entry::Tool {
-                    title: t,
-                    kind: k,
-                    status: s,
-                    ..
-                }) => {
-                    *t = title;
-                    *k = kind;
-                    *s = status;
-                }
-                _ => self.entries.push(Entry::Tool {
-                    id,
-                    title,
-                    kind,
-                    status,
-                }),
-            },
-            SessionEvent::ToolCallUpdate { id, title, status } => match self.tool_mut(&id) {
-                Some(Entry::Tool {
-                    title: t,
-                    status: s,
-                    ..
-                }) => {
-                    if let Some(title) = title {
-                        *t = title;
-                    }
-                    if let Some(status) = status {
-                        *s = status;
-                    }
-                }
-                // An update for a call we never saw: show it rather than drop it.
-                _ => self.entries.push(Entry::Tool {
-                    title: title.unwrap_or_else(|| id.clone()),
-                    id,
-                    kind: "other".to_owned(),
-                    status: status.unwrap_or(ToolStatus::Pending),
-                }),
-            },
-            SessionEvent::Plan { entries: items } => {
-                // One plan per turn: later plans replace the earlier one in place.
-                let turn_start = self
-                    .entries
-                    .iter()
-                    .rposition(|entry| matches!(entry, Entry::User { .. }))
-                    .map_or(0, |index| index + 1);
-                match self.entries[turn_start..]
-                    .iter_mut()
-                    .find(|entry| matches!(entry, Entry::Plan { .. }))
-                {
-                    Some(Entry::Plan { items: current }) => *current = items,
-                    _ => self.entries.push(Entry::Plan { items }),
-                }
+            } => self.tool_call(id, title, kind, status),
+            SessionEvent::ToolCallUpdate { id, title, status } => {
+                self.tool_call_update(id, title, status);
             }
+            SessionEvent::Plan { entries: items } => self.plan(items),
             SessionEvent::PermissionRequested { id, title, options } => {
                 self.entries.push(Entry::Permission {
                     id,
@@ -218,29 +147,101 @@ impl Transcript {
             SessionEvent::FileWritten { path } => self.entries.push(Entry::FileWritten { path }),
             SessionEvent::TurnEnded { stop_reason } => {
                 if stop_reason != "end_turn" {
-                    self.entries.push(Entry::Notice {
-                        text: format!("turn ended: {stop_reason}"),
-                        error: false,
-                    });
+                    self.notice(format!("turn ended: {stop_reason}"), false);
                 }
                 self.status = Status::Idle;
             }
             SessionEvent::PromptFailed { message } => {
-                self.entries.push(Entry::Notice {
-                    text: message,
-                    error: true,
-                });
+                self.notice(message, true);
                 self.status = Status::Idle;
             }
             SessionEvent::Closed { error } => {
                 if let Some(error) = &error {
-                    self.entries.push(Entry::Notice {
-                        text: format!("disconnected: {error}"),
-                        error: true,
-                    });
+                    self.notice(format!("disconnected: {error}"), true);
                 }
                 self.status = Status::Closed { error };
             }
+        }
+    }
+
+    fn notice(&mut self, text: impl Into<String>, error: bool) {
+        self.entries.push(Entry::Notice {
+            text: text.into(),
+            error,
+        });
+    }
+
+    /// Append a streamed chunk to the last entry if it is of the same kind,
+    /// or start a new entry with it.
+    fn stream(&mut self, chunk: String, wrap: fn(String) -> Entry) {
+        match (self.entries.last_mut(), wrap(chunk)) {
+            (Some(Entry::User { text }), Entry::User { text: chunk })
+            | (Some(Entry::Agent { text }), Entry::Agent { text: chunk })
+            | (Some(Entry::Thought { text }), Entry::Thought { text: chunk }) => {
+                text.push_str(&chunk);
+            }
+            (_, entry) => self.entries.push(entry),
+        }
+    }
+
+    fn tool_call(&mut self, id: String, title: String, kind: String, status: ToolStatus) {
+        match self.tool_mut(&id) {
+            Some(Entry::Tool {
+                title: t,
+                kind: k,
+                status: s,
+                ..
+            }) => {
+                *t = title;
+                *k = kind;
+                *s = status;
+            }
+            _ => self.entries.push(Entry::Tool {
+                id,
+                title,
+                kind,
+                status,
+            }),
+        }
+    }
+
+    fn tool_call_update(&mut self, id: String, title: Option<String>, status: Option<ToolStatus>) {
+        match self.tool_mut(&id) {
+            Some(Entry::Tool {
+                title: t,
+                status: s,
+                ..
+            }) => {
+                if let Some(title) = title {
+                    *t = title;
+                }
+                if let Some(status) = status {
+                    *s = status;
+                }
+            }
+            // An update for a call we never saw: show it rather than drop it.
+            _ => self.entries.push(Entry::Tool {
+                title: title.unwrap_or_else(|| id.clone()),
+                id,
+                kind: "other".to_owned(),
+                status: status.unwrap_or(ToolStatus::Pending),
+            }),
+        }
+    }
+
+    /// One plan per turn: later plans replace the earlier one in place.
+    fn plan(&mut self, items: Vec<PlanItem>) {
+        let turn_start = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::User { .. }))
+            .map_or(0, |index| index + 1);
+        match self.entries[turn_start..]
+            .iter_mut()
+            .find(|entry| matches!(entry, Entry::Plan { .. }))
+        {
+            Some(Entry::Plan { items: current }) => *current = items,
+            _ => self.entries.push(Entry::Plan { items }),
         }
     }
 
@@ -249,6 +250,16 @@ impl Transcript {
             .iter_mut()
             .rev()
             .find(|entry| matches!(entry, Entry::Tool { id: tid, .. } if tid == id))
+    }
+}
+
+fn restore_notice(restore: RestoreOutcome) -> Option<&'static str> {
+    match restore {
+        RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
+        RestoreOutcome::Resumed => Some("session resumed; earlier messages were not replayed"),
+        RestoreOutcome::Unsupported => {
+            Some("this agent cannot restore sessions; started a new one")
+        }
     }
 }
 

@@ -21,6 +21,7 @@ use std::time::Duration;
 use dioxus::desktop::wry::dpi::{LogicalPosition, LogicalSize};
 use dioxus::desktop::wry::http::{Request, Response, header};
 use dioxus::desktop::wry::{NewWindowResponse, Rect, WebView, WebViewBuilder};
+use dioxus::html::geometry::PixelsRect;
 use dioxus::prelude::*;
 use ukai_core::report::{self, ReportFile};
 use ukai_core::{PaneContent, PaneId, ProjectId};
@@ -68,72 +69,14 @@ pub fn ReportView(pane: PaneId, project: ProjectId, path: PathBuf) -> Element {
 fn ReportSurface(report: ReportFile) -> Element {
     let view = use_hook(|| Rc::new(RefCell::new(None::<WebView>)));
     let mut host = use_signal(|| None::<Rc<MountedData>>);
-    let mut failure = use_signal(|| None::<String>);
+    let failure = use_signal(|| None::<String>);
 
     use_drop({
         let view = view.clone();
         move || drop(view.borrow_mut().take())
     });
 
-    use_future({
-        let view = view.clone();
-        let report = report.clone();
-        move || {
-            let view = view.clone();
-            let report = report.clone();
-            async move {
-                let window = dioxus::desktop::window();
-                let mut placed = None;
-                let mut modified = report.modified();
-                loop {
-                    let element = host.peek().clone();
-                    if let Some(element) = element
-                        && let Ok(rect) = element.get_client_rect().await
-                    {
-                        let window_size = window.window.inner_size();
-                        let key = (
-                            rect.origin.x,
-                            rect.origin.y,
-                            rect.size.width,
-                            rect.size.height,
-                            window_size,
-                        );
-                        if placed != Some(key) {
-                            placed = Some(key);
-                            let bounds = Rect {
-                                position: LogicalPosition::new(rect.origin.x, rect.origin.y).into(),
-                                size: LogicalSize::new(rect.size.width, rect.size.height).into(),
-                            };
-                            let visible = rect.size.width > 0.0 && rect.size.height > 0.0;
-                            let mut slot = view.borrow_mut();
-                            match slot.as_ref() {
-                                Some(webview) => {
-                                    let _ = webview.set_bounds(bounds);
-                                    let _ = webview.set_visible(visible);
-                                }
-                                None => match build(&report, bounds, &window.window) {
-                                    Ok(webview) => *slot = Some(webview),
-                                    Err(error) => {
-                                        tracing::warn!(%error, "cannot open a report view");
-                                        failure.set(Some(error.to_string()));
-                                        return;
-                                    }
-                                },
-                            }
-                        }
-                    }
-                    let now = report.modified();
-                    if now != modified {
-                        modified = now;
-                        if let Some(webview) = view.borrow().as_ref() {
-                            let _ = webview.reload();
-                        }
-                    }
-                    tokio::time::sleep(POLL).await;
-                }
-            }
-        }
-    });
+    use_future(move || follow(view.clone(), report.clone(), host, failure));
 
     rsx! {
         div {
@@ -144,6 +87,65 @@ fn ReportSurface(report: ReportFile) -> Element {
             }
         }
     }
+}
+
+/// Keep the child view over `host` and reload it when the report changes,
+/// until the view cannot be opened.
+async fn follow(
+    view: Rc<RefCell<Option<WebView>>>,
+    report: ReportFile,
+    host: Signal<Option<Rc<MountedData>>>,
+    mut failure: Signal<Option<String>>,
+) {
+    let window = dioxus::desktop::window();
+    let mut placed = None;
+    let mut modified = report.modified();
+    loop {
+        let element = host.peek().clone();
+        if let Some(element) = element
+            && let Ok(rect) = element.get_client_rect().await
+        {
+            let key = Some((rect, window.window.inner_size()));
+            if placed != key {
+                placed = key;
+                if let Err(error) = place(&view, &report, rect, &window.window) {
+                    tracing::warn!(%error, "cannot open a report view");
+                    failure.set(Some(error.to_string()));
+                    return;
+                }
+            }
+        }
+        let now = report.modified();
+        if now != modified {
+            modified = now;
+            if let Some(webview) = view.borrow().as_ref() {
+                let _ = webview.reload();
+            }
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Move the child view over `rect`, opening it the first time.
+fn place(
+    view: &RefCell<Option<WebView>>,
+    report: &ReportFile,
+    rect: PixelsRect,
+    window: &dioxus::desktop::tao::window::Window,
+) -> dioxus::desktop::wry::Result<()> {
+    let bounds = Rect {
+        position: LogicalPosition::new(rect.origin.x, rect.origin.y).into(),
+        size: LogicalSize::new(rect.size.width, rect.size.height).into(),
+    };
+    let mut slot = view.borrow_mut();
+    match slot.as_ref() {
+        Some(webview) => {
+            let _ = webview.set_bounds(bounds);
+            let _ = webview.set_visible(rect.size.width > 0.0 && rect.size.height > 0.0);
+        }
+        None => *slot = Some(build(report, bounds, window)?),
+    }
+    Ok(())
 }
 
 /// A child web view of `window` showing `report`, with no IPC handler.
