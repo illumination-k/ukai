@@ -908,11 +908,11 @@ button.new-tab {
 }
 
 .msg {
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .msg.user {
+  white-space: pre-wrap;
   align-self: flex-end;
   max-width: 80%;
   padding: 8px 14px;
@@ -955,7 +955,137 @@ button.new-tab {
   margin-top: 4px;
   padding-left: 18px;
   overflow-y: auto;
-  white-space: pre-wrap;
+}
+
+/* Agent Markdown. Compact: it sits in a chat column, not a document. */
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md :is(p, ul, ol, blockquote, pre, .table-wrap, hr) {
+  margin: 0 0 10px;
+}
+
+.md :is(h1, h2, h3, h4) {
+  margin: 16px 0 8px;
+  color: var(--chat-strong);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.md h1 {
+  font-size: 18px;
+}
+
+.md h2 {
+  font-size: 16px;
+}
+
+.md h3 {
+  font-size: 14px;
+}
+
+.md h4 {
+  font-size: 13px;
+}
+
+.md strong {
+  color: var(--chat-strong);
+  font-weight: 600;
+}
+
+.md :is(ul, ol) {
+  padding-left: 22px;
+}
+
+.md li > :is(p, ul, ol) {
+  margin: 2px 0;
+}
+
+.md li:has(> input[type="checkbox"]) {
+  list-style: none;
+}
+
+.md li > input[type="checkbox"] {
+  margin: 0 6px 0 -18px;
+  vertical-align: -1px;
+}
+
+.md blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted-fg);
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.md code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--muted);
+  font: 12px var(--mono);
+}
+
+.md pre {
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.md pre code {
+  padding: 0;
+  background: none;
+  font: 12px/1.5 var(--mono);
+  white-space: pre;
+}
+
+.md .link {
+  color: var(--unread);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.md .image-alt {
+  color: var(--muted-fg);
+  font-style: italic;
+}
+
+.md .table-wrap {
+  overflow-x: auto;
+}
+
+.md table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.md :is(th, td) {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.md :is(th, td)[align="center"] {
+  text-align: center;
+}
+
+.md :is(th, td)[align="right"] {
+  text-align: right;
+}
+
+.md th {
+  background: var(--muted);
+  font-weight: 600;
 }
 
 /* Tool calls and file writes: one quiet line each. */

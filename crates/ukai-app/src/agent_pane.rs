@@ -24,6 +24,7 @@ use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript
 use crate::alert;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
+use crate::markdown::Markdown;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::report_pane::project_relative;
 use crate::shortcuts::Shortcuts;
@@ -567,7 +568,9 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
             }
         },
         Entry::Agent { text } => rsx! {
-            div { class: "msg agent", "{text}" }
+            div { class: "msg agent",
+                Markdown { source: text }
+            }
         },
         Entry::Thought { text } => rsx! {
             details { class: "thought",
@@ -577,7 +580,9 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                     }
                     "Thinking"
                 }
-                div { class: "body", "{text}" }
+                div { class: "body",
+                    Markdown { source: text }
+                }
             }
         },
         Entry::Tool {
