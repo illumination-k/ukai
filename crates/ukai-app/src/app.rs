@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::use_wry_event_handler;
 use dioxus::prelude::*;
-use ukai_core::{Direction, ProjectId};
+use ukai_core::ProjectId;
+use ukai_core::keymap::Action;
 
 use crate::Startup;
 use crate::agent_pane::agent_status;
 use crate::alert::{is_unread, mark_read};
 use crate::icons::{Icon, Svg};
-use crate::layout::{Workbench, close_pane, launch_agent, transport_label};
+use crate::layout::{Workbench, launch_agent, transport_label};
 use crate::palette::Palette;
 use crate::persist::use_autosave;
 use crate::projects::{
@@ -17,6 +18,7 @@ use crate::projects::{
     reload_project, remove_project,
 };
 use crate::report_pane::ReportList;
+use crate::shortcuts::{Shortcuts, on_keydown};
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
@@ -67,44 +69,15 @@ pub fn App() -> Element {
         }
     });
 
-    let mut layout = app.layout;
-    let mut palette = app.palette;
-    let shortcuts = move |event: KeyboardEvent| {
-        let modifiers = event.modifiers();
-        let primary = if cfg!(target_os = "macos") {
-            modifiers.meta()
-        } else {
-            modifiers.ctrl()
-        };
-        let Key::Character(key) = event.key() else {
-            return;
-        };
-        if !primary {
-            return;
-        }
-        let focused = layout.peek().focused();
-        match key.to_lowercase().as_str() {
-            "k" => palette.toggle(),
-            "t" => {
-                layout.write().new_tab();
-            }
-            "d" => {
-                let direction = if modifiers.shift() {
-                    Direction::Vertical
-                } else {
-                    Direction::Horizontal
-                };
-                layout.write().split(focused, direction);
-            }
-            "w" => close_pane(app, focused),
-            _ => return,
-        }
-        event.prevent_default();
-    };
+    let shortcuts = use_context_provider(|| Shortcuts::load(&paths));
+    let palette = app.palette;
 
     rsx! {
         document::Stylesheet { href: MAIN_CSS }
-        div { class: "shell", tabindex: "0", onkeydown: shortcuts,
+        div {
+            class: "shell",
+            tabindex: "0",
+            onkeydown: move |event| on_keydown(app, &shortcuts, &event),
             Sidebar {}
             Workbench {}
             if palette() {
@@ -122,6 +95,7 @@ pub fn App() -> Element {
 fn Sidebar() -> Element {
     let app = use_context::<AppSignals>();
     let paths = use_context::<Paths>();
+    let shortcuts = use_context::<Shortcuts>();
     let mut projects_signal = app.projects;
     let mut layout = app.layout;
     let (mut open, focused, many_tabs) = {
@@ -300,30 +274,28 @@ fn Sidebar() -> Element {
                 ReportList { key: "{project}", project, name }
             }
             div { class: "sidebar-footer",
-                span {
-                    kbd { "{MOD_KEY}K" }
-                    " palette"
+                for (action, label) in [
+                    (Action::Palette, "palette"),
+                    (Action::NewTab, "tab"),
+                    (Action::SplitRight, "split"),
+                    (Action::ClosePane, "close"),
+                ]
+                {
+                    if let Some(hint) = shortcuts.keymap.hint(action) {
+                        span {
+                            kbd { "{hint}" }
+                            " {label}"
+                        }
+                    }
                 }
-                span {
-                    kbd { "{MOD_KEY}T" }
-                    " tab"
-                }
-                span {
-                    kbd { "{MOD_KEY}D" }
-                    " split"
-                }
-                span {
-                    kbd { "{MOD_KEY}W" }
-                    " close"
+                if !shortcuts.problems.is_empty() {
+                    span {
+                        class: "footer-warning",
+                        title: shortcuts.problems.join("\n"),
+                        "⚠ keybindings"
+                    }
                 }
             }
         }
     }
 }
-
-/// How the primary modifier is written in hints.
-pub const MOD_KEY: &str = if cfg!(target_os = "macos") {
-    "⌘"
-} else {
-    "Ctrl+"
-};

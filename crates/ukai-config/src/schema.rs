@@ -20,6 +20,10 @@ pub struct Config {
     pub permissions: Vec<PermissionRule>,
     #[serde(default)]
     pub reports: Reports,
+    /// Keyboard shortcuts by action name, over the defaults. Only the
+    /// user-level `config.toml` may set them: they apply to the whole app.
+    #[serde(default)]
+    pub keybindings: BTreeMap<String, Keys>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -74,6 +78,23 @@ pub enum WorkspaceScope {
     Shared,
     /// A pod and checkout of the pane's own.
     Pod,
+}
+
+/// The chords bound to one action: one, several, or none (`[]` unbinds it).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Keys {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Keys {
+    pub fn chords(&self) -> &[String] {
+        match self {
+            Keys::One(chord) => std::slice::from_ref(chord),
+            Keys::Many(chords) => chords,
+        }
+    }
 }
 
 /// An automatic answer to `session/request_permission`.

@@ -148,6 +148,22 @@ impl Layout {
         }
     }
 
+    /// Activate the tab `step` places after the active one (before it when
+    /// negative), wrapping around.
+    pub fn step_tab(&mut self, step: isize) {
+        let index = wrap(self.active, step, self.tabs.len());
+        self.select_tab(index);
+    }
+
+    /// Focus the pane `step` places after the focused one in the active tab's
+    /// display order (before it when negative), wrapping around.
+    pub fn step_focus(&mut self, step: isize) {
+        let panes = self.active_tab().root.panes();
+        if let Some(at) = panes.iter().position(|&pane| pane == self.focused) {
+            self.focused = panes[wrap(at, step, panes.len())];
+        }
+    }
+
     /// Close a tab; returns the panes that went with it.
     pub fn close_tab(&mut self, index: usize) -> Vec<PaneId> {
         if index >= self.tabs.len() {
@@ -270,6 +286,12 @@ impl Layout {
         self.contents.insert(id, PaneContent::Empty);
         id
     }
+}
+
+/// `index + step` modulo `len` (which is at least 1).
+fn wrap(index: usize, step: isize, len: usize) -> usize {
+    let len = len.max(1) as isize;
+    (index as isize + step).rem_euclid(len) as usize
 }
 
 impl Node {

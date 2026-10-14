@@ -1,5 +1,6 @@
 //! Checks that serde cannot express: every agent a permission rule names has
-//! to be declared, and the report settings have to make sense.
+//! to be declared, the report settings have to make sense, and a project file
+//! holds nothing that only the user file may set.
 
 use std::path::{Component, PathBuf};
 
@@ -15,6 +16,17 @@ pub enum Problem {
     ReportDirOutsideProject(PathBuf),
     #[error("reports.globs: `{glob}`: {message}")]
     InvalidGlob { glob: String, message: String },
+    #[error("keybindings: set them in the user config.toml, not in a project's ukai.toml")]
+    KeybindingsInProject,
+}
+
+/// What a project's `ukai.toml` may not hold, whatever the user file says.
+pub(crate) fn project_only(project: &Config) -> Vec<Problem> {
+    if project.keybindings.is_empty() {
+        Vec::new()
+    } else {
+        vec![Problem::KeybindingsInProject]
+    }
 }
 
 pub(crate) fn validate(config: &Config) -> Vec<Problem> {

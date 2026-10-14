@@ -39,8 +39,8 @@ fn dir(
 }
 
 /// Overlay `project` on `user`: agents are replaced by id, project
-/// permission rules are consulted before the user's, and project and report
-/// settings come from the project.
+/// permission rules are consulted before the user's, project and report
+/// settings come from the project, and keybindings from the user.
 pub fn merge(user: Config, project: Config) -> Config {
     let mut agents = user.agents;
     agents.extend(project.agents);
@@ -51,6 +51,7 @@ pub fn merge(user: Config, project: Config) -> Config {
         agents,
         permissions,
         reports: project.reports,
+        keybindings: user.keybindings,
     }
 }
 
@@ -59,13 +60,21 @@ pub fn merge(user: Config, project: Config) -> Config {
 pub fn load_layered(user_file: Option<&Path>, root: &Path) -> Result<Config, ConfigError> {
     let user = read_optional(user_file)?;
     let project = read_optional(Some(&root.join(FILE_NAME)))?;
+    let mut problems = validate::project_only(&project);
     let merged = merge(user, project);
-    let problems = validate::validate(&merged);
+    problems.extend(validate::validate(&merged));
     if problems.is_empty() {
         Ok(merged)
     } else {
         Err(ConfigError::Invalid(problems))
     }
+}
+
+/// The user file alone (empty if absent), for what applies to the whole app
+/// rather than to a project: `[keybindings]`. Agents it names are checked
+/// once it is layered under a project, not here.
+pub fn load_user(user_file: Option<&Path>) -> Result<Config, ConfigError> {
+    read_optional(user_file)
 }
 
 fn read_optional(path: Option<&Path>) -> Result<Config, ConfigError> {
@@ -92,7 +101,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::AgentSpec;
+    use crate::{AgentSpec, Problem};
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -173,6 +182,28 @@ mod tests {
 
         let merged = load_layered(Some(&user_file), &root);
         assert!(merged.is_ok(), "{merged:?}");
+    }
+
+    #[test]
+    fn keybindings_come_from_the_user_file() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let user_file = dir.path().join("config.toml");
+        std::fs::write(&user_file, "[keybindings]\npalette = \"mod+p\"\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap_or_else(|e| panic!("{e}"));
+
+        let user = load_user(Some(&user_file)).map(|c| c.keybindings.len());
+        assert_eq!(user.ok(), Some(1));
+        let merged = load_layered(Some(&user_file), &root).map(|c| c.keybindings.len());
+        assert_eq!(merged.ok(), Some(1));
+
+        std::fs::write(root.join(FILE_NAME), "[keybindings]\npalette = \"mod+o\"\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(
+            load_layered(Some(&user_file), &root),
+            Err(ConfigError::Invalid(problems)) if problems == [Problem::KeybindingsInProject]
+        ));
     }
 
     #[test]

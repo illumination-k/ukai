@@ -79,6 +79,34 @@ fn focus_moves_to_a_neighbour(#[case] close: PaneId, #[case] expected: PaneId) {
     assert_eq!(layout.focused(), expected);
 }
 
+#[rstest]
+#[case::forward(1, 1)]
+#[case::wraps_forward(3, 0)]
+#[case::backward(-1, 2)]
+fn step_tab_wraps(#[case] step: isize, #[case] expected: usize) {
+    let mut layout = Layout::default();
+    layout.new_tab();
+    layout.new_tab();
+    layout.select_tab(0);
+    layout.step_tab(step);
+    assert_eq!(layout.active(), expected);
+    assert!(layout.active_tab().root.contains(layout.focused()));
+}
+
+#[rstest]
+#[case::forward(1, 2)]
+#[case::wraps_forward(2, 1)]
+#[case::backward(-1, 1)]
+fn step_focus_follows_display_order(#[case] step: isize, #[case] expected: PaneId) {
+    // Tab 0 shows 0 | 2 | 1 after these splits.
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.split(0, H);
+    layout.focus(0);
+    layout.step_focus(step);
+    assert_eq!(layout.focused(), expected);
+}
+
 #[test]
 fn closing_the_last_pane_of_a_tab_closes_the_tab() {
     let mut layout = Layout::default();

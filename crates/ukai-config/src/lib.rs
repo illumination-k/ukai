@@ -12,8 +12,10 @@ mod validate;
 use std::path::{Path, PathBuf};
 
 pub use interpolate::{InterpolateError, interpolate};
-pub use layered::{USER_FILE_NAME, config_dir, load_layered, merge, state_dir};
-pub use schema::{AgentSpec, Config, Decision, PermissionRule, Project, Reports, WorkspaceScope};
+pub use layered::{USER_FILE_NAME, config_dir, load_layered, load_user, merge, state_dir};
+pub use schema::{
+    AgentSpec, Config, Decision, Keys, PermissionRule, Project, Reports, WorkspaceScope,
+};
 pub use validate::Problem;
 
 /// File name looked up at the project root.
@@ -56,7 +58,8 @@ fn parse_unchecked(src: &str) -> Result<Config, toml::de::Error> {
 /// Parse and validate a `ukai.toml` document.
 pub fn parse(src: &str) -> Result<Config, ConfigError> {
     let config = parse_unchecked(src)?;
-    let problems = validate::validate(&config);
+    let mut problems = validate::project_only(&config);
+    problems.extend(validate::validate(&config));
     if problems.is_empty() {
         Ok(config)
     } else {
