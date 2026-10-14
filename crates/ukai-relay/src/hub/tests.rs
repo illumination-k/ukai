@@ -346,3 +346,47 @@ fn agent_requests_outside_a_session_are_refused() {
         other => panic!("{other:?}"),
     }
 }
+
+fn model_option(current: &str) -> Value {
+    json!([{
+        "id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": current,
+        "options": [{ "value": "a", "name": "A" }, { "value": "b", "name": "B" }]
+    }])
+}
+
+#[test]
+fn a_load_answers_with_the_settings_changed_since_setup() {
+    let mut hub = with_session();
+    let sent = hub.from_client(
+        A,
+        req(
+            3,
+            "session/set_config_option",
+            json!({ "sessionId": SID, "configId": "model", "value": "b" }),
+        ),
+    );
+    hub.from_agent(result(
+        json!(agent_id(&sent)),
+        json!({ "configOptions": model_option("b") }),
+    ));
+    let load = |hub: &mut Hub, conn| {
+        hub.disconnect(A);
+        hub.connect(conn);
+        let out = hub.from_client(conn, req(1, "session/resume", json!({ "sessionId": SID })));
+        client_messages(&out, conn)
+            .last()
+            .and_then(|answer| answer.pointer("/result/configOptions").cloned())
+    };
+    assert_eq!(load(&mut hub, B), Some(model_option("b")));
+
+    // The agent may also change them on its own.
+    hub.from_agent(notification(
+        "session/update",
+        json!({
+            "sessionId": SID,
+            "update": { "sessionUpdate": "config_option_update", "configOptions": model_option("a") }
+        }),
+    ));
+    assert_eq!(load(&mut hub, A), Some(model_option("a")));
+}

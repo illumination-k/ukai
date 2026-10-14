@@ -2,12 +2,15 @@
 //! tested headless. `ukai-app` wraps these types in signals and renders them.
 
 pub mod attachment;
+pub mod config;
 pub mod keymap;
 mod layout;
+pub mod markdown;
 pub mod palette;
 mod project;
 pub mod report;
 pub mod review;
+pub mod slash;
 pub mod state;
 mod transcript;
 

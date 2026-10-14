@@ -3,8 +3,10 @@
 mod agent_pane;
 mod alert;
 mod app;
+mod clipboard;
 mod icons;
 mod layout;
+mod markdown;
 mod palette;
 mod persist;
 mod projects;

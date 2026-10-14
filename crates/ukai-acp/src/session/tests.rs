@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, Diff, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PromptCapabilities, PromptResponse,
-    RequestPermissionOutcome, ResumeSessionResponse, SessionCapabilities,
-    SessionResumeCapabilities, StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
+    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, Diff, InitializeResponse,
+    LoadSessionResponse, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    PromptCapabilities, PromptResponse, RequestPermissionOutcome, ResumeSessionResponse,
+    SessionCapabilities, SessionConfigOptionCategory, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionResumeCapabilities, SetSessionConfigOptionResponse,
+    StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
     UsageUpdate, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
@@ -33,9 +35,12 @@ struct Caps {
 /// - `edit`: reports a tool call with a diff, then updates it with another
 /// - `blocks`: describes every block of the prompt, then `end_turn`
 /// - `usage`: reports context use and cost, then `end_turn`
+/// - `commands`: lists two slash commands, then `end_turn`
 /// - anything else: the prompt fails
 ///
 /// `session/load` replays one user and one agent message before answering.
+/// Every session starts with [`mock_config`]'s settings; setting one answers
+/// with it changed, and an unknown one fails.
 fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
     let offered_fs = Arc::new(std::sync::Mutex::new(String::new()));
     Agent
@@ -81,19 +86,32 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                         update,
                     ))?;
                 }
-                responder.respond(LoadSessionResponse::new())
+                responder.respond(LoadSessionResponse::new().config_options(mock_config(None)))
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async |_: ResumeSessionRequest, responder, _cx| {
-                responder.respond(ResumeSessionResponse::new())
+                responder.respond(ResumeSessionResponse::new().config_options(mock_config(None)))
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async |_: NewSessionRequest, responder, _cx| {
-                responder.respond(NewSessionResponse::new(SESSION))
+                responder
+                    .respond(NewSessionResponse::new(SESSION).config_options(mock_config(None)))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |request: SetSessionConfigOptionRequest, responder, _cx| {
+                if !["model", "fast"].contains(&&*request.config_id.0) {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::invalid_params());
+                }
+                responder.respond(SetSessionConfigOptionResponse::new(mock_config(Some(
+                    &request.value,
+                ))))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -132,6 +150,20 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                 SessionUpdate::UsageUpdate(UsageUpdate::new(53_000, 200_000).cost(
                                     agent_client_protocol::schema::v1::Cost::new(0.045, "USD"),
                                 )),
+                            ))?;
+                        } else if text == "commands" {
+                            cx.send_notification(SessionNotification::new(
+                                session.clone(),
+                                SessionUpdate::AvailableCommandsUpdate(
+                                    AvailableCommandsUpdate::new(vec![
+                                        AvailableCommand::new("compact", "Compact the context"),
+                                        AvailableCommand::new("review", "Review a change").input(
+                                            AvailableCommandInput::Unstructured(
+                                                UnstructuredCommandInput::new("pr number"),
+                                            ),
+                                        ),
+                                    ]),
+                                ),
                             ))?;
                         } else if text == "edit" {
                             let update = |update| {
@@ -198,6 +230,63 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
             },
             agent_client_protocol::on_receive_request!(),
         )
+}
+
+/// A grouped model select and a boolean, with `set` applied to whichever it fits.
+fn mock_config(set: Option<&SessionConfigOptionValue>) -> Vec<SessionConfigOption> {
+    let model = set
+        .and_then(SessionConfigOptionValue::as_value_id)
+        .map_or_else(|| "sonnet".into(), |id| id.0.to_string());
+    let fast = set.and_then(SessionConfigOptionValue::as_bool) == Some(true);
+    vec![
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            model,
+            vec![SessionConfigSelectGroup::new(
+                "claude",
+                "Claude",
+                vec![
+                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                    SessionConfigSelectOption::new("opus", "Opus").description("Most capable"),
+                ],
+            )],
+        )
+        .category(SessionConfigOptionCategory::Model),
+        SessionConfigOption::boolean("fast", "Fast mode", fast),
+    ]
+}
+
+/// [`mock_config`] as the client reports it.
+fn config(model: &str, fast: bool) -> Vec<ConfigOption> {
+    let choice = |value: &str, name: &str, description: Option<&str>| ConfigChoice {
+        value: value.into(),
+        name: name.into(),
+        description: description.map(str::to_owned),
+        group: Some("Claude".into()),
+    };
+    vec![
+        ConfigOption {
+            id: "model".into(),
+            name: "Model".into(),
+            description: None,
+            category: Some("model".into()),
+            value: ConfigValue::Select {
+                current: model.into(),
+                choices: vec![
+                    choice("sonnet", "Sonnet", None),
+                    choice("opus", "Opus", Some("Most capable")),
+                ],
+            },
+        },
+        ConfigOption {
+            id: "fast".into(),
+            name: "Fast mode".into(),
+            description: None,
+            category: None,
+            value: ConfigValue::Toggle(fast),
+        },
+    ]
 }
 
 /// `kind:detail` per prompt block, joined with `,`.
@@ -316,6 +405,31 @@ async fn streams_message_chunks_before_turn_end() {
         vec![
             SessionEvent::AgentMessage { text: "Hel".into() },
             SessionEvent::AgentMessage { text: "lo".into() },
+            end_turn(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn translates_available_commands() {
+    let mut harness = Harness::start().await;
+    assert_eq!(
+        harness.turn("commands").await,
+        vec![
+            SessionEvent::Commands {
+                commands: vec![
+                    SlashCommand {
+                        name: "compact".into(),
+                        description: "Compact the context".into(),
+                        hint: None,
+                    },
+                    SlashCommand {
+                        name: "review".into(),
+                        description: "Review a change".into(),
+                        hint: Some("pr number".into()),
+                    },
+                ],
+            },
             end_turn(),
         ]
     );
@@ -464,6 +578,7 @@ fn ready(session_id: &str, restore: RestoreOutcome) -> SessionEvent {
             image: true,
             embedded_context: true,
         },
+        config: config("sonnet", false),
     }
 }
 
@@ -585,5 +700,35 @@ async fn falls_back_when_load_is_unavailable(
 ) {
     let (mut harness, events) = Harness::connect(caps, Some("earlier")).await;
     assert_eq!(events, vec![ready(session_id, outcome)]);
+    assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
+}
+
+#[tokio::test]
+async fn set_config_reports_the_agents_new_settings() {
+    let mut harness = Harness::start().await;
+    assert!(
+        harness
+            .handle
+            .set_config("model", ConfigInput::Select("opus".into()))
+    );
+    assert_eq!(
+        harness.next().await,
+        SessionEvent::ConfigChanged {
+            options: config("opus", false)
+        }
+    );
+    assert!(harness.handle.set_config("fast", ConfigInput::Toggle(true)));
+    assert_eq!(
+        harness.next().await,
+        SessionEvent::ConfigChanged {
+            options: config("sonnet", true)
+        }
+    );
+    assert!(harness.handle.set_config("nope", ConfigInput::Toggle(true)));
+    assert!(matches!(
+        harness.next().await,
+        SessionEvent::ConfigFailed { .. }
+    ));
+    // The session goes on.
     assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
 }

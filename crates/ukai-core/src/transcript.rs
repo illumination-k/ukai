@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome, SessionEvent,
-    ToolStatus, Usage,
+    ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome,
+    SessionEvent, SlashCommand, ToolStatus, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +67,10 @@ pub struct Transcript {
     pub prompt_caps: PromptCaps,
     /// The agent's latest report of context use and cost, if it sends any.
     pub usage: Option<Usage>,
+    /// Settings the agent lets the user change, e.g. model or reasoning effort.
+    pub config: Vec<ConfigOption>,
+    /// The slash commands the agent last said it offers.
+    pub commands: Vec<SlashCommand>,
 }
 
 impl Default for Transcript {
@@ -77,6 +81,8 @@ impl Default for Transcript {
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
             usage: None,
+            config: Vec::new(),
+            commands: Vec::new(),
         }
     }
 }
@@ -176,10 +182,12 @@ impl Transcript {
                 agent,
                 restore,
                 prompt,
+                config,
                 ..
             } => {
                 self.agent = agent;
                 self.prompt_caps = prompt;
+                self.config = config;
                 self.status = Status::Idle;
                 let notice = match restore {
                     RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
@@ -197,6 +205,11 @@ impl Transcript {
                     });
                 }
             }
+            SessionEvent::ConfigChanged { options } => self.config = options,
+            SessionEvent::ConfigFailed { message } => self.entries.push(Entry::Notice {
+                text: format!("could not change the setting: {message}"),
+                error: true,
+            }),
             SessionEvent::UserMessage { text } => match self.entries.last_mut() {
                 Some(Entry::User { text: last, .. }) => last.push_str(&text),
                 _ => self.entries.push(Entry::User {
@@ -285,6 +298,7 @@ impl Transcript {
                     _ => self.entries.push(Entry::Plan { items }),
                 }
             }
+            SessionEvent::Commands { commands } => self.commands = commands,
             SessionEvent::PermissionRequested { id, title, options } => {
                 self.entries.push(Entry::Permission {
                     id,
@@ -384,6 +398,7 @@ mod tests {
             session_id: "s".into(),
             restore,
             prompt: PromptCaps::default(),
+            config: Vec::new(),
         }
     }
 
@@ -591,8 +606,66 @@ mod tests {
             session_id: "s".into(),
             restore: RestoreOutcome::Fresh,
             prompt: caps,
+            config: Vec::new(),
         }]);
         assert_eq!(transcript.prompt_caps, caps);
+    }
+
+    fn effort(current: &str) -> ConfigOption {
+        ConfigOption {
+            id: "effort".into(),
+            name: "Effort".into(),
+            description: None,
+            category: Some("thought_level".into()),
+            value: ukai_acp::ConfigValue::Select {
+                current: current.into(),
+                choices: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn config_follows_ready_and_updates_and_failures_leave_it() {
+        let mut transcript = folded([SessionEvent::Ready {
+            agent: None,
+            session_id: "s".into(),
+            restore: RestoreOutcome::Fresh,
+            prompt: PromptCaps::default(),
+            config: vec![effort("low")],
+        }]);
+        assert_eq!(transcript.config, [effort("low")]);
+        transcript.apply(SessionEvent::ConfigChanged {
+            options: vec![effort("high")],
+        });
+        assert_eq!(transcript.config, [effort("high")]);
+        transcript.apply(SessionEvent::ConfigFailed {
+            message: "no".into(),
+        });
+        assert_eq!(transcript.config, [effort("high")]);
+        assert!(matches!(
+            transcript.entries.as_slice(),
+            [Entry::Notice { error: true, .. }]
+        ));
+        assert_eq!(transcript.status, Status::Idle);
+    }
+
+    #[test]
+    fn commands_are_replaced_without_entries() {
+        let command = |name: &str| SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            hint: None,
+        };
+        let transcript = folded([
+            SessionEvent::Commands {
+                commands: vec![command("a"), command("b")],
+            },
+            SessionEvent::Commands {
+                commands: vec![command("c")],
+            },
+        ]);
+        assert_eq!(transcript.commands, vec![command("c")]);
+        assert!(transcript.entries.is_empty());
     }
 
     #[test]

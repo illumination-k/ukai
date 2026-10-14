@@ -32,6 +32,17 @@ depends = ["aqua:cargo-bins/cargo-binstall"]
 version = "0.7.10"
 depends = ["aqua:cargo-bins/cargo-binstall"]
 
+# System libraries the Dioxus desktop renderer (wry/tao) links against on
+# Linux. `mise install` never applies these; run
+# `mise bootstrap packages apply`. Skipped where apt-get is absent.
+[bootstrap.packages]
+"apt:libwebkit2gtk-4.1-dev" = "latest"
+"apt:libgtk-3-dev" = "latest"
+"apt:libayatana-appindicator3-dev" = "latest"
+"apt:libxdo-dev" = "latest"
+"apt:librsvg2-dev" = "latest"
+"apt:libssl-dev" = "latest"
+
 [hooks]
 postinstall = "if [ -z \"${CI:-}\" ]; then prek install -f; fi"
 

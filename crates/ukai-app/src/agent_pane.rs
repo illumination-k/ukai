@@ -12,17 +12,20 @@ use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
-    Attachment, FileDiff, FsRoot, PaneWorkspace, Prompt, SessionEvent, SessionEvents,
-    SessionHandle, SessionOptions, ToolStatus,
+    Attachment, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot, PaneWorkspace, Prompt,
+    SessionEvent, SessionEvents, SessionHandle, SessionOptions, SlashCommand, ToolStatus,
 };
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
+use ukai_core::slash;
 use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript, usage_label};
 
 use crate::alert;
+use crate::clipboard;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
+use crate::markdown::Markdown;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::report_pane::project_relative;
 use crate::shortcuts::Shortcuts;
@@ -246,6 +249,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     } = composer;
     let status = transcript.read().status.clone();
     let mut dropping = use_signal(|| false);
+    // The highlighted slash command, and whether escape hid the list.
+    let mut picked = use_signal(|| 0_usize);
+    let mut dismissed = use_signal(|| false);
 
     let mut send = {
         let handle = handle.clone();
@@ -283,6 +289,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let writable = idle || busy;
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
+    let config = transcript.read().config.clone();
     let card_class = match (writable, dropping()) {
         (_, true) => "composer-card dropping",
         (true, false) => "composer-card",
@@ -295,6 +302,16 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
             format!("{} of {} context tokens in use", usage.used, usage.size),
         )
     });
+    let commands: Vec<SlashCommand> = if writable && !dismissed() {
+        slash::suggestions(&draft.read(), &transcript.read().commands)
+            .into_iter()
+            .take(MAX_SUGGESTIONS)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let current = picked().min(commands.len().saturating_sub(1));
     let stop_title = shortcuts.title("Stop", Action::Stop);
 
     rsx! {
@@ -393,21 +410,69 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 if let Some(message) = error() {
                     div { class: "composer-error", "{message}" }
                 }
+                if !commands.is_empty() {
+                    div { class: "slash-list",
+                        for (index, command) in commands.iter().enumerate() {
+                            div {
+                                key: "{command.name}",
+                                class: if index == current { "slash-item selected" } else { "slash-item" },
+                                onmouseenter: move |_| picked.set(index),
+                                // Keep the focus in the textarea.
+                                onmousedown: move |event| event.prevent_default(),
+                                onclick: {
+                                    let command = command.clone();
+                                    move |_| {
+                                        draft.set(slash::completion(&command));
+                                        picked.set(0);
+                                    }
+                                },
+                                span { class: "name", "/{command.name}" }
+                                if let Some(hint) = &command.hint {
+                                    span { class: "hint", "{hint}" }
+                                }
+                                span { class: "description", "{command.description}" }
+                            }
+                        }
+                    }
+                }
                 textarea {
                     rows: "2",
                     placeholder: match status {
-                        Status::Idle => "Message the agent — drop files or images here",
+                        Status::Idle => "Message the agent — / for commands, drop files or images here",
                         Status::Busy => "Waiting for the agent…",
                         Status::Connecting => "Connecting…",
                         Status::Closed { .. } => "Disconnected",
                     },
                     disabled: !writable,
                     value: "{draft}",
-                    oninput: move |event| draft.set(event.value()),
+                    oninput: move |event| {
+                        draft.set(event.value());
+                        picked.set(0);
+                        dismissed.set(false);
+                    },
                     onkeydown: {
                         let shortcuts = shortcuts.clone();
                         move |event: KeyboardEvent| {
-                            if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
+                            if !commands.is_empty() && !event.is_composing() {
+                                let len = commands.len() as isize;
+                                match event.key() {
+                                    Key::ArrowDown => {
+                                        picked.set((current as isize + 1).rem_euclid(len) as usize);
+                                    }
+                                    Key::ArrowUp => {
+                                        picked.set((current as isize - 1).rem_euclid(len) as usize);
+                                    }
+                                    Key::Tab | Key::Enter => {
+                                        draft.set(slash::completion(&commands[current]));
+                                        picked.set(0);
+                                    }
+                                    // Not the app's: escape here only hides the list.
+                                    Key::Escape => dismissed.set(true),
+                                    _ => return,
+                                }
+                                event.prevent_default();
+                                event.stop_propagation();
+                            } else if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
                                 event.prevent_default();
                                 event.stop_propagation();
                                 send();
@@ -421,6 +486,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         title: "Attach files…",
                         onclick: move |_| pick_attachments(composer, transcript),
                         Svg { icon: Icon::Paperclip }
+                    }
+                    if !config.is_empty() {
+                        ConfigControls { pane, options: config, disabled: !writable }
                     }
                     if let Some(hint) = send_hint {
                         span { class: "hint",
@@ -452,6 +520,83 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         }
     }
 }
+
+/// The agent's settings, e.g. model and reasoning effort, changed through
+/// `session/set_config_option`. A change shows once the agent confirms it.
+#[component]
+fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> Element {
+    let sessions = use_context::<AppSignals>().sessions;
+    let set = move |id: String, value: ConfigInput| {
+        if let Some(handle) = sessions.read().get(&pane).and_then(|s| s.handle.clone()) {
+            handle.set_config(id, value);
+        }
+    };
+    rsx! {
+        div { class: "composer-config",
+            for option in options {
+                {
+                    let id = option.id.clone();
+                    let title = match &option.description {
+                        Some(description) => format!("{}: {description}", option.name),
+                        None => option.name.clone(),
+                    };
+                    match option.value {
+                        ConfigValue::Select { current, choices } => rsx! {
+                            select {
+                                key: "{option.id}",
+                                class: "config-select",
+                                title: "{title}",
+                                aria_label: "{option.name}",
+                                disabled,
+                                onchange: move |event| set(id.clone(), ConfigInput::Select(event.value())),
+                                for (group, run) in ukai_core::config::choice_groups(&choices) {
+                                    match group {
+                                        Some(group) => rsx! {
+                                            optgroup { label: "{group}",
+                                                for choice in run {
+                                                    option {
+                                                        value: "{choice.value}",
+                                                        selected: choice.value == current,
+                                                        title: choice.description.clone().unwrap_or_default(),
+                                                        "{choice.name}"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        None => rsx! {
+                                            for choice in run {
+                                                option {
+                                                    value: "{choice.value}",
+                                                    selected: choice.value == current,
+                                                    title: choice.description.clone().unwrap_or_default(),
+                                                    "{choice.name}"
+                                                }
+                                            }
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        ConfigValue::Toggle(on) => rsx! {
+                            label { key: "{option.id}", class: "config-toggle", title: "{title}",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: on,
+                                    disabled,
+                                    onchange: move |event| set(id.clone(), ConfigInput::Toggle(event.checked())),
+                                }
+                                "{option.name}"
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Slash commands listed at once while completing.
+const MAX_SUGGESTIONS: usize = 8;
 
 /// Add the file at `path` to the next prompt, in the form the agent accepts.
 fn attach(composer: Composer, transcript: Signal<Transcript>, path: &Path, bytes: Vec<u8>) {
@@ -490,6 +635,42 @@ fn pick_attachments(composer: Composer, transcript: Signal<Transcript>) {
     });
 }
 
+/// An agent message, with a button that copies its text whole.
+#[component]
+fn AgentMessage(text: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let copy = {
+        let text = text.clone();
+        move |_| {
+            if clipboard::copy(&text) {
+                copied.set(true);
+                spawn(async move {
+                    tokio::time::sleep(COPIED_FOR).await;
+                    copied.set(false);
+                });
+            }
+        }
+    };
+    rsx! {
+        div { class: "agent-msg",
+            div { class: "msg agent",
+                Markdown { source: text.clone() }
+            }
+            div { class: "msg-actions",
+                button {
+                    class: if copied() { "icon copied" } else { "icon" },
+                    title: if copied() { "Copied" } else { "Copy" },
+                    onclick: copy,
+                    Svg { icon: if copied() { Icon::Check } else { Icon::Copy } }
+                }
+            }
+        }
+    }
+}
+
+/// How long the copy button shows that it copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[component]
 fn EntryView(pane: PaneId, entry: Entry) -> Element {
     let app = use_context::<AppSignals>();
@@ -511,7 +692,7 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
             }
         },
         Entry::Agent { text } => rsx! {
-            div { class: "msg agent", "{text}" }
+            AgentMessage { text }
         },
         Entry::Thought { text } => rsx! {
             details { class: "thought",
@@ -521,7 +702,9 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                     }
                     "Thinking"
                 }
-                div { class: "body", "{text}" }
+                div { class: "body",
+                    Markdown { source: text }
+                }
             }
         },
         Entry::Tool {
