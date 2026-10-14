@@ -1,0 +1,1724 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ukai 比較調査 — orca / herdr / hermes-ide から取り込むべきもの</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --page: #f9f9f7;
+        --surface: #fcfcfb;
+        --text-1: #0b0b0b;
+        --text-2: #52514e;
+        --muted: #898781;
+        --grid: #e1e0d9;
+        --axis: #c3c2b7;
+        --border: rgba(11, 11, 11, 0.1);
+        --wash: rgba(11, 11, 11, 0.035);
+        --series-1: #2a78d6;
+        --series-2: #eb6834;
+        --series-3: #1baf7a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:where(:not([data-theme="light"])) {
+          color-scheme: dark;
+          --page: #0d0d0d;
+          --surface: #1a1a19;
+          --text-1: #ffffff;
+          --text-2: #c3c2b7;
+          --muted: #898781;
+          --grid: #2c2c2a;
+          --axis: #383835;
+          --border: rgba(255, 255, 255, 0.1);
+          --wash: rgba(255, 255, 255, 0.045);
+          --series-1: #3987e5;
+          --series-2: #d95926;
+          --series-3: #199e70;
+        }
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --page: #0d0d0d;
+        --surface: #1a1a19;
+        --text-1: #ffffff;
+        --text-2: #c3c2b7;
+        --muted: #898781;
+        --grid: #2c2c2a;
+        --axis: #383835;
+        --border: rgba(255, 255, 255, 0.1);
+        --wash: rgba(255, 255, 255, 0.045);
+        --series-1: #3987e5;
+        --series-2: #d95926;
+        --series-3: #199e70;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        background: var(--page);
+      }
+      body {
+        margin: 0;
+        padding: 28px 22px 64px;
+        background: var(--page);
+        color: var(--text-1);
+        font:
+          15px/1.75 system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        font-feature-settings: "palt" 1;
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+      }
+
+      /* ---- header ---- */
+      .masthead {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 18px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 26px;
+        line-height: 1.35;
+        letter-spacing: -0.01em;
+        font-weight: 650;
+      }
+      .dek {
+        margin: 0;
+        color: var(--text-2);
+        font-size: 14px;
+      }
+      .byline {
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      #theme {
+        flex: none;
+        appearance: none;
+        background: var(--surface);
+        color: var(--text-2);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 5px 12px;
+        font: inherit;
+        font-size: 12.5px;
+        cursor: pointer;
+      }
+      #theme:hover {
+        background: var(--wash);
+      }
+
+      h2 {
+        margin: 46px 0 4px;
+        font-size: 19px;
+        font-weight: 650;
+        letter-spacing: -0.005em;
+      }
+      h2 + .sub {
+        margin: 0 0 18px;
+        color: var(--text-2);
+        font-size: 13.5px;
+      }
+      h3 {
+        margin: 0 0 6px;
+        font-size: 15px;
+        font-weight: 650;
+      }
+      p {
+        margin: 0 0 12px;
+      }
+      a {
+        color: inherit;
+        text-decoration-color: var(--axis);
+        text-underline-offset: 2px;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.88em;
+        background: var(--wash);
+        border-radius: 4px;
+        padding: 1px 4px;
+      }
+
+      /* ---- stat tiles ---- */
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        margin: 24px 0 8px;
+      }
+      .tile {
+        background: var(--surface);
+        padding: 14px 16px 16px;
+      }
+      .tile .k {
+        color: var(--text-2);
+        font-size: 12.5px;
+      }
+      .tile .v {
+        font-size: 30px;
+        line-height: 1.2;
+        font-weight: 650;
+        margin-top: 2px;
+      }
+      .tile .n {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 2px;
+      }
+
+      /* ---- cards ---- */
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+        gap: 14px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 18px;
+      }
+      .card .meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 0 0 8px;
+      }
+      .card p:last-child {
+        margin-bottom: 0;
+      }
+      .card ul {
+        margin: 0;
+        padding-left: 1.15em;
+      }
+      .card li {
+        margin-bottom: 4px;
+      }
+
+      /* ---- tables ---- */
+      .scroll {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--grid);
+        vertical-align: top;
+      }
+      thead th {
+        color: var(--text-2);
+        font-weight: 600;
+        font-size: 12.5px;
+        white-space: nowrap;
+        border-bottom: 1px solid var(--axis);
+      }
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      td.num,
+      th.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      col.me,
+      td.me,
+      th.me {
+        background: var(--wash);
+      }
+      .mark {
+        display: inline-block;
+        min-width: 1.4em;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      .mark.yes {
+        font-weight: 700;
+      }
+      .mark.part {
+        color: var(--text-2);
+      }
+      .mark.no,
+      .mark.unk {
+        color: var(--muted);
+      }
+      .legend-row {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin: 10px 0 0;
+      }
+
+      /* ---- quadrant ---- */
+      .chartcard {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 16px 10px;
+        position: relative;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 18px;
+        margin: 0 0 8px;
+        padding: 0;
+        list-style: none;
+        font-size: 12.5px;
+        color: var(--text-2);
+      }
+      .legend li {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex: none;
+      }
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+      .tip {
+        position: absolute;
+        z-index: 5;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.1s;
+        background: var(--surface);
+        color: var(--text-1);
+        border: 1px solid var(--border);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12.5px;
+        line-height: 1.5;
+        max-width: 250px;
+      }
+      .tip b {
+        display: block;
+        font-weight: 650;
+        margin-bottom: 2px;
+      }
+      .tip .t2 {
+        color: var(--text-2);
+        font-variant-numeric: tabular-nums;
+      }
+      .quadkey {
+        margin: 2px 0 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .dot:focus {
+        outline: none;
+      }
+      .dot:focus-visible circle.hit {
+        stroke: var(--text-1);
+        stroke-width: 1.5;
+      }
+
+      /* ---- proposals ---- */
+      .group {
+        margin-top: 22px;
+      }
+      .group > h3 {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 10px;
+        font-size: 14px;
+        color: var(--text-2);
+        text-transform: none;
+      }
+      .item {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 10px;
+      }
+      .item header {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 6px;
+      }
+      .item header .id {
+        color: var(--muted);
+        font-size: 12.5px;
+        font-variant-numeric: tabular-nums;
+        flex: none;
+      }
+      .item header h4 {
+        margin: 0;
+        font-size: 15.5px;
+        font-weight: 650;
+      }
+      .badge {
+        font-size: 11.5px;
+        color: var(--text-2);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 8px;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .item dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 2px 14px;
+        margin: 8px 0 0;
+        font-size: 13.5px;
+      }
+      .item dt {
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .item dd {
+        margin: 0;
+      }
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--text-2);
+      }
+
+      ul.plain {
+        margin: 0 0 12px;
+        padding-left: 1.2em;
+      }
+      ul.plain li {
+        margin-bottom: 6px;
+      }
+      footer {
+        margin-top: 52px;
+        padding-top: 18px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      footer ul {
+        padding-left: 1.2em;
+        margin: 6px 0 0;
+      }
+      .note {
+        background: var(--wash);
+        border-left: 2px solid var(--axis);
+        border-radius: 0 8px 8px 0;
+        padding: 10px 14px;
+        margin: 0 0 16px;
+        color: var(--text-2);
+        font-size: 13.5px;
+      }
+    </style>
+  </head>
+  <body data-palette="#2a78d6,#eb6834,#1baf7a">
+    <main>
+      <div class="masthead">
+        <div>
+          <h1>ukai に足りないもの — orca / herdr / hermes-ide との比較</h1>
+          <p class="dek">
+            同じ「複数のコーディングエージェントを並べて操る」領域の 3
+            製品を調べ、ukai
+            が取り込むべき機能を効果と実装コストで並べた。
+          </p>
+          <p class="byline">
+            2026-10-14 · 対象コミット <code>597d434</code> · 設計は
+            <code>docs/design.md</code> (draft 2026-10-14) に準拠
+          </p>
+        </div>
+        <button id="theme" type="button">配色を切り替え</button>
+      </div>
+
+      <div class="tiles">
+        <div class="tile">
+          <div class="k">比較した製品</div>
+          <div class="v">3</div>
+          <div class="n">orca / herdr / hermes-ide</div>
+        </div>
+        <div class="tile">
+          <div class="k">洗い出した提案</div>
+          <div class="v">17</div>
+          <div class="n">ACP 4 · Git 4 · 運用 9</div>
+        </div>
+        <div class="tile">
+          <div class="k">Quick win</div>
+          <div class="v">6</div>
+          <div class="n">コスト 2.0 以下</div>
+        </div>
+        <div class="tile">
+          <div class="k">ukai 固有の強み</div>
+          <div class="v">4</div>
+          <div class="n">守るべき差別化点</div>
+        </div>
+      </div>
+
+      <h2>要約</h2>
+      <p class="sub">先に結論。</p>
+      <p>
+        3 製品はいずれも
+        <strong>「ターミナル多重化 + タスクごとの git worktree + 差分を見て
+        land する」</strong>
+        という同じ骨格を持つ。ukai はそこを狙っていないので、UI
+        の表層（未読・通知・差分への行コメント・添付）は既に追いついているが、
+        <strong
+          >エージェントの成果物を人が受け取る最後の一区間（作業ツリーの差分を見て、commit
+          して、PR にする）が丸ごと空いている</strong
+        >。gateway が Pod
+        の中で作業させる設計なので、ここが無いと「エージェントは動いたが成果を取り出せない」が起きる。最優先はこれ（提案
+        5・7）。
+      </p>
+      <p>
+        一方で ukai は 3 製品が誰も持っていない
+        <strong>ACP ネイティブ</strong>・<strong>HTTP/WS 一級</strong>・<strong
+          >Kubernetes での実行</strong
+        >・<strong>HTML レポート pane</strong>
+        を持っている。ここは真似しに行くのではなく、ACP
+        の未使用機能（セッションモード、slash コマンド、<code>terminal/*</code>）を埋めて差を広げるほうが費用対効果が高い（提案
+        1・2・9）。コスト 2.0
+        以下で効く細かいもの（要対応へのジャンプ、プロンプトのキュー、リサイズ）は、競合が全部持っていて
+        ukai に無いので早めに潰したい。
+      </p>
+
+      <div class="note">
+        <strong>調査方法と限界。</strong> 各製品の公開
+        README・ドキュメントサイトを読んだだけで、ソースコードは読んでいない。機能マトリクスの
+        <span class="mark unk">?</span>
+        は「公開ドキュメントで確認できなかった」であって「無い」ではない。hermes-ide
+        のリモート実行と MCP、orca の ACP
+        クライアント対応の有無はとくに未確認。
+      </div>
+
+      <h2>比較対象</h2>
+      <p class="sub">何者で、どういう骨格を持っているか。</p>
+      <div class="cards">
+        <div class="card">
+          <h3>orca</h3>
+          <p class="meta">
+            stablyai/orca · MIT · デスクトップ (Electron 系) + モバイル
+          </p>
+          <p>
+            「ADE（agent development environment）」。1 タスク = 1 git
+            worktree で、40
+            以上の CLI エージェントを並列に走らせる。
+          </p>
+          <ul>
+            <li>同じプロンプトを複数エージェントに fan-out して勝者を merge</li>
+            <li>VS Code のエディタ、WebGL ターミナル分割、cross-worktree 検索</li>
+            <li>差分の行コメントをまとめてエージェントに返す</li>
+            <li>SSH worktree（リモートマシンで実行、自動再接続・port forward）</li>
+            <li>モバイルコンパニオン（完了通知と追い指示）</li>
+            <li>Design Mode: 実 Chromium の要素をクリックして HTML/CSS/スクショをプロンプトに送る</li>
+            <li>CLI (<code>orca worktree create</code> / <code>snapshot</code> / <code>click</code>) でエージェント自身が orca を操作</li>
+            <li>GitHub / Linear の PR・issue・ボードをアプリ内で閲覧</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>herdr</h3>
+          <p class="meta">herdrdev/herdr · Apache-2.0 · Rust 単一バイナリ TUI</p>
+          <p>
+            「エージェントが住むランタイム」。tmux
+            の置き換えに近く、pane = 実 PTY。常駐のセッションサーバーと薄いクライアントに分かれ、Unix
+            socket / SSH 経由でつなぐ。
+          </p>
+          <ul>
+            <li>detach してもエージェントは走り続ける（sleep・WiFi 切断・SSH 切断に耐える）</li>
+            <li>session → workspace → tab → pane の階層。複数マシンを 1 画面に</li>
+            <li>全 pane に working / blocked / idle / done / unknown の状態。PTY 出力からの自動検出 + <code>pane.report_agent</code> での自己申告</li>
+            <li>socket API: <code>agent.*</code> / <code>pane.*</code> / <code>tab.*</code> / <code>workspace.*</code> / <code>layout.*</code> / <code>worktree.*</code>。<code>events.subscribe</code> で push、<code>pane.wait_for_output</code> で待ち合わせ</li>
+            <li>エージェント同士が pane を立てて互いを待てる</li>
+            <li>プラグインマーケットプレイス</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>hermes-ide</h3>
+          <p class="meta">hermes-hq/hermes-ide · BUSL-1.1 → Apache-2.0 · デスクトップ</p>
+          <p>
+            「あらゆるコーディングエージェントのための 1 つのコンソール」。タスク
+            = ブランチ
+            <code>hermes/&lt;name&gt;</code> + worktree で、入力待ちの
+            エージェントを 1 つの inbox に集める。
+          </p>
+          <ul>
+            <li>⌘I で「自分を待っているエージェント」へジャンプ（attention inbox）</li>
+            <li>Review Desk (⌘G): 変更をターン単位 / ファイル単位で表示、risk flag 付き、行コメントを書いたエージェントに返す</li>
+            <li>ターン単位の diff と restore（巻き戻し）</li>
+            <li>Land: commit → PR 作成 / ローカル merge を 1 操作で</li>
+            <li>タスクごとにエージェント・モデル・effort・アカウントを選び、組み合わせを preset 保存</li>
+            <li>通知は「いま見ていないセッション」に限る</li>
+            <li>右/下への pane 分割、GPU ターミナル</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2>ukai が既に持っている差別化点</h2>
+      <p class="sub">真似される側。比較の前にここは守る前提で考える。</p>
+      <div class="cards">
+        <div class="card">
+          <h3>ACP ネイティブ</h3>
+          <p>
+            3 製品はどれも PTY
+            を覗いてエージェントの状態を推測している（herdr
+            は自己申告 API も用意しているが、結局エージェント側の協力が必要）。ukai
+            は <code>session/update</code> と <code>stopReason</code>
+            をそのまま畳むので、working / blocked
+            が構造として手に入る。plan・ツール呼び出し・パーミッションも同様。
+          </p>
+        </div>
+        <div class="card">
+          <h3>HTTP / WebSocket が一級</h3>
+          <p>
+            競合は「ローカルで CLI を起動」が前提で、リモートは SSH
+            で手元の体験を遠隔に伸ばす形。ukai
+            は ACP の Streamable HTTP / WebSocket
+            で最初からサーバー側のエージェントにつなぐので、クライアントが
+            落ちてもセッションはサーバーに残る。
+          </p>
+        </div>
+        <div class="card">
+          <h3>Kubernetes 実行（gateway + relay）</h3>
+          <p>
+            ワークスペースごとに Pod
+            を立て、接続より長生きするセッション・ターンの継続・保留中パーミッションの再提示まで持つ。SSH
+            の 1 台より横に伸び、CRD も cluster-scoped
+            な権限も要らない。競合に相当物はない。
+          </p>
+        </div>
+        <div class="card">
+          <h3>HTML レポート pane</h3>
+          <p>
+            エージェントが書いた HTML / 画像を、IPC
+            を持たない子 WebView + 配信範囲の制限 + CSP
+            で安全に pane
+            に出す。競合はプレビュー（Markdown / 画像 / PDF）止まりで、「エージェントの成果物が
+            HTML
+            である」ことを一級に扱っていない。このレポート自体がその用途。
+          </p>
+        </div>
+      </div>
+
+      <h2>機能マトリクス</h2>
+      <p class="sub">
+        <span class="mark yes">✓</span> あり ·
+        <span class="mark part">△</span> 一部 ·
+        <span class="mark no">✕</span> なし ·
+        <span class="mark unk">?</span> 公開ドキュメントで未確認
+      </p>
+      <div class="scroll">
+        <table>
+          <colgroup>
+            <col />
+            <col class="me" />
+            <col />
+            <col />
+            <col />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>機能</th>
+              <th class="me">ukai</th>
+              <th>orca</th>
+              <th>herdr</th>
+              <th>hermes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>ACP でエージェント状態を取得（PTY 推測でない）</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark part">△</span></td>
+              <td><span class="mark no">✕</span></td>
+            </tr>
+            <tr>
+              <td>HTTP / WebSocket でリモートエージェントに直結</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>リモート実行（SSH / クラスタ）</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>UI の再起動・切断をセッションが越える</td>
+              <td class="me"><span class="mark part">△</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>自動再接続</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>タスク = ブランチ + worktree</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>作業ツリー全体の差分レビュー</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark part">△</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>commit / PR / merge（land）</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>差分の行コメントをエージェントに返す</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>ターンの巻き戻し / チェックポイント</td>
+              <td class="me"><span class="mark part">△</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>未読と通知（見ている pane には出さない）</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>要対応エージェントへのジャンプ（inbox）</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>実行中でも次のプロンプトを積める</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>モデル / effort / アカウントの選択</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>slash コマンド / <code>@</code> ファイル補完</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>ターミナル pane</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>CLI / socket API でエージェントが UI を操作</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>1 プロンプトを複数エージェントに fan-out</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark part">△</span></td>
+              <td><span class="mark no">✕</span></td>
+            </tr>
+            <tr>
+              <td>HTML レポート / 画像を pane に描画</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark part">△</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark no">✕</span></td>
+            </tr>
+            <tr>
+              <td>pane ごとに別プロジェクトを混在</td>
+              <td class="me"><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>pane 境界のドラッグでリサイズ</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark yes">✓</span></td>
+            </tr>
+            <tr>
+              <td>会話ログの永続化 / 横断検索</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark part">△</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+            <tr>
+              <td>モバイル / ブラウザから覗く</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark part">△</span></td>
+              <td><span class="mark no">✕</span></td>
+            </tr>
+            <tr>
+              <td>GitHub / Linear の PR・issue 連携</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark part">△</span></td>
+            </tr>
+            <tr>
+              <td>コードエディタ</td>
+              <td class="me"><span class="mark no">✕</span></td>
+              <td><span class="mark yes">✓</span></td>
+              <td><span class="mark no">✕</span></td>
+              <td><span class="mark unk">?</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="legend-row">
+        herdr の「UI 再起動を越える」は常駐セッションサーバー、ukai の
+        <span class="mark part">△</span> は gateway / relay
+        経由のときだけ（ローカル stdio は切れる）。herdr の「作業ツリー差分」は
+        <code>worktree.*</code> API があるがレビュー UI
+        ではない点で一部。ukai の「巻き戻し」は relay の
+        <code>refs/ukai/wip/*</code> スナップショットがあるが復元 UI がない点で一部。
+      </p>
+
+      <h2>優先度マップ</h2>
+      <p class="sub">
+        効果（縦）と実装コスト（横）。左上がまずやるもの。番号は下の表と提案詳細に対応する。
+      </p>
+      <div class="chartcard">
+        <ul class="legend">
+          <li>
+            <span class="swatch" style="background: var(--series-1)"></span>ACP
+            の深掘り
+          </li>
+          <li>
+            <span class="swatch" style="background: var(--series-2)"></span>Git
+            ワークフロー
+          </li>
+          <li>
+            <span class="swatch" style="background: var(--series-3)"></span>操作性・運用
+          </li>
+        </ul>
+        <div id="plot"></div>
+        <p class="quadkey">
+          左上 = すぐやる · 右上 = 計画して取る · 左下 = 余力で · 右下 = 後回し
+        </p>
+        <div class="tip" id="tip" role="status" aria-live="polite"></div>
+      </div>
+
+      <h2>提案一覧（表）</h2>
+      <p class="sub">上のマップと同じデータ。</p>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>提案</th>
+              <th>分類</th>
+              <th class="num">効果</th>
+              <th class="num">コスト</th>
+              <th>優先</th>
+              <th>出どころ</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+
+      <h2>提案の詳細</h2>
+      <p class="sub">
+        それぞれ「何を」「なぜ（どの製品を見て）」「ukai のどこに入るか」。
+      </p>
+
+      <div class="group">
+        <h3>P0 — まずやる</h3>
+
+        <div class="item">
+          <header>
+            <span class="id">05</span>
+            <h4>作業ツリーの差分レビューと land（commit / push / PR）</h4>
+            <span class="badge">効果 5.0</span>
+            <span class="badge">コスト 4.5</span>
+          </header>
+          <p>
+            いま ukai がレビューできるのは
+            <strong>エージェントが ACP で報告した差分だけ</strong>（<code>ukai_core::review</code>）。ツール呼び出しの外で起きた変更、報告を落としたエージェント、Pod
+            の中で複数ターンにわたった変更の合計は見えないし、見終わったあと
+            commit も PR もできない。orca と hermes
+            はどちらもここが本体（hermes の Review Desk
+            はターン単位 / ファイル単位 + risk flag、Land は commit → PR
+            を 1 操作）。
+          </p>
+          <dl>
+            <dt>なぜ最優先</dt>
+            <dd>
+              gateway でエージェントを Pod
+              の中で動かす設計なので、作業ツリーがユーザーの手元にない。「成果を取り出す」経路が
+              UI に無いと、クラウド実行そのものが使い物にならない。
+            </dd>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-core</code> に <code>git</code>
+              モジュール（差分の取得は純粋関数側に寄せ、既存の
+              <code>review::hunks</code> / <code>review_prompt</code>
+              をそのまま再利用）。ローカルプロジェクトは手元の git、gateway
+              のワークスペースは relay に
+              <code>_ukai/workspace</code>
+              系のメソッドを足して差分と commit / push を代行させる（git
+              credential は既に workspace サイドカーとエージェントにしかない前提を崩さない）。
+            </dd>
+            <dt>注意</dt>
+            <dd>
+              PR 作成はエージェント自身が <code>gh</code>
+              でできる（既に credential helper が向いている）。UI
+              からやるときに ukai 側へ token を持ち込まないこと。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">06</span>
+            <h4>自動再接続と取りこぼしの補完</h4>
+            <span class="badge">効果 4.6</span>
+            <span class="badge">コスト 3.0</span>
+          </header>
+          <p>
+            SDK の HTTP クライアントは SSE
+            が切れても自動ではつなぎ直さない。いまは「切断を UI
+            に出して Resume を押させる」まで（design.md の Phase 5）。orca
+            は SSH worktree の自動再接続を売り、herdr
+            は切断に耐えることが存在理由。クラウド一級を謳う ukai
+            が手動なのは弱い。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-acp</code> の接続タスクに指数バックオフの再接続、復帰は既存の
+              <code>SessionOptions::restore</code> →
+              <code>RestoreOutcome</code> 経路をそのまま使う。relay
+              が履歴を持っているので gateway
+              経由なら取りこぼしは <code>session/load</code> の再生で埋まる。
+            </dd>
+            <dt>見せ方</dt>
+            <dd>
+              再接続中は <code>Status</code> に <code>Reconnecting</code>
+              を足して、既存の状態ドット（黄 / 緑 / 橙 / 赤 / 灰）の語彙に載せる。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">03</span>
+            <h4>要対応エージェントへのジャンプ</h4>
+            <span class="badge">効果 4.2</span>
+            <span class="badge">コスト 1.0</span>
+          </header>
+          <p>
+            ukai は未読（<code>ukai_core::Alert</code>）とサイドバー・タブ・pane
+            ヘッダのバッジを持っているが、「次に自分を待っているものへ行く」操作がない。hermes
+            は ⌘I
+            の 1 キー、herdr はサイドバーの blocked ロールアップ。pane
+            が増えるほど効くのに、ほぼ無料で入る。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-core</code>
+              に「未回答のパーミッション → 未読 → エラー切断」の順で次の pane
+              を返す純粋関数（<code>Transcript::awaiting_permission</code>
+              が既にある）。<code>app.rs</code> に <code>mod+i</code>、パレットにも項目を 1 つ。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">04</span>
+            <h4>実行中でも次のプロンプトを積める（キュー）</h4>
+            <span class="badge">効果 3.9</span>
+            <span class="badge">コスト 1.3</span>
+          </header>
+          <p>
+            いま <code>Status::Busy</code> の間は入力欄も送信ボタンも
+            <code>disabled</code>（<code>agent_pane.rs</code>）。競合は 3
+            つとも打ち込んでおける。複数 pane
+            を回す使い方では「思いついたときに書けない」が一番効く摩擦。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              pane スコープの下書きを <code>Vec&lt;Prompt&gt;</code>
+              のキューにして、<code>TurnEnded</code>
+              で先頭を送る。キューは入力欄の上に（レビューコメントと同じ場所に）積んで、個別に取り消せるようにする。添付とレビューコメントもキューの要素に載せる。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">01</span>
+            <h4>セッションモードとモデルの選択・表示</h4>
+            <span class="badge">効果 4.0</span>
+            <span class="badge">コスト 1.7</span>
+          </header>
+          <p>
+            ACP はセッションモード（plan / edit など）とその切り替えを持っているのに、ukai
+            は <code>SessionEvent</code>
+            に項目がなく、モードを出すことも変えることもできない。hermes
+            はタスクごとにエージェント・モデル・effort・アカウントを選んで preset
+            保存、orca はアカウント切り替えと使用量表示。ukai
+            は<strong>プロトコルに既にある情報を捨てている</strong>だけなので、素直に埋めるのが一番安い。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-acp</code> の <code>SessionEvent::Ready</code>
+              に利用可能なモード一覧、<code>ModeChanged</code> を追加。<code>SessionHandle</code> に
+              <code>set_mode</code>。<code>Transcript</code>
+              が現在のモードを持ち、pane ヘッダに出す。パレットから切り替えられると
+              hermes の preset 相当が代替できる。
+            </dd>
+            <dt>確認事項</dt>
+            <dd>
+              モデル選択が ACP v1 の範囲か v2
+              待ちかは要確認。<code>docs/design.md</code> の open question
+              に足す。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">02</span>
+            <h4>slash コマンドと <code>@</code> ファイル補完</h4>
+            <span class="badge">効果 3.6</span>
+            <span class="badge">コスト 2.0</span>
+          </header>
+          <p>
+            ACP はエージェントが使えるコマンド一覧を通知で送ってくる。ukai
+            はそれを無視しているので、<code>/review</code> のようなコマンドを
+            CLI で覚えている人が ukai
+            に来ると機能が消えたように見える。競合 3
+            つはターミナルなのでエージェント本来の UI
+            がそのまま出る（彼らが得をしている構造的な点）。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-acp</code> で available commands
+              を拾って <code>Ready</code> / 更新イベントに載せ、入力欄の
+              <code>/</code> 補完に出す。<code>@</code>
+              のファイル補完は <code>ukai_core::palette</code>
+              のあいまい検索をそのまま使える（添付の
+              <code>resource_link</code> 経路に繋げる）。
+            </dd>
+          </dl>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>P1 — 次に</h3>
+
+        <div class="item">
+          <header>
+            <span class="id">07</span>
+            <h4>タスク = ブランチ / worktree の第一級化</h4>
+            <span class="badge">効果 4.4</span>
+            <span class="badge">コスト 4.0</span>
+          </header>
+          <p>
+            3 製品共通の骨格。ukai の gateway
+            は既にワークスペースを（利用者・namespace・リポジトリ・ref・コマンド・pane
+            の鍵）のハッシュで分けているので、<strong>ref
+            を UI から選べるようにするだけで 8 割が揃う</strong>。ローカルプロジェクトについては「pane
+            を開くときに worktree を作る」を足す。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-gateway/src/job.rs</code>
+              のワークスペース識別子に branch / ref
+              を含める（既に ref は入っている）。UI
+              側は pane を開くダイアログで「新しいタスク名 → ブランチ」を入れる。<code>Projects</code>
+              が「ルート + 不透明な id」なのは worktree
+              を同じプロジェクトに束ねる前提で設計済み（design.md
+              にその意図が書いてある）ので、モデル変更は小さい。
+            </dd>
+            <dt>依存</dt>
+            <dd>提案 5（land）と組で初めて価値が出る。</dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">08</span>
+            <h4>ukai CLI / ローカル socket API</h4>
+            <span class="badge">効果 3.9</span>
+            <span class="badge">コスト 2.9</span>
+          </header>
+          <p>
+            herdr の socket API（<code>pane.*</code> / <code>agent.*</code> /
+            <code>events.subscribe</code>）と orca の CLI
+            は、<strong>エージェント自身がクライアントを操作する</strong>ための面。ukai
+            でこれがあれば「レポートを書いたエージェントが、それを隣の pane
+            に開く」「エージェントが別エージェントの pane
+            を立てて結果を待つ」ができる。HTML レポートが主要ユースケースである
+            ukai とは特に相性がいい。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-app</code> が
+              <code>$UKAI_STATE_DIR/ukai.sock</code>
+              を listen し、<code>open-report</code> /
+              <code>open-agent</code> / <code>prompt</code> /
+              <code>layout</code> を受ける。ハンドラは
+              <code>ukai-core</code> の <code>Layout</code>
+              操作に落ちるので、ロジックは headless にテストできる。
+            </dd>
+            <dt>注意</dt>
+            <dd>
+              このソケットは
+              <strong>UI を外から操作できる口</strong>なので、ファイルパーミッション
+              0600 とプロジェクトルート外のパス拒否は最初から。gateway
+              の Pod の中のエージェントには届かない（届かせない）。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">12</span>
+            <h4>チェックポイントとターンの巻き戻し</h4>
+            <span class="badge">効果 3.6</span>
+            <span class="badge">コスト 4.2</span>
+          </header>
+          <p>
+            hermes はターン単位で diff と restore、orca は
+            <code>snapshot</code>。ukai は relay
+            が既に <code>refs/ukai/wip/&lt;id&gt;</code>
+            へ定期・ターン終了・停止時に snapshot
+            を push している。<strong>材料はあるのに復元 UI
+            がない</strong>のがもったいない。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              relay の snapshot
+              をターン id で名前付きにして、<code>_ukai/checkpoints</code>
+              で列挙と復元を出す。UI
+              は transcript のターン境界に「ここまで戻す」。ローカルプロジェクトでは
+              提案 5 の git モジュールで同じことをする。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">10</span>
+            <h4>会話ジャーナルの永続化と横断検索</h4>
+            <span class="badge">効果 3.4</span>
+            <span class="badge">コスト 3.0</span>
+          </header>
+          <p>
+            ukai は会話を保存せず、再起動後は
+            <code>session/load</code> → <code>session/resume</code>
+            → 新規の順で復帰する。<code>loadSession</code>
+            を広告しないエージェントでは履歴が消える。orca
+            は会話ジャーナル DB
+            を持ち、横断検索も売りにしている。design.md
+            が「SQLite を入れる条件」として挙げている状況そのもの。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>state.json</code> には混ぜず、追記専用のジャーナルを別ファイルに（design.md
+              の方針どおり）。<code>Transcript</code> の fold
+              が純粋関数なので、ジャーナルの再生でそのまま復元できる。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">09</span>
+            <h4><code>terminal/*</code> の client capability</h4>
+            <span class="badge">効果 3.3</span>
+            <span class="badge">コスト 3.4</span>
+          </header>
+          <p>
+            ukai は <code>terminal/*</code>
+            を広告していない（初期の方針）。しかし競合 3
+            つはどれもターミナルが本体で、ユーザーは「エージェントが走らせたコマンドの出力を見たい」。ターミナル
+            pane を作る（= 多重化器になる）のではなく、<strong>ACP
+            の <code>terminal/*</code> に応えて、出力を transcript
+            のツール呼び出し行として見せる</strong>のが ukai
+            らしい落とし方。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-acp</code> に <code>fs.rs</code>
+              と同じ構えで <code>terminal.rs</code>（プロジェクトルート内で実行、出力をリングバッファ）。<code>Transcript</code>
+              に出力付きのエントリ。gateway
+              経由ではエージェント側に terminal
+              を広告しない現状の方針と矛盾しないか要整理。
+            </dd>
+            <dt>保留の理由</dt>
+            <dd>
+              任意コマンド実行を ukai
+              が担うことになるので、パーミッション規則（Phase 5）より後。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">11</span>
+            <h4>1 プロンプトを複数 pane に fan-out して比較</h4>
+            <span class="badge">効果 3.0</span>
+            <span class="badge">コスト 1.9</span>
+          </header>
+          <p>
+            orca の「1 つのプロンプトを 5
+            つのエージェントに投げ、結果を比べて勝者を merge」。ukai
+            はタブに別エージェント・別プロジェクトを並べられるので、<strong>「このタブの全
+            agent pane に同じプロンプトを送る」だけで成立する</strong>。鵜飼という名前にも合う。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              パレットのコマンド 1 つ（「タブ内の全エージェントに送る」）+
+              入力欄のトグル。送信先は <code>Layout</code>
+              からそのタブの agent pane を列挙するだけ。
+            </dd>
+            <dt>依存</dt>
+            <dd>比較して選ぶところは提案 5 の差分レビューが前提。</dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">13</span>
+            <h4>pane のリサイズとフォーカス移動キー</h4>
+            <span class="badge">効果 2.8</span>
+            <span class="badge">コスト 1.2</span>
+          </header>
+          <p>
+            競合は全部持っている。ukai は
+            <code>Layout</code>
+            の split が既に子ごとの比率を持っているので、境界のドラッグを足すだけ（design.md
+            にも「今後」として明記）。あわせて
+            <code>mod+矢印</code> の pane
+            間フォーカス移動も。現状のショートカットは
+            <code>mod+k/t/d/w</code> の 4 つだけで、キーボードで pane
+            を渡り歩けない。
+          </p>
+          <dl>
+            <dt>入れる場所</dt>
+            <dd>
+              <code>ukai-core/src/layout.rs</code>
+              に比率の更新（不変条件はプロパティテストで既に守られている）、<code>app.rs</code>
+              のショートカットに方向キー。
+            </dd>
+          </dl>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>P2 — 後で / 条件付き</h3>
+
+        <div class="item">
+          <header>
+            <span class="id">16</span>
+            <h4>ブラウザ pane と要素ピック → プロンプト（orca Design Mode 相当）</h4>
+            <span class="badge">効果 2.9</span>
+            <span class="badge">コスト 3.7</span>
+          </header>
+          <p>
+            orca は worktree ごとに実 Chromium
+            を持ち、クリックした要素の HTML / CSS /
+            スクショをプロンプトに流し込む。ukai は
+            <code>report_pane.rs</code> に
+            <strong>IPC を持たない子 WebView という土台を既に持っている</strong>ので、URL
+            を読めるようにすれば近いことができる。フロントエンドを書かせる用途では強い。
+          </p>
+          <dl>
+            <dt>注意</dt>
+            <dd>
+              要素を取るには子 WebView
+              に script を注入して結果を受け取る必要があり、<strong>「IPC
+              ハンドラを持たせない」という現在の安全保証を崩す</strong>。別オリジン（任意の
+              web）を読む pane を足すなら、レポート pane
+              とは別の種別として設計しないと危ない。
+            </dd>
+          </dl>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">17</span>
+            <h4>リモート UI（ブラウザ / モバイルから覗く）</h4>
+            <span class="badge">効果 2.6</span>
+            <span class="badge">コスト 5.0</span>
+          </header>
+          <p>
+            orca のモバイルコンパニオン（完了通知 + 追い指示）、herdr
+            の SSH attach。ukai
+            は<strong>セッションがサーバー側で生きている</strong>ので、原理的には一番筋がいい（gateway
+            に別のクライアントがつなげばよい）。Dioxus の web
+            ターゲットもある。ただし認証・レポート配信・子 WebView
+            前提の描画をすべて作り直すことになるので、コアが固まってから。
+          </p>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">15</span>
+            <h4>GitHub の issue / PR から pane を開く</h4>
+            <span class="badge">効果 2.5</span>
+            <span class="badge">コスト 3.6</span>
+          </header>
+          <p>
+            orca は GitHub / Linear
+            をアプリ内に持ち、issue から worktree
+            を開く。gateway が ref を指定して clone
+            する作りなので「この PR のブランチでエージェントを開く」は自然に繋がる。ただしアプリ内ブラウズまで作ると
+            IDE 化するので、<strong>「issue / PR
+            を選んでタスクを開く」だけ</strong>に絞る。<code>gh</code>
+            を呼ぶ形にすれば token を ukai が持たずに済む。
+          </p>
+        </div>
+
+        <div class="item">
+          <header>
+            <span class="id">14</span>
+            <h4>使用量 / レート制限の可視化</h4>
+            <span class="badge">効果 2.4</span>
+            <span class="badge">コスト 2.4</span>
+          </header>
+          <p>
+            orca はアカウント切り替えと Claude / Codex
+            の使用量・リセット時刻を出し、hermes
+            は複数アカウントを扱う。ukai
+            の認証はヘッダの <code>${env:...}</code>
+            参照だけなので、まず ACP
+            側に usage を運ぶ場所があるかの確認から。無ければ見送り。
+          </p>
+        </div>
+      </div>
+
+      <h2>意図的に取り込まないもの</h2>
+      <ul class="plain">
+        <li>
+          <strong>コードエディタ / LSP。</strong> orca は VS Code
+          のエディタを積んでいるが、ukai の non-goal
+          のまま。差分レビュー（提案 5）で読めれば足りる。
+        </li>
+        <li>
+          <strong>ターミナル多重化器になること。</strong> herdr
+          の領域。ukai が PTY を並べ始めると ACP
+          ネイティブである意味が薄れる。<code>terminal/*</code>
+          への応答（提案 9）までに留める。
+        </li>
+        <li>
+          <strong>プラグインマーケットプレイス。</strong> pre-alpha
+          で拡張点を固定するのは早い。CLI / socket API（提案 8）が同じ需要の
+          8 割を吸う。
+        </li>
+        <li>
+          <strong>エージェントのプリセットを 40 個同梱すること。</strong>
+          ukai の <code>[agents.&lt;id&gt;]</code>
+          は宣言的で、ユーザー設定に層として重ねられる。同梱するなら
+          <code>ukai.toml</code> の例を増やすだけでよい。
+        </li>
+      </ul>
+
+      <h2>次の一手</h2>
+      <ul class="plain">
+        <li>
+          <code>docs/design.md</code> の Milestones に Phase 6
+          として「Git ワークフロー（作業ツリーの差分・land・タスク =
+          ブランチ）」を追加し、提案 5 / 7 をそこに置く。
+        </li>
+        <li>
+          Phase 5 に提案 6（自動再接続）が既にある。提案 1 / 2（ACP
+          のモードと slash
+          コマンド）は Phase 3 の積み残しとしてすぐ着手できる。
+        </li>
+        <li>
+          提案 3 / 4 / 13 は 1 つずつ小さな PR
+          になる。先に出して UI の摩擦を消しておくと、Git
+          ワークフローの検証が楽になる。
+        </li>
+        <li>
+          <code>docs/design.md</code> の open question に「ACP
+          にモデル選択と usage
+          があるか（v1 / v2）」を追加（提案 1 / 14 の前提）。
+        </li>
+      </ul>
+
+      <footer>
+        <p>
+          調査日 2026-10-14。各製品の公開ドキュメントのみを参照（ソース未読）。
+        </p>
+        <ul>
+          <li>orca — <a href="https://github.com/stablyai/orca">github.com/stablyai/orca</a> · <a href="https://www.onorca.dev/">onorca.dev</a></li>
+          <li>herdr — <a href="https://github.com/herdrdev/herdr">github.com/herdrdev/herdr</a> · <a href="https://herdr.dev/docs/socket-api/">socket API</a> · <a href="https://herdr.dev/agent-guide.md">agent guide</a></li>
+          <li>hermes-ide — <a href="https://github.com/hermes-hq/hermes-ide">github.com/hermes-hq/hermes-ide</a></li>
+          <li>ACP — <a href="https://agentclientprotocol.com">agentclientprotocol.com</a></li>
+        </ul>
+      </footer>
+    </main>
+
+    <script>
+      "use strict";
+
+      const CATS = {
+        acp: { i: 1, label: "ACP の深掘り" },
+        git: { i: 2, label: "Git ワークフロー" },
+        ops: { i: 3, label: "操作性・運用" },
+      };
+
+      // 効果 / コスト は 1–5 の見積もり。表とマップの唯一の出どころ。
+      const ITEMS = [
+        { n: 1, name: "セッションモードとモデルの選択", cat: "acp", impact: 4.0, effort: 1.7, pri: "P0", from: "hermes / orca" },
+        { n: 2, name: "slash コマンドと @ ファイル補完", cat: "acp", impact: 3.6, effort: 2.0, pri: "P0", from: "3 製品共通" },
+        { n: 3, name: "要対応エージェントへのジャンプ", cat: "ops", impact: 4.2, effort: 1.0, pri: "P0", from: "hermes (⌘I) / herdr" },
+        { n: 4, name: "実行中のプロンプトのキュー", cat: "ops", impact: 3.9, effort: 1.3, pri: "P0", from: "3 製品共通" },
+        { n: 5, name: "作業ツリーの差分レビューと land", cat: "git", impact: 5.0, effort: 4.5, pri: "P0", from: "hermes / orca" },
+        { n: 6, name: "自動再接続と取りこぼしの補完", cat: "ops", impact: 4.6, effort: 3.0, pri: "P0", from: "orca / herdr" },
+        { n: 7, name: "タスク = ブランチ / worktree", cat: "git", impact: 4.4, effort: 4.0, pri: "P1", from: "3 製品共通" },
+        { n: 8, name: "ukai CLI / ローカル socket API", cat: "ops", impact: 3.9, effort: 2.9, pri: "P1", from: "herdr / orca" },
+        { n: 9, name: "terminal/* の client capability", cat: "acp", impact: 3.3, effort: 3.4, pri: "P1", from: "3 製品共通" },
+        { n: 10, name: "会話ジャーナルの永続化と横断検索", cat: "ops", impact: 3.4, effort: 3.0, pri: "P1", from: "orca" },
+        { n: 11, name: "1 プロンプトの fan-out", cat: "ops", impact: 3.0, effort: 1.9, pri: "P1", from: "orca" },
+        { n: 12, name: "チェックポイントと巻き戻し", cat: "git", impact: 3.6, effort: 4.2, pri: "P1", from: "hermes / orca" },
+        { n: 13, name: "pane のリサイズとフォーカス移動", cat: "ops", impact: 2.8, effort: 1.2, pri: "P1", from: "3 製品共通" },
+        { n: 14, name: "使用量 / レート制限の可視化", cat: "acp", impact: 2.4, effort: 2.4, pri: "P2", from: "orca / hermes" },
+        { n: 15, name: "GitHub の issue / PR からタスクを開く", cat: "git", impact: 2.5, effort: 3.6, pri: "P2", from: "orca / hermes" },
+        { n: 16, name: "ブラウザ pane と要素ピック", cat: "ops", impact: 2.9, effort: 3.7, pri: "P2", from: "orca (Design Mode)" },
+        { n: 17, name: "リモート UI（ブラウザ / モバイル）", cat: "ops", impact: 2.6, effort: 5.0, pri: "P2", from: "orca / herdr" },
+      ];
+
+      /* ---------- 表 ---------- */
+      const rows = document.getElementById("rows");
+      for (const it of ITEMS) {
+        const tr = document.createElement("tr");
+        const cells = [
+          ["num", String(it.n).padStart(2, "0")],
+          ["", it.name],
+          ["", CATS[it.cat].label],
+          ["num", it.impact.toFixed(1)],
+          ["num", it.effort.toFixed(1)],
+          ["", it.pri],
+          ["", it.from],
+        ];
+        for (const [cls, text] of cells) {
+          const td = document.createElement("td");
+          if (cls) td.className = cls;
+          td.textContent = text;
+          tr.appendChild(td);
+        }
+        rows.appendChild(tr);
+      }
+
+      /* ---------- 散布図（効果 × コスト） ---------- */
+      const SVGNS = "http://www.w3.org/2000/svg";
+      const W = 760,
+        H = 470,
+        L = 64,
+        R = 22,
+        T = 26,
+        B = 58;
+      const x0 = L,
+        x1 = W - R,
+        y0 = H - B,
+        y1 = T;
+      const sx = (v) => x0 + ((v - 0.5) / 4.6) * (x1 - x0);
+      const sy = (v) => y0 - ((v - 0.5) / 4.6) * (y0 - y1);
+
+      const el = (name, attrs, text) => {
+        const e = document.createElementNS(SVGNS, name);
+        for (const k in attrs) e.setAttribute(k, attrs[k]);
+        if (text !== undefined) e.textContent = text;
+        return e;
+      };
+
+      const svg = el("svg", {
+        viewBox: `0 0 ${W} ${H}`,
+        role: "img",
+        "aria-label":
+          "提案 17 件を効果（縦）と実装コスト（横）で配置した散布図。詳細は下の提案一覧の表にある。",
+      });
+
+      // グリッド（実線のヘアライン、面から 1 段）
+      for (let v = 1; v <= 5; v++) {
+        svg.appendChild(
+          el("line", {
+            x1: x0,
+            x2: x1,
+            y1: sy(v),
+            y2: sy(v),
+            stroke: "var(--grid)",
+            "stroke-width": 1,
+          }),
+        );
+        svg.appendChild(
+          el("line", {
+            y1: y1,
+            y2: y0,
+            x1: sx(v),
+            x2: sx(v),
+            stroke: "var(--grid)",
+            "stroke-width": 1,
+          }),
+        );
+        svg.appendChild(
+          el(
+            "text",
+            {
+              x: x0 - 12,
+              y: sy(v) + 4,
+              "text-anchor": "end",
+              fill: "var(--muted)",
+              "font-size": 11.5,
+              "font-variant-numeric": "tabular-nums",
+            },
+            String(v),
+          ),
+        );
+        svg.appendChild(
+          el(
+            "text",
+            {
+              x: sx(v),
+              y: y0 + 20,
+              "text-anchor": "middle",
+              fill: "var(--muted)",
+              "font-size": 11.5,
+              "font-variant-numeric": "tabular-nums",
+            },
+            String(v),
+          ),
+        );
+      }
+
+      // 四分割（軸より一段強いヘアライン）
+      svg.appendChild(
+        el("line", {
+          x1: sx(3),
+          x2: sx(3),
+          y1: y1,
+          y2: y0,
+          stroke: "var(--axis)",
+          "stroke-width": 1,
+        }),
+      );
+      svg.appendChild(
+        el("line", {
+          x1: x0,
+          x2: x1,
+          y1: sy(3),
+          y2: sy(3),
+          stroke: "var(--axis)",
+          "stroke-width": 1,
+        }),
+      );
+
+      // 軸
+      svg.appendChild(
+        el("line", {
+          x1: x0,
+          x2: x1,
+          y1: y0,
+          y2: y0,
+          stroke: "var(--axis)",
+          "stroke-width": 1,
+        }),
+      );
+      svg.appendChild(
+        el("line", {
+          x1: x0,
+          x2: x0,
+          y1: y1,
+          y2: y0,
+          stroke: "var(--axis)",
+          "stroke-width": 1,
+        }),
+      );
+      svg.appendChild(
+        el(
+          "text",
+          {
+            x: (x0 + x1) / 2,
+            y: H - 16,
+            "text-anchor": "middle",
+            fill: "var(--text-2)",
+            "font-size": 12.5,
+          },
+          "実装コスト（小 → 大）",
+        ),
+      );
+      svg.appendChild(
+        el(
+          "text",
+          {
+            x: 16,
+            y: (y0 + y1) / 2,
+            "text-anchor": "middle",
+            fill: "var(--text-2)",
+            "font-size": 12.5,
+            transform: `rotate(-90 16 ${(y0 + y1) / 2})`,
+          },
+          "効果（小 → 大）",
+        ),
+      );
+
+      // 象限のラベルは図の外（.quadkey）に出す。点と重なるため。
+
+      // 点（2px の面リング + 直接ラベルとして番号）
+      const tip = document.getElementById("tip");
+      const card = document.querySelector(".chartcard");
+      const show = (it, cx, cy) => {
+        tip.innerHTML = "";
+        const b = document.createElement("b");
+        b.textContent = `${String(it.n).padStart(2, "0")} ${it.name}`;
+        const d = document.createElement("div");
+        d.className = "t2";
+        d.textContent = `効果 ${it.impact.toFixed(1)} · コスト ${it.effort.toFixed(1)} · ${it.pri} · ${CATS[it.cat].label}`;
+        const s = document.createElement("div");
+        s.className = "t2";
+        s.textContent = `出どころ: ${it.from}`;
+        tip.append(b, d, s);
+        const cardRect = card.getBoundingClientRect();
+        const svgRect = svg.getBoundingClientRect();
+        const px = (cx / W) * svgRect.width + (svgRect.left - cardRect.left);
+        const py = (cy / H) * svgRect.height + (svgRect.top - cardRect.top);
+        tip.style.opacity = "1";
+        const w = tip.offsetWidth;
+        tip.style.left = `${Math.max(6, Math.min(cardRect.width - w - 6, px - w / 2))}px`;
+        tip.style.top = `${Math.max(6, py - tip.offsetHeight - 14)}px`;
+      };
+      const hide = () => {
+        tip.style.opacity = "0";
+      };
+
+      for (const it of ITEMS) {
+        const cx = sx(it.effort),
+          cy = sy(it.impact);
+        const color = `var(--series-${CATS[it.cat].i})`;
+        const g = el("g", {
+          class: "dot",
+          tabindex: "0",
+          role: "img",
+          "aria-label": `${it.name}。効果 ${it.impact.toFixed(1)}、コスト ${it.effort.toFixed(1)}、${it.pri}`,
+        });
+        g.appendChild(
+          el("circle", { class: "hit", cx, cy, r: 14, fill: "transparent" }),
+        );
+        g.appendChild(
+          el("circle", {
+            cx,
+            cy,
+            r: 6,
+            fill: color,
+            stroke: "var(--surface)",
+            "stroke-width": 2,
+          }),
+        );
+        g.appendChild(
+          el(
+            "text",
+            {
+              x: cx + 11,
+              y: cy + 4,
+              fill: "var(--text-2)",
+              "font-size": 11.5,
+              "font-variant-numeric": "tabular-nums",
+            },
+            String(it.n).padStart(2, "0"),
+          ),
+        );
+        g.addEventListener("mouseenter", () => show(it, cx, cy));
+        g.addEventListener("focus", () => show(it, cx, cy));
+        g.addEventListener("mouseleave", hide);
+        g.addEventListener("blur", hide);
+        svg.appendChild(g);
+      }
+
+      document.getElementById("plot").appendChild(svg);
+
+      /* ---------- 配色トグル ---------- */
+      const root = document.documentElement;
+      document.getElementById("theme").addEventListener("click", () => {
+        const dark =
+          root.dataset.theme === "dark" ||
+          (!root.dataset.theme &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        root.dataset.theme = dark ? "light" : "dark";
+      });
+    </script>
+  </body>
+</html>

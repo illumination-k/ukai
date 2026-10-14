@@ -3,9 +3,11 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome, SessionEvent,
-    ToolStatus,
+    AgentCommand, FileDiff, ModeState, PermissionChoice, PermissionId, PlanItem, PromptCaps,
+    RestoreOutcome, SessionEvent, ToolStatus,
 };
+
+use crate::layout::PaneId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -17,6 +19,68 @@ pub enum Status {
     Closed {
         error: Option<String>,
     },
+}
+
+/// What sending the composer's contents does in a given [`Status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dispatch {
+    /// Hand it to the agent now.
+    Send,
+    /// Hold it until the running turn ends.
+    Queue,
+    /// Nothing to send, or nowhere to send it.
+    Ignore,
+}
+
+impl Status {
+    /// Where a composed prompt goes. Queueing while the agent works (or while
+    /// the session is still coming up) lets the user keep typing instead of
+    /// waiting for the turn to end.
+    pub fn dispatch(&self, has_content: bool) -> Dispatch {
+        match self {
+            _ if !has_content => Dispatch::Ignore,
+            Status::Idle => Dispatch::Send,
+            Status::Busy | Status::Connecting => Dispatch::Queue,
+            Status::Closed { .. } => Dispatch::Ignore,
+        }
+    }
+}
+
+/// Why a pane wants the user, most pressing first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Attention {
+    /// The agent is blocked on a permission request.
+    Permission,
+    /// The session dropped with an error.
+    Failed,
+    /// Something happened that the user has not looked at.
+    Unread,
+}
+
+/// The pane to jump to from `after`, given every pane in display order and
+/// why it wants the user: the most pressing one, and among equals the next
+/// one after `after`, wrapping around. `after` is never the answer, so
+/// pressing the shortcut again moves on.
+pub fn next_attention(
+    panes: impl IntoIterator<Item = (PaneId, Option<Attention>)>,
+    after: PaneId,
+) -> Option<PaneId> {
+    let panes: Vec<(PaneId, Option<Attention>)> = panes.into_iter().collect();
+    let len = panes.len();
+    if len == 0 {
+        return None;
+    }
+    let start = panes
+        .iter()
+        .position(|(pane, _)| *pane == after)
+        .unwrap_or(0);
+    panes
+        .iter()
+        .enumerate()
+        .filter(|(_, (pane, _))| *pane != after)
+        .filter_map(|(order, (pane, attention))| attention.map(|a| (order, *pane, a)))
+        .min_by_key(|(order, _, attention)| (*attention, (order + len - start) % len))
+        .map(|(_, pane, _)| pane)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +129,10 @@ pub struct Transcript {
     pub entries: Vec<Entry>,
     /// What the agent accepts in a prompt, known once it is ready.
     pub prompt_caps: PromptCaps,
+    /// The modes the agent offers and the one it is in.
+    pub modes: ModeState,
+    /// The commands a prompt may name as `/<name>`.
+    pub commands: Vec<AgentCommand>,
 }
 
 impl Default for Transcript {
@@ -74,6 +142,8 @@ impl Default for Transcript {
             status: Status::Connecting,
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
+            modes: ModeState::default(),
+            commands: Vec::new(),
         }
     }
 }
@@ -149,6 +219,18 @@ impl Transcript {
             .any(|entry| matches!(entry, Entry::Permission { answer: None, .. }))
     }
 
+    /// Why this session wants the user, from the transcript alone. A pane's
+    /// unread mark is tracked outside it, so the caller folds that in.
+    pub fn attention(&self) -> Option<Attention> {
+        if self.awaiting_permission() {
+            return Some(Attention::Permission);
+        }
+        match self.status {
+            Status::Closed { error: Some(_) } => Some(Attention::Failed),
+            _ => None,
+        }
+    }
+
     /// Record a cancel: every pending permission request is answered with it.
     pub fn cancel(&mut self) {
         for entry in &mut self.entries {
@@ -173,10 +255,12 @@ impl Transcript {
                 agent,
                 restore,
                 prompt,
+                modes,
                 ..
             } => {
                 self.agent = agent;
                 self.prompt_caps = prompt;
+                self.modes = modes;
                 self.status = Status::Idle;
                 let notice = match restore {
                     RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
@@ -290,6 +374,10 @@ impl Transcript {
                     answer: None,
                 });
             }
+            // The mode and command lists live beside the entries: they are the
+            // session's current state, not something that happened in it.
+            SessionEvent::ModeChanged { mode } => self.modes.current = Some(mode),
+            SessionEvent::CommandsChanged { commands } => self.commands = commands,
             SessionEvent::FileWritten { path } => self.entries.push(Entry::FileWritten { path }),
             SessionEvent::TurnEnded { stop_reason } => {
                 if stop_reason != "end_turn" {
@@ -307,6 +395,11 @@ impl Transcript {
                 });
                 self.status = Status::Idle;
             }
+            // Not a turn: the status stays as it was.
+            SessionEvent::Warning { message } => self.entries.push(Entry::Notice {
+                text: message,
+                error: true,
+            }),
             SessionEvent::Closed { error } => {
                 if let Some(error) = &error {
                     self.entries.push(Entry::Notice {
@@ -347,6 +440,7 @@ mod tests {
             session_id: "s".into(),
             restore,
             prompt: PromptCaps::default(),
+            modes: ModeState::default(),
         }
     }
 
@@ -517,6 +611,7 @@ mod tests {
             session_id: "s".into(),
             restore: RestoreOutcome::Fresh,
             prompt: caps,
+            modes: ModeState::default(),
         }]);
         assert_eq!(transcript.prompt_caps, caps);
     }

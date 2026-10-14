@@ -18,6 +18,10 @@ use crate::project::ProjectId;
 
 pub type PaneId = u64;
 
+/// The least a pane can be shrunk to by dragging a divider, as a share of
+/// the pair it is in: enough that it stays visible and grabbable.
+const MIN_SHARE: f32 = 0.05;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -227,6 +231,80 @@ impl Layout {
         }
     }
 
+    /// The agent panes of the active tab, in display order: what a prompt
+    /// sent to the whole tab goes to.
+    pub fn active_agent_panes(&self) -> Vec<PaneId> {
+        self.active_tab()
+            .root
+            .panes()
+            .into_iter()
+            .filter(|pane| matches!(self.content(*pane), Some(PaneContent::Agent { .. })))
+            .collect()
+    }
+
+    /// Where focus goes from `pane` when moving `direction`, `forward` being
+    /// right or down: the neighbouring pane across the innermost divider that
+    /// runs that way. `None` when there is nothing that way.
+    pub fn neighbour(&self, pane: PaneId, direction: Direction, forward: bool) -> Option<PaneId> {
+        let tab = self.tab_of(pane)?;
+        let mut path = Vec::new();
+        self.tabs[tab].root.path_to(pane, &mut path).then_some(())?;
+        // From the parent split outwards, take the first one that runs the
+        // right way and has a sibling on that side.
+        for depth in (0..path.len()).rev() {
+            let Some(Node::Split {
+                direction: own,
+                children,
+                ..
+            }) = self.tabs[tab].root.at(&path[..depth])
+            else {
+                continue;
+            };
+            if *own != direction {
+                continue;
+            }
+            let index = path[depth];
+            let sibling = if forward {
+                index.checked_add(1).filter(|next| *next < children.len())
+            } else {
+                index.checked_sub(1)
+            };
+            if let Some(sibling) = sibling.and_then(|index| children.get(index)) {
+                return Some(if forward {
+                    sibling.first_pane()
+                } else {
+                    sibling.last_pane()
+                });
+            }
+        }
+        None
+    }
+
+    /// Move the divider between children `index` and `index + 1` of the split
+    /// at `path` in the active tab: `first` is the share of their combined
+    /// size that goes to the earlier child, clamped so neither collapses.
+    /// Returns whether the split was there.
+    pub fn resize(&mut self, path: &[usize], index: usize, first: f32) -> bool {
+        let active = self.active;
+        let Some(Node::Split { sizes, .. }) = self.tabs[active].root.at_mut(path) else {
+            return false;
+        };
+        let Some(pair) = sizes
+            .get(index)
+            .zip(sizes.get(index + 1))
+            .map(|(a, b)| a + b)
+        else {
+            return false;
+        };
+        if !first.is_finite() {
+            return false;
+        }
+        let share = first.clamp(MIN_SHARE, 1.0 - MIN_SHARE);
+        sizes[index] = pair * share;
+        sizes[index + 1] = pair * (1.0 - share);
+        true
+    }
+
     /// Verify the invariants listed in the module docs, e.g. on a layout read
     /// back from disk.
     pub fn check(&self) -> Result<(), String> {
@@ -292,6 +370,48 @@ impl Node {
             Node::Pane(id) => *id,
             // Normalized splits are never empty; fall back to an id no pane has.
             Node::Split { children, .. } => children.first().map_or(PaneId::MAX, Node::first_pane),
+        }
+    }
+
+    fn last_pane(&self) -> PaneId {
+        match self {
+            Node::Pane(id) => *id,
+            Node::Split { children, .. } => children.last().map_or(PaneId::MAX, Node::last_pane),
+        }
+    }
+
+    /// The child indices leading from here to `pane`, pushed onto `path`.
+    fn path_to(&self, pane: PaneId, path: &mut Vec<usize>) -> bool {
+        match self {
+            Node::Pane(id) => *id == pane,
+            Node::Split { children, .. } => children.iter().enumerate().any(|(index, child)| {
+                path.push(index);
+                child.path_to(pane, path) || {
+                    path.pop();
+                    false
+                }
+            }),
+        }
+    }
+
+    /// The node `path` leads to, the root itself for an empty path.
+    fn at(&self, path: &[usize]) -> Option<&Node> {
+        match path.split_first() {
+            None => Some(self),
+            Some((index, rest)) => match self {
+                Node::Pane(_) => None,
+                Node::Split { children, .. } => children.get(*index)?.at(rest),
+            },
+        }
+    }
+
+    fn at_mut(&mut self, path: &[usize]) -> Option<&mut Node> {
+        match path.split_first() {
+            None => Some(self),
+            Some((index, rest)) => match self {
+                Node::Pane(_) => None,
+                Node::Split { children, .. } => children.get_mut(*index)?.at_mut(rest),
+            },
         }
     }
 

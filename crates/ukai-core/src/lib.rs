@@ -2,6 +2,7 @@
 //! tested headless. `ukai-app` wraps these types in signals and renders them.
 
 pub mod attachment;
+pub mod complete;
 mod layout;
 pub mod palette;
 mod project;
@@ -12,4 +13,6 @@ mod transcript;
 
 pub use layout::{Direction, Layout, Node, PaneContent, PaneId, Tab};
 pub use project::{Project, ProjectId, Projects};
-pub use transcript::{Alert, Entry, Status, Transcript};
+pub use transcript::{
+    Alert, Attention, Dispatch, Entry, Status, Transcript, next_attention,
+};

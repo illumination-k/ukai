@@ -23,8 +23,9 @@ use agent_client_protocol::schema::v1::{
     InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus, PromptRequest,
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionId, SessionNotification, SessionUpdate, TextResourceContents, ToolCallContent,
-    ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
+    SessionId, SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionModeRequest, TextResourceContents, ToolCallContent, ToolCallStatus,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
 use base64::Engine as _;
@@ -53,6 +54,8 @@ pub enum SessionEvent {
         restore: RestoreOutcome,
         /// What a prompt may carry besides text.
         prompt: PromptCaps,
+        /// The modes the agent offers, empty when it has none.
+        modes: ModeState,
     },
     /// A chunk of a user message the agent replays while loading a session.
     UserMessage { text: String },
@@ -77,6 +80,11 @@ pub enum SessionEvent {
     },
     /// The agent's current plan, replacing any earlier one.
     Plan { entries: Vec<PlanItem> },
+    /// The session is in another mode, because the agent switched or because
+    /// [`SessionHandle::set_mode`] was accepted.
+    ModeChanged { mode: String },
+    /// The commands a prompt may name, replacing any earlier list.
+    CommandsChanged { commands: Vec<AgentCommand> },
     /// Answer with [`SessionHandle::resolve_permission`].
     PermissionRequested {
         id: PermissionId,
@@ -92,6 +100,9 @@ pub enum SessionEvent {
     TurnEnded { stop_reason: String },
     /// The agent rejected the prompt; the session is still usable.
     PromptFailed { message: String },
+    /// Something else this client asked for failed; the session is still
+    /// usable and no turn state changed.
+    Warning { message: String },
     /// The connection is gone; no more events follow.
     Closed { error: Option<String> },
 }
@@ -192,6 +203,40 @@ pub struct PlanItem {
     pub active: bool,
 }
 
+/// One of the ways an agent can operate, e.g. `plan` or `edit`.
+///
+/// See [Session Modes](https://agentclientprotocol.com/protocol/session-modes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMode {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// The modes an agent offers and the one it is in. Empty for an agent with
+/// no modes, which is most of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModeState {
+    /// `None` until the agent names a mode.
+    pub current: Option<String>,
+    pub available: Vec<AgentMode>,
+}
+
+impl ModeState {
+    /// The mode the session is in, if it is one of the available ones.
+    pub fn current(&self) -> Option<&AgentMode> {
+        let current = self.current.as_deref()?;
+        self.available.iter().find(|mode| mode.id == current)
+    }
+}
+
+/// A command the agent offers for a prompt, named in it as `/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionChoice {
     pub id: String,
@@ -204,6 +249,7 @@ pub struct PermissionChoice {
 enum SessionCommand {
     Prompt(Prompt),
     Cancel,
+    SetMode(String),
     ResolvePermission {
         id: PermissionId,
         option: Option<String>,
@@ -225,6 +271,13 @@ impl SessionHandle {
     /// Cancel the running turn; pending permission requests are answered as cancelled.
     pub fn cancel(&self) -> bool {
         self.send(SessionCommand::Cancel)
+    }
+
+    /// Ask for one of the modes in [`ModeState::available`]. The session
+    /// reports the outcome as [`SessionEvent::ModeChanged`] or
+    /// [`SessionEvent::Warning`].
+    pub fn set_mode(&self, mode: impl Into<String>) -> bool {
+        self.send(SessionCommand::SetMode(mode.into()))
     }
 
     /// Answer a [`SessionEvent::PermissionRequested`]; `None` declines without choosing.
@@ -451,7 +504,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     .session_capabilities
                     .resume
                     .is_some();
-                let (session_id, outcome) = match restore {
+                let (session_id, outcome, modes) = match restore {
                     Some(id) if can_load => {
                         // History arrives as session/update notifications before
                         // the response; user turns are only forwarded meanwhile.
@@ -461,14 +514,19 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                             .block_task()
                             .await;
                         replaying.store(false, Ordering::SeqCst);
-                        loaded?;
-                        (SessionId::new(id), RestoreOutcome::Replayed)
+                        let loaded = loaded?;
+                        (
+                            SessionId::new(id),
+                            RestoreOutcome::Replayed,
+                            loaded.modes,
+                        )
                     }
                     Some(id) if can_resume => {
-                        cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
+                        let resumed = cx
+                            .send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
                             .block_task()
                             .await?;
-                        (SessionId::new(id), RestoreOutcome::Resumed)
+                        (SessionId::new(id), RestoreOutcome::Resumed, resumed.modes)
                     }
                     restore => {
                         let session = cx
@@ -480,14 +538,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         } else {
                             RestoreOutcome::Fresh
                         };
-                        (session.session_id, outcome)
+                        (session.session_id, outcome, session.modes)
                     }
                 };
-                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome))
+                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome, modes))
             };
             // An agent that never answers (e.g. stuck on expired credentials)
             // would otherwise leave the pane connecting forever.
-            let (init, session_id, restore) = tokio::select! {
+            let (init, session_id, restore, modes) = tokio::select! {
                 result = handshake => result?,
                 () = stalled(&last_progress) => {
                     return Err(agent_client_protocol::util::internal_error(format!(
@@ -505,6 +563,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     image: prompt.image,
                     embedded_context: prompt.embedded_context,
                 },
+                modes: mode_state(modes),
             });
             ready.store(true, Ordering::SeqCst);
             if running_before_ready.load(Ordering::SeqCst) {
@@ -547,6 +606,25 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                                     };
                                     let _ = events.send(event);
                                     // An error here would end the connection.
+                                    Ok(())
+                                })?;
+                            }
+                            Some(SessionCommand::SetMode(mode)) => {
+                                let events = events.clone();
+                                // Prepared like a prompt: a rejected mode must not
+                                // take the connection down with it.
+                                cx.prepare_request(SetSessionModeRequest::new(
+                                    session_id.clone(),
+                                    SessionModeId::new(mode.clone()),
+                                ))
+                                .on_receiving_result(async move |result| {
+                                    let event = match result {
+                                        Ok(_) => SessionEvent::ModeChanged { mode },
+                                        Err(error) => SessionEvent::Warning {
+                                            message: format!("cannot switch mode: {error}"),
+                                        },
+                                    };
+                                    let _ = events.send(event);
                                     Ok(())
                                 })?;
                             }
@@ -658,9 +736,38 @@ fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEve
                 })
                 .collect(),
         },
-        // Echoes of our own prompt, mode/command lists, usage, and the rest
-        // are not shown yet.
+        SessionUpdate::CurrentModeUpdate(update) => SessionEvent::ModeChanged {
+            mode: update.current_mode_id.0.to_string(),
+        },
+        SessionUpdate::AvailableCommandsUpdate(update) => SessionEvent::CommandsChanged {
+            commands: update
+                .available_commands
+                .into_iter()
+                .map(|command| AgentCommand {
+                    name: command.name,
+                    description: command.description,
+                })
+                .collect(),
+        },
+        // Echoes of our own prompt, usage, and the rest are not shown yet.
         _ => return None,
+    })
+}
+
+/// The modes a `session/new`, `session/load`, or `session/resume` response
+/// reported; empty for an agent without modes.
+fn mode_state(modes: Option<SessionModeState>) -> ModeState {
+    modes.map_or_else(ModeState::default, |modes| ModeState {
+        current: Some(modes.current_mode_id.0.to_string()),
+        available: modes
+            .available_modes
+            .into_iter()
+            .map(|mode| AgentMode {
+                id: mode.id.0.to_string(),
+                name: mode.name,
+                description: mode.description,
+            })
+            .collect(),
     })
 }
 

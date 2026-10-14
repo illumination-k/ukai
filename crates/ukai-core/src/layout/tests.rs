@@ -126,6 +126,7 @@ enum Op {
     Split(usize, bool),
     Close(usize),
     Focus(usize),
+    Resize(usize, usize, f32),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -136,6 +137,7 @@ fn op() -> impl Strategy<Value = Op> {
         (0..16usize, any::<bool>()).prop_map(|(i, h)| Op::Split(i, h)),
         (0..16usize).prop_map(Op::Close),
         (0..16usize).prop_map(Op::Focus),
+        (0..4usize, 0..4usize, -2.0f32..3.0).prop_map(|(d, i, s)| Op::Resize(d, i, s)),
     ]
 }
 
@@ -186,8 +188,118 @@ proptest! {
                     layout.focus(pane);
                     prop_assert_eq!(layout.focused(), pane);
                 }
+                // Dividers are dragged with whatever path and share the UI
+                // computed, so resizing must never break the tree.
+                Op::Resize(depth, index, share) => {
+                    let path = vec![0; depth];
+                    layout.resize(&path, index, share);
+                }
             }
             check_invariants(&layout)?;
         }
     }
+}
+
+fn agent(name: &str) -> PaneContent {
+    PaneContent::Agent {
+        project: ProjectId("p1".into()),
+        agent: name.to_owned(),
+        session: None,
+        workspace: None,
+    }
+}
+
+#[test]
+fn agent_panes_of_the_active_tab_are_listed_in_display_order() {
+    // H[0, V[1, 2]], with 1 holding a report and 2 an agent.
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.split(1, V);
+    layout.set_content(0, agent("claude"));
+    layout.set_content(
+        1,
+        PaneContent::Report {
+            project: ProjectId("p1".into()),
+            path: "r.html".into(),
+        },
+    );
+    layout.set_content(2, agent("codex"));
+    assert_eq!(layout.active_agent_panes(), vec![0, 2]);
+    layout.new_tab();
+    assert_eq!(layout.active_agent_panes(), Vec::<PaneId>::new());
+}
+
+/// H[0, V[1, 2]]: 0 and the column are side by side, 1 is above 2.
+fn nested() -> Layout {
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.split(1, V);
+    layout
+}
+
+#[rstest]
+#[case::across_the_outer_split(0, H, true, Some(1))]
+#[case::back_across_it_lands_on_the_last_pane(1, H, false, Some(0))]
+#[case::down_the_column(1, V, true, Some(2))]
+#[case::up_the_column(2, V, false, Some(1))]
+#[case::nothing_to_the_left_of_the_first(0, H, false, None)]
+#[case::no_column_around_the_first_pane(0, V, true, None)]
+#[case::out_through_the_column_to_the_left(2, H, false, Some(0))]
+fn neighbour_crosses_the_innermost_matching_divider(
+    #[case] from: PaneId,
+    #[case] direction: Direction,
+    #[case] forward: bool,
+    #[case] expected: Option<PaneId>,
+) {
+    assert_eq!(nested().neighbour(from, direction, forward), expected);
+}
+
+#[test]
+fn neighbour_of_a_lone_pane_is_nothing() {
+    let layout = Layout::default();
+    assert_eq!(layout.neighbour(0, H, true), None);
+    assert_eq!(layout.neighbour(99, H, true), None);
+}
+
+#[test]
+fn resize_moves_one_divider_and_leaves_the_rest() {
+    // H[0, 1, 2] with equal sizes; drag the divider between 1 and 2.
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.split(1, H);
+    let mut layout = layout;
+    layout.resize(&[], 0, 0.25);
+    let Node::Split { sizes, .. } = layout.active_tab().root.clone() else {
+        panic!("expected a split");
+    };
+    // The pair keeps its combined size, the third child is untouched.
+    assert!((sizes[0] + sizes[1] - 1.5).abs() < 1e-6, "{sizes:?}");
+    assert!((sizes[0] / (sizes[0] + sizes[1]) - 0.25).abs() < 1e-6, "{sizes:?}");
+    assert!((sizes[2] - 0.5).abs() < 1e-6, "{sizes:?}");
+    assert!(layout.check().is_ok());
+}
+
+#[rstest]
+#[case::collapsing_the_first_is_clamped(-5.0)]
+#[case::collapsing_the_second_is_clamped(5.0)]
+#[case::zero(0.0)]
+fn resize_never_collapses_a_pane(#[case] share: f32) {
+    let mut layout = nested();
+    assert!(layout.resize(&[], 0, share));
+    assert!(layout.check().is_ok(), "{layout:#?}");
+}
+
+#[rstest]
+#[case::no_such_split(&[7], 0)]
+#[case::a_pane_is_not_a_split(&[0], 0)]
+#[case::no_such_divider(&[], 9)]
+#[case::not_a_number(&[], 0)]
+fn resize_reports_what_it_could_not_find(#[case] path: &[usize], #[case] index: usize) {
+    let mut layout = nested();
+    let share = if index == 0 && path.is_empty() {
+        f32::NAN
+    } else {
+        0.5
+    };
+    assert!(!layout.resize(path, index, share));
 }
