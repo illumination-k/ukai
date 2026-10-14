@@ -12,6 +12,7 @@ actionlint = "1.7.12"
 "aqua:zizmorcore/zizmor" = "1.23.1"
 "aqua:suzuki-shunsuke/ghalint" = "1.5.5"
 "aqua:suzuki-shunsuke/pinact" = "3.9.0"
+"github:illumination-k/agent-lens" = "0.10.0"
 
 [tools."cargo:cargo-nextest"]
 version = "0.9.132"

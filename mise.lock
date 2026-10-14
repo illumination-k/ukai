@@ -221,6 +221,53 @@ version = "0.54.0"
 backend = "asdf:dprint"
 specifiers = ["0.54.0"]
 
+[[tools."github:illumination-k/agent-lens"]]
+version = "0.10.0"
+backend = "github:illumination-k/agent-lens"
+specifiers = ["0.10.0"]
+
+[tools."github:illumination-k/agent-lens"."platforms.linux-arm64"]
+checksum = "sha256:3341f47084ca08faf6ab896b586b87a01e50107c37600a823c90f648c73ff09c"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771561"
+provenance = "github-attestations"
+
+[tools."github:illumination-k/agent-lens"."platforms.linux-arm64-musl"]
+checksum = "sha256:202b584d4d0bfce89d20b5be8b6a17146af2da8917d67e2f84372de11fbcaf55"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771596"
+provenance = "github-attestations"
+
+[tools."github:illumination-k/agent-lens"."platforms.linux-x64"]
+checksum = "sha256:cf89392c37f1cfef30372a430208541321ba0085fbcddfb49845ad18c5a389f4"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771640"
+provenance = "github-attestations"
+
+[tools."github:illumination-k/agent-lens"."platforms.linux-x64-musl"]
+checksum = "sha256:e6fa07c8e199c4e833d754661fde84648e291f11d2b02c7451c4a7565ee989b4"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771664"
+provenance = "github-attestations"
+
+[tools."github:illumination-k/agent-lens"."platforms.macos-arm64"]
+checksum = "sha256:8a2e16353852a200950462c44e8f858a1c729776cea8139cfdf2c1bed0d0d62f"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771556"
+provenance = "github-attestations"
+
+[tools."github:illumination-k/agent-lens"."platforms.macos-x64"]
+checksum = "sha256:684cba4d975c3ae1c88467defa3021e2792290309bbab29647aff82d31d1207a"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-x86_64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771609"
+provenance = "github-attestations"
+
+[tools."github:illumination-k/agent-lens"."platforms.windows-x64"]
+checksum = "sha256:ff97bd16dc3408225d82a0800260908a31d8a6eb5cd699036adb23a782c15625"
+url = "https://github.com/illumination-k/agent-lens/releases/download/v0.10.0/agent-lens-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/illumination-k/agent-lens/releases/assets/637771618"
+provenance = "github-attestations"
+
 [[tools.prek]]
 version = "0.3.8"
 backend = "aqua:j178/prek"
