@@ -7,7 +7,9 @@ use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects};
 
-use crate::agent_pane::{AgentView, agent_status, connect};
+use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
+use crate::app::MOD_KEY;
+use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 
 /// Open `agent` of `project` in `pane` and start its session. A gateway
@@ -73,7 +75,8 @@ fn close_tab(app: AppSignals, index: usize) {
     }
 }
 
-fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> String {
+/// A pane's title: its project's name and what it shows.
+fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> (Option<String>, String) {
     let project_name = |id: &ProjectId| {
         projects
             .get(id)
@@ -81,17 +84,27 @@ fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> String {
     };
     match layout.content(pane) {
         Some(PaneContent::Agent { project, agent, .. }) => {
-            format!("{} / {agent}", project_name(project))
+            (Some(project_name(project)), agent.clone())
         }
         Some(PaneContent::Report { project, path }) => {
             let file = path.file_name().map_or_else(
                 || path.display().to_string(),
                 |name| name.to_string_lossy().into_owned(),
             );
-            format!("{} / {file}", project_name(project))
+            (Some(project_name(project)), file)
         }
-        Some(PaneContent::Empty) | None => "new pane".to_owned(),
+        Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
     }
+}
+
+/// The state a tab shows: that of its most pressing agent pane.
+fn tab_state(sessions: Sessions, panes: &[PaneId]) -> Option<&'static str> {
+    const ORDER: [&str; 5] = ["attention", "closed", "busy", "ready", "idle"];
+    panes
+        .iter()
+        .filter(|pane| sessions.peek().contains_key(pane))
+        .map(|pane| agent_status(sessions, *pane).0)
+        .min_by_key(|state| ORDER.iter().position(|s| s == state))
 }
 
 #[component]
@@ -115,21 +128,17 @@ fn TabBar() -> Element {
     let (tabs, active) = {
         let current = layout.read();
         let projects = app.projects.read();
-        let tabs: Vec<(usize, String)> = current
+        let tabs: Vec<(usize, String, usize, Option<&'static str>)> = current
             .tabs()
             .iter()
             .enumerate()
             .map(|(index, tab)| {
                 let panes = tab.root.panes();
-                let first = panes
-                    .first()
-                    .map(|pane| pane_label(&current, &projects, *pane));
-                let label = match (first, panes.len()) {
-                    (Some(first), 1) => first,
-                    (Some(first), n) => format!("{first} +{}", n - 1),
-                    (None, _) => "tab".to_owned(),
-                };
-                (index, label)
+                let label = panes.first().map_or_else(
+                    || "New tab".to_owned(),
+                    |pane| pane_label(&current, &projects, *pane).1,
+                );
+                (index, label, panes.len(), tab_state(app.sessions, &panes))
             })
             .collect();
         (tabs, current.active())
@@ -137,30 +146,36 @@ fn TabBar() -> Element {
 
     rsx! {
         nav { class: "tabbar",
-            for (index, label) in tabs {
+            for (index, label, count, state) in tabs {
                 div {
                     key: "{index}",
                     class: if index == active { "tab active" } else { "tab" },
                     onclick: move |_| layout.write().select_tab(index),
+                    if let Some(state) = state {
+                        span { class: "dot {state}" }
+                    }
                     span { class: "name", "{label}" }
+                    if count > 1 {
+                        span { class: "count", "{count}" }
+                    }
                     button {
-                        class: "icon",
+                        class: "icon close",
                         title: "Close tab",
                         onclick: move |event| {
                             event.stop_propagation();
                             close_tab(app, index);
                         },
-                        "×"
+                        Svg { icon: Icon::Close, size: 12 }
                     }
                 }
             }
             button {
                 class: "icon new-tab",
-                title: "New tab (mod+t)",
+                title: "New tab ({MOD_KEY}T)",
                 onclick: move |_| {
                     layout.write().new_tab();
                 },
-                "+"
+                Svg { icon: Icon::Plus }
             }
         }
     }
@@ -198,7 +213,7 @@ fn NodeView(node: Node) -> Element {
 fn PaneView(pane: PaneId) -> Element {
     let app = use_context::<AppSignals>();
     let mut layout = app.layout;
-    let (content, focused, label) = {
+    let (content, focused, (project, item)) = {
         let current = layout.read();
         (
             current.content(pane).cloned().unwrap_or(PaneContent::Empty),
@@ -206,13 +221,9 @@ fn PaneView(pane: PaneId) -> Element {
             pane_label(&current, &app.projects.read(), pane),
         )
     };
-    let (status, title) = match &content {
-        PaneContent::Agent { .. } => {
-            let (class, text, name) = agent_status(app.sessions, pane);
-            let title = name.map_or_else(|| label.clone(), |name| format!("{label} · {name}"));
-            (Some((class, text)), title)
-        }
-        _ => (None, label),
+    let status = match &content {
+        PaneContent::Agent { .. } => Some(agent_status(app.sessions, pane)),
+        _ => None,
     };
 
     rsx! {
@@ -224,31 +235,44 @@ fn PaneView(pane: PaneId) -> Element {
                 }
             },
             header {
-                span { class: "name", "{title}" }
-                if let Some((class, text)) = status {
-                    span { class: "status {class}", "{text}" }
+                if let Some((state, _, _)) = &status {
+                    span { class: "dot {state}" }
                 }
-                button {
-                    class: "icon",
-                    title: "Split right (mod+d)",
-                    onclick: move |_| {
-                        layout.write().split(pane, Direction::Horizontal);
-                    },
-                    "◫"
+                if let Some(project) = project {
+                    span { class: "crumb", "{project}" }
+                    span { class: "crumb-sep", "/" }
                 }
-                button {
-                    class: "icon",
-                    title: "Split down (mod+shift+d)",
-                    onclick: move |_| {
-                        layout.write().split(pane, Direction::Vertical);
-                    },
-                    "⊟"
+                span { class: "title", "{item}" }
+                if let Some((state, label, name)) = status {
+                    span { class: "status {state}", "{label}" }
+                    if let Some(name) = name {
+                        span { class: "agent-name", "{name}" }
+                    }
                 }
-                button {
-                    class: "icon",
-                    title: "Close pane (mod+w)",
-                    onclick: move |_| close_pane(app, pane),
-                    "×"
+                span { class: "spacer" }
+                span { class: "pane-tools",
+                    button {
+                        class: "icon",
+                        title: "Split right ({MOD_KEY}D)",
+                        onclick: move |_| {
+                            layout.write().split(pane, Direction::Horizontal);
+                        },
+                        Svg { icon: Icon::SplitRight }
+                    }
+                    button {
+                        class: "icon",
+                        title: "Split down ({MOD_KEY}⇧D)",
+                        onclick: move |_| {
+                            layout.write().split(pane, Direction::Vertical);
+                        },
+                        Svg { icon: Icon::SplitDown }
+                    }
+                    button {
+                        class: "icon",
+                        title: "Close pane ({MOD_KEY}W)",
+                        onclick: move |_| close_pane(app, pane),
+                        Svg { icon: Icon::Close }
+                    }
                 }
             }
             match content {
@@ -294,51 +318,65 @@ fn Picker(pane: PaneId) -> Element {
 
     rsx! {
         div { class: "pane-body picker",
-            if projects.is_empty() {
-                p { class: "muted", "Open a project from the sidebar to start." }
-            } else {
-                div { class: "project-chips",
-                    for (id, name) in projects {
-                        button {
-                            key: "{id}",
-                            class: if current.as_ref() == Some(&id) { "small primary" } else { "small" },
-                            onclick: {
-                                let id = id.clone();
-                                move |_| chosen.set(Some(id.clone()))
-                            },
-                            "{name}"
-                        }
-                    }
-                }
-                match agents {
-                    Err(error) => rsx! {
-                        pre { class: "notice-line error", "{error}" }
-                    },
-                    Ok(agents) if agents.is_empty() => rsx! {
-                        p { class: "muted",
-                            "No agents for this project. Declare them in its ukai.toml or in ~/.config/ukai/config.toml."
-                        }
-                    },
-                    Ok(agents) => rsx! {
-                        for Choice { agent, line, badge, scope } in agents {
-                            button {
-                                key: "{agent}-{badge}",
-                                class: "choice",
-                                onclick: {
-                                    let project = current.clone();
-                                    let agent = agent.clone();
-                                    move |_| {
-                                        if let Some(project) = &project {
-                                            open_agent(app, pane, project, &agent, scope);
-                                        }
-                                    }
-                                },
-                                span { class: "name", "{agent}" }
-                                span { class: "badge", "{badge}" }
-                                code { "{line}" }
+            div { class: "picker-panel",
+                h2 { "Open an agent" }
+                if projects.is_empty() {
+                    p { class: "muted", "Open a project from the sidebar to start." }
+                } else {
+                    if projects.len() > 1 {
+                        div { class: "segmented",
+                            for (id, name) in projects {
+                                button {
+                                    key: "{id}",
+                                    class: if current.as_ref() == Some(&id) { "active" } else { "" },
+                                    onclick: {
+                                        let id = id.clone();
+                                        move |_| chosen.set(Some(id.clone()))
+                                    },
+                                    "{name}"
+                                }
                             }
                         }
-                    },
+                    } else if let Some((_, name)) = projects.first() {
+                        p { class: "muted", "in {name}" }
+                    }
+                    match agents {
+                        Err(error) => rsx! {
+                            pre { class: "config-error", "{error}" }
+                        },
+                        Ok(agents) if agents.is_empty() => rsx! {
+                            p { class: "muted",
+                                "No agents for this project. Declare them in its ukai.toml or in ~/.config/ukai/config.toml."
+                            }
+                        },
+                        Ok(agents) => rsx! {
+                            div { class: "choices",
+                                for Choice { agent, line, badge, scope } in agents {
+                                    button {
+                                        key: "{agent}-{badge}",
+                                        class: "choice",
+                                        onclick: {
+                                            let project = current.clone();
+                                            let agent = agent.clone();
+                                            move |_| {
+                                                if let Some(project) = &project {
+                                                    open_agent(app, pane, project, &agent, scope);
+                                                }
+                                            }
+                                        },
+                                        span { class: "choice-head",
+                                            span { class: "name", "{agent}" }
+                                            span { class: "badge", "{badge}" }
+                                        }
+                                        code { "{line}" }
+                                        span { class: "chevron",
+                                            Svg { icon: Icon::Chevron }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
                 }
             }
         }

@@ -90,6 +90,13 @@ impl Transcript {
         }
     }
 
+    /// Whether the agent is blocked on a permission request nobody answered.
+    pub fn awaiting_permission(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Permission { answer: None, .. }))
+    }
+
     /// Record a cancel: every pending permission request is answered with it.
     pub fn cancel(&mut self) {
         for entry in &mut self.entries {
@@ -424,8 +431,11 @@ mod tests {
             options: vec![],
         };
         let mut transcript = folded([request(0), request(1), request(2)]);
+        assert!(transcript.awaiting_permission());
         transcript.answer_permission(1, "Allow");
+        assert!(transcript.awaiting_permission());
         transcript.cancel();
+        assert!(!transcript.awaiting_permission());
         let answers: Vec<_> = transcript
             .entries
             .iter()

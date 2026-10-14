@@ -2,6 +2,7 @@
 
 mod agent_pane;
 mod app;
+mod icons;
 mod layout;
 mod persist;
 mod projects;

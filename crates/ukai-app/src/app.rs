@@ -4,10 +4,12 @@ use dioxus::prelude::*;
 use ukai_core::{Direction, PaneContent, ProjectId};
 
 use crate::Startup;
+use crate::agent_pane::agent_status;
+use crate::icons::{Icon, Svg};
 use crate::layout::{Workbench, close_pane, open_agent, transport_label};
 use crate::persist::use_autosave;
 use crate::projects::{
-    AppSignals, Paths, add_project, agent_pane_counts, load_config, pick_and_add_project,
+    AppSignals, OpenAgent, Paths, add_project, load_config, open_agents, pick_and_add_project,
     reload_project, remove_project,
 };
 
@@ -85,28 +87,38 @@ pub fn App() -> Element {
     }
 }
 
-/// Projects, and the agents of the selected one. Clicking an agent opens it
-/// in the focused pane when that pane is empty, otherwise in a new pane split
-/// to its right.
+/// Projects, each with the agent panes open for it (click to focus), and the
+/// agents the selected project can launch. Launching opens the agent in the
+/// focused pane when that pane is empty, otherwise in a new pane split to its
+/// right.
 #[component]
 fn Sidebar() -> Element {
     let app = use_context::<AppSignals>();
     let paths = use_context::<Paths>();
     let mut projects_signal = app.projects;
-    let counts = agent_pane_counts(&app.layout.read());
+    let mut layout = app.layout;
+    let (mut open, focused, many_tabs) = {
+        let layout = app.layout.read();
+        (
+            open_agents(&layout),
+            layout.focused(),
+            layout.tabs().len() > 1,
+        )
+    };
     let projects = app.projects.read();
     let selected = projects.selected().map(|p| p.id.clone());
-    let rows: Vec<(ProjectId, String, String, usize)> = projects
+    let groups: Vec<(ProjectId, String, String, Vec<OpenAgent>)> = projects
         .iter()
         .map(|project| {
             (
                 project.id.clone(),
                 project.name(),
                 project.root.display().to_string(),
-                counts.get(&project.id).copied().unwrap_or(0),
+                open.remove(&project.id).unwrap_or_default(),
             )
         })
         .collect();
+    let selected_name = projects.selected().map(|p| p.name());
     drop(projects);
     let agents: Result<Vec<(String, &'static str)>, String> = match &selected {
         None => Ok(Vec::new()),
@@ -120,98 +132,159 @@ fn Sidebar() -> Element {
             None => Ok(Vec::new()),
         },
     };
+    let pick = {
+        let paths = paths.clone();
+        move || {
+            let paths = paths.clone();
+            move |_| pick_and_add_project(paths.clone(), app)
+        }
+    };
 
     rsx! {
         nav { class: "sidebar",
-            section {
-                div { class: "section-title",
-                    h2 { "Projects" }
-                    button {
-                        class: "icon",
-                        title: "Open project…",
-                        onclick: {
-                            let paths = paths.clone();
-                            move |_| pick_and_add_project(paths.clone(), app)
-                        },
-                        "+"
+            div { class: "sidebar-header",
+                span { class: "section-label", "Projects" }
+                button {
+                    class: "icon",
+                    title: "Open project…",
+                    onclick: pick(),
+                    Svg { icon: Icon::Plus }
+                }
+            }
+            if groups.is_empty() {
+                div { class: "sidebar-empty",
+                    p { class: "muted", "Open a project folder to start." }
+                    button { class: "outline", onclick: pick(),
+                        Svg { icon: Icon::Folder }
+                        "Open folder…"
                     }
                 }
-                if rows.is_empty() {
-                    p { class: "muted hint", "Open a project folder to start." }
-                }
-                ul {
-                    for (id, name, root, count) in rows {
-                        li {
-                            key: "{id}",
-                            class: if selected.as_ref() == Some(&id) { "selected" } else { "" },
+            }
+            div { class: "project-list",
+                for (id, name, root, agents) in groups {
+                    div { key: "{id}", class: "project-group",
+                        div {
+                            class: if selected.as_ref() == Some(&id) { "row project-row selected" } else { "row project-row" },
                             title: "{root}",
                             onclick: {
                                 let id = id.clone();
                                 move |_| projects_signal.write().select(&id)
                             },
+                            span { class: "row-icon",
+                                Svg { icon: Icon::Folder }
+                            }
                             span { class: "name", "{name}" }
-                            if count > 0 {
-                                span { class: "badge", "{count}" }
+                            if !agents.is_empty() {
+                                span { class: "count", "{agents.len()}" }
                             }
-                            button {
-                                class: "icon",
-                                title: "Reload ukai.toml",
-                                onclick: {
-                                    let id = id.clone();
-                                    let paths = paths.clone();
-                                    move |event: MouseEvent| {
-                                        event.stop_propagation();
-                                        reload_project(&paths, app, &id);
-                                    }
-                                },
-                                "↻"
+                            span { class: "row-actions",
+                                button {
+                                    class: "icon",
+                                    title: "Reload configuration",
+                                    onclick: {
+                                        let id = id.clone();
+                                        let paths = paths.clone();
+                                        move |event: MouseEvent| {
+                                            event.stop_propagation();
+                                            reload_project(&paths, app, &id);
+                                        }
+                                    },
+                                    Svg { icon: Icon::Reload }
+                                }
+                                button {
+                                    class: "icon",
+                                    title: "Close project (ends its sessions)",
+                                    onclick: {
+                                        let id = id.clone();
+                                        move |event: MouseEvent| {
+                                            event.stop_propagation();
+                                            remove_project(app, &id);
+                                        }
+                                    },
+                                    Svg { icon: Icon::Close }
+                                }
                             }
-                            button {
-                                class: "icon",
-                                title: "Close project (ends its sessions)",
-                                onclick: {
-                                    let id = id.clone();
-                                    move |event: MouseEvent| {
-                                        event.stop_propagation();
-                                        remove_project(app, &id);
+                        }
+                        for OpenAgent { pane, agent, tab } in agents {
+                            {
+                                let (state, label, _) = agent_status(app.sessions, pane);
+                                rsx! {
+                                    div {
+                                        key: "{pane}",
+                                        class: if pane == focused { "row agent-row focused" } else { "row agent-row" },
+                                        title: "{agent} · {label}",
+                                        onclick: move |_| layout.write().focus(pane),
+                                        span { class: "dot {state}" }
+                                        span { class: "name", "{agent}" }
+                                        span { class: "meta", "{label}" }
+                                        if many_tabs {
+                                            span { class: "tab-number", title: "Tab {tab + 1}", "{tab + 1}" }
+                                        }
                                     }
-                                },
-                                "×"
+                                }
                             }
                         }
                     }
                 }
             }
-            if let Some(project) = selected {
-                section {
-                    h2 { "Agents" }
+            if let (Some(project), Some(project_name)) = (selected, selected_name) {
+                div { class: "sidebar-section",
+                    div { class: "sidebar-header",
+                        span { class: "section-label", "Launch · {project_name}" }
+                    }
                     match agents {
                         Err(error) => rsx! {
-                            pre { class: "notice-line error", "{error}" }
+                            pre { class: "config-error", "{error}" }
+                        },
+                        Ok(agents) if agents.is_empty() => rsx! {
+                            p { class: "muted hint", "No agents declared in ukai.toml." }
                         },
                         Ok(agents) => rsx! {
-                            ul {
-                                for (agent, transport) in agents {
-                                    li {
-                                        key: "{agent}",
-                                        title: "Open in a pane",
-                                        onclick: {
-                                            let project = project.clone();
-                                            let agent = agent.clone();
-                                            move |_| open_in_focus(app, &project, &agent)
-                                        },
-                                        span { class: "name", "{agent}" }
-                                        span { class: "badge", "{transport}" }
+                            for (agent, transport) in agents {
+                                div {
+                                    key: "{agent}",
+                                    class: "row launch-row",
+                                    title: "Open {agent} in a pane",
+                                    onclick: {
+                                        let project = project.clone();
+                                        let agent = agent.clone();
+                                        move |_| open_in_focus(app, &project, &agent)
+                                    },
+                                    span { class: "row-icon",
+                                        Svg { icon: Icon::Plus, size: 12 }
                                     }
+                                    span { class: "name", "{agent}" }
+                                    span { class: "meta", "{transport}" }
                                 }
                             }
                         },
                     }
                 }
             }
+            div { class: "sidebar-footer",
+                span {
+                    kbd { "{MOD_KEY}T" }
+                    " tab"
+                }
+                span {
+                    kbd { "{MOD_KEY}D" }
+                    " split"
+                }
+                span {
+                    kbd { "{MOD_KEY}W" }
+                    " close"
+                }
+            }
         }
     }
 }
+
+/// How the primary modifier is written in hints.
+pub const MOD_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘"
+} else {
+    "Ctrl+"
+};
 
 fn open_in_focus(app: AppSignals, project: &ProjectId, agent: &str) {
     let mut layout = app.layout;

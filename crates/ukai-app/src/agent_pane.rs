@@ -14,6 +14,7 @@ use ukai_acp::{
 };
 use ukai_core::{Entry, PaneContent, PaneId, Status, Transcript};
 
+use crate::icons::{Icon, Svg};
 use crate::projects::{AppSignals, ProjectContext, project_context};
 
 #[derive(Clone)]
@@ -118,10 +119,12 @@ pub fn agent_status(
     };
     let transcript = session.transcript.read();
     let (class, label) = match transcript.status {
+        _ if transcript.awaiting_permission() => ("attention", "needs input"),
         Status::Connecting => ("busy", "connecting"),
         Status::Idle => ("ready", "ready"),
         Status::Busy => ("busy", "working"),
-        Status::Closed { .. } => ("closed", "closed"),
+        Status::Closed { error: None } => ("idle", "closed"),
+        Status::Closed { error: Some(_) } => ("closed", "disconnected"),
     };
     (class, label, transcript.agent.clone())
 }
@@ -136,12 +139,20 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
             div { class: "pane-body placeholder",
                 div { class: "connect",
                     if has_saved_session {
-                        button {
-                            class: "primary",
-                            onclick: move |_| connect(app, pane, true),
-                            "Resume session"
+                        p { class: "title", "Session not running" }
+                        p { class: "muted", "Resume the earlier session, or start a new one." }
+                        div { class: "actions",
+                            button {
+                                class: "primary",
+                                onclick: move |_| connect(app, pane, true),
+                                "Resume session"
+                            }
+                            button {
+                                class: "outline",
+                                onclick: move |_| connect(app, pane, false),
+                                "New session"
+                            }
                         }
-                        button { onclick: move |_| connect(app, pane, false), "New session" }
                     } else {
                         button {
                             class: "primary",
@@ -180,43 +191,89 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         transcript.write().cancel();
     };
 
+    let mut send_on_click = send.clone();
+    let busy = status == Status::Busy;
+    let awaiting = transcript.read().awaiting_permission();
+    let idle = status == Status::Idle;
+    let empty = transcript.read().entries.is_empty();
+
     rsx! {
-        if status == Status::Busy {
-            div { class: "pane-actions",
-                button { class: "small", onclick: cancel, "Cancel" }
-            }
-        } else if matches!(status, Status::Closed { .. }) {
-            div { class: "pane-actions",
-                button {
-                    class: "small primary",
-                    onclick: move |_| connect(app, pane, true),
-                    "Reconnect"
-                }
-            }
-        }
         // `column-reverse` keeps the view pinned to the newest entry.
         div { class: "pane-body transcript",
             div { class: "entries",
+                if empty && idle {
+                    div { class: "chat-empty",
+                        p { class: "title", "Ready" }
+                        p { class: "muted", "Send a message to start the session." }
+                    }
+                }
                 for (index, entry) in transcript.read().entries.iter().enumerate() {
                     EntryView { key: "{index}", pane, entry: entry.clone() }
+                }
+                if busy && !awaiting {
+                    div { class: "working",
+                        span { class: "dot busy" }
+                        "Working…"
+                    }
                 }
             }
         }
         footer { class: "composer",
-            textarea {
-                rows: "3",
-                placeholder: if status == Status::Idle { "Message (Enter to send, Shift+Enter for newline)" } else { "" },
-                disabled: status != Status::Idle,
-                value: "{draft}",
-                oninput: move |event| draft.set(event.value()),
-                onkeydown: move |event| {
-                    if event.key() == Key::Enter && !event.modifiers().shift()
-                        && !event.is_composing()
-                    {
-                        event.prevent_default();
-                        send();
+            if matches!(status, Status::Closed { .. }) {
+                div { class: "composer-notice",
+                    span { "The session has ended." }
+                    button {
+                        class: "small primary",
+                        onclick: move |_| connect(app, pane, true),
+                        "Reconnect"
                     }
-                },
+                }
+            }
+            div { class: if idle { "composer-card" } else { "composer-card disabled" },
+                textarea {
+                    rows: "2",
+                    placeholder: match status {
+                        Status::Idle => "Message the agent",
+                        Status::Busy => "Waiting for the agent…",
+                        Status::Connecting => "Connecting…",
+                        Status::Closed { .. } => "Disconnected",
+                    },
+                    disabled: !idle,
+                    value: "{draft}",
+                    oninput: move |event| draft.set(event.value()),
+                    onkeydown: move |event| {
+                        if event.key() == Key::Enter && !event.modifiers().shift()
+                            && !event.is_composing()
+                        {
+                            event.prevent_default();
+                            send();
+                        }
+                    },
+                }
+                div { class: "composer-footer",
+                    span { class: "hint",
+                        kbd { "Enter" }
+                        " send · "
+                        kbd { "⇧Enter" }
+                        " newline"
+                    }
+                    if busy {
+                        button {
+                            class: "round secondary",
+                            title: "Stop",
+                            onclick: cancel,
+                            Svg { icon: Icon::Stop, size: 12 }
+                        }
+                    } else {
+                        button {
+                            class: "round primary",
+                            title: "Send",
+                            disabled: !idle || draft.read().trim().is_empty(),
+                            onclick: move |_| send_on_click(),
+                            Svg { icon: Icon::Send }
+                        }
+                    }
+                }
             }
         }
     }
@@ -234,8 +291,13 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
         },
         Entry::Thought { text } => rsx! {
             details { class: "thought",
-                summary { "thinking" }
-                div { "{text}" }
+                summary {
+                    span { class: "chevron",
+                        Svg { icon: Icon::Chevron, size: 12 }
+                    }
+                    "Thinking"
+                }
+                div { class: "body", "{text}" }
             }
         },
         Entry::Tool {
@@ -251,62 +313,81 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                 ToolStatus::Failed => "failed",
             };
             rsx! {
-                div { class: "tool {state}",
-                    span { class: "dot" }
-                    span { class: "badge", "{kind}" }
+                div { class: "tool {state}", title: "{kind} · {state}",
+                    span { class: "tool-icon" }
+                    span { class: "verb", "{kind}" }
                     span { class: "name", "{title}" }
                 }
             }
         }
-        Entry::Plan { items } => rsx! {
-            ul { class: "plan",
-                for (index, item) in items.iter().enumerate() {
-                    li {
-                        key: "{index}",
-                        class: if item.done { "done" } else if item.active { "active" } else { "" },
-                        "{item.content}"
+        Entry::Plan { items } => {
+            let done = items.iter().filter(|item| item.done).count();
+            rsx! {
+                div { class: "plan",
+                    div { class: "plan-head",
+                        "Plan"
+                        span { class: "count", "{done}/{items.len()}" }
+                    }
+                    ul {
+                        for (index, item) in items.iter().enumerate() {
+                            li {
+                                key: "{index}",
+                                class: if item.done { "done" } else if item.active { "active" } else { "" },
+                                "{item.content}"
+                            }
+                        }
                     }
                 }
             }
-        },
+        }
         Entry::Permission {
             id,
             title,
             options,
             answer,
-        } => rsx! {
-            div { class: "permission",
-                div { class: "title", "Permission: {title}" }
-                match answer {
-                    Some(answer) => rsx! {
-                        div { class: "answer", "→ {answer}" }
-                    },
-                    None => rsx! {
-                        div { class: "options",
-                            for option in options {
-                                button {
-                                    key: "{option.id}",
-                                    class: if option.kind.starts_with("allow") { "small primary" } else { "small" },
-                                    onclick: move |_| {
-                                        let Some(session) = sessions.read().get(&pane).cloned() else {
-                                            return;
-                                        };
-                                        if let Some(handle) = &session.handle {
-                                            handle.resolve_permission(id, Some(option.id.clone()));
-                                        }
-                                        let mut transcript = session.transcript;
-                                        transcript.write().answer_permission(id, option.name.clone());
-                                    },
-                                    "{option.name}"
+        } => {
+            let pending = answer.is_none();
+            rsx! {
+                div { class: if pending { "permission pending" } else { "permission" },
+                    div { class: "permission-head",
+                        span { class: "label", "Permission" }
+                        span { class: "title", "{title}" }
+                    }
+                    match answer {
+                        Some(answer) => rsx! {
+                            div { class: "answer", "→ {answer}" }
+                        },
+                        None => rsx! {
+                            div { class: "options",
+                                for (index, option) in options.into_iter().enumerate() {
+                                    button {
+                                        key: "{option.id}",
+                                        class: if index == 0 { "small primary" } else { "small outline" },
+                                        onclick: move |_| {
+                                            let Some(session) = sessions.read().get(&pane).cloned() else {
+                                                return;
+                                            };
+                                            if let Some(handle) = &session.handle {
+                                                handle.resolve_permission(id, Some(option.id.clone()));
+                                            }
+                                            let mut transcript = session.transcript;
+                                            transcript.write().answer_permission(id, option.name.clone());
+                                        },
+                                        "{option.name}"
+                                    }
                                 }
                             }
-                        }
-                    },
+                        },
+                    }
                 }
             }
-        },
+        }
         Entry::FileWritten { path } => rsx! {
-            div { class: "file", "wrote {path.display()}" }
+            div { class: "tool done",
+                span { class: "tool-icon" }
+                span { class: "verb", "wrote" }
+                span { class: "name", "{path.display()}" }
+            }
         },
         Entry::Notice { text, error } => rsx! {
             div { class: if error { "notice-line error" } else { "notice-line" }, "{text}" }
