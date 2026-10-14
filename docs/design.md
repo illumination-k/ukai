@@ -74,14 +74,14 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate          | kind      | 役割                                                                                                                                                                                                             |
-| -------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                             |
-| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                               |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、差分とレビュー `review`、添付 `attachment`、パレットの照合 `palette`）。UI フレームワークに依存しない。 |
-| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                            |
-| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                  |
-| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                           |
+| crate          | kind      | 役割                                                                                                                                                                                                                                         |
+| -------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                         |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                                                           |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、パレットの照合 `palette`）。UI フレームワークに依存しない。 |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                        |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                              |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                       |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -425,6 +425,11 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - 会話は最大幅 46rem で中央寄せ。ユーザー発言は右寄せの淡いバブル、エージェント発言は地のまま、ツール呼び出しは
   1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。ターン中も次の発言を書いておけて、
   送信はターンが終わってから。
+- **エージェント発言と思考は Markdown で描く。** `ukai_core::markdown` が `pulldown-cmark`（CommonMark + 表・
+  打ち消し線・タスクリスト）で木に変え、地の文の `http(s)://` もリンクにする。アプリはその木を rsx! の要素に写すだけで HTML 文字列は作らない。会話は
+  IPC を持つアプリの web view 内にあるため、生の HTML は文字のまま出し、画像は読み込まず alt テキストだけ、
+  リンクは `https://`・`http://`・`mailto:` のときだけシステムのブラウザで開く（web view 自体は遷移しない）。
+  ユーザー発言は打ったとおりのプレーンテキスト。
 
 ## 状態と並行性
 

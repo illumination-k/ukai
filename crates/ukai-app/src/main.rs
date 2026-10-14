@@ -5,6 +5,7 @@ mod alert;
 mod app;
 mod icons;
 mod layout;
+mod markdown;
 mod palette;
 mod persist;
 mod projects;
