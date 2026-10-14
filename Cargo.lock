@@ -6734,10 +6734,15 @@ dependencies = [
  "agent-client-protocol-http",
  "axum",
  "futures",
+ "percent-encoding",
+ "rstest",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ukai-config",
+ "ukai-core",
 ]
 
 [[package]]

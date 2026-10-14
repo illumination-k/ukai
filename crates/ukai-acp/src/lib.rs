@@ -7,9 +7,13 @@
 //! ACP session over it.
 
 mod fs;
+mod reports;
 mod session;
 
 pub use fs::{FsError, FsRoot};
+pub use reports::{
+    Fetched, ReportEntry, ReportListing, ReportsEndpoint, ReportsError, resolve_reports,
+};
 pub use session::{
     Attachment, FileDiff, PROGRESS_METHOD, PermissionChoice, PermissionId, PlanItem, Prompt,
     PromptCaps, RestoreOutcome, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
@@ -102,7 +106,7 @@ pub fn resolve(
 
 /// What a gateway connection says about its pane: the scope (the pane's own,
 /// else the agent's default) and, when the pane has one, its key.
-fn workspace_headers(
+pub(crate) fn workspace_headers(
     workspace: Option<&PaneWorkspace>,
     default_scope: WorkspaceScope,
 ) -> Vec<(&'static str, String)> {
@@ -140,6 +144,20 @@ fn remote(
         });
     }
 
+    let map = header_map(headers, extra, lookup)?;
+    let client = HttpClient::builder(&url)
+        .configure_http(|http| http.default_headers(map))
+        .build()?;
+    Ok(Transport::Remote(client))
+}
+
+/// The declared `headers` (interpolated) plus `extra`, the headers ukai adds
+/// itself.
+fn header_map(
+    headers: &std::collections::BTreeMap<String, String>,
+    extra: &[(&'static str, String)],
+    lookup: impl Fn(&str) -> Option<String> + Copy,
+) -> Result<HeaderMap, ResolveError> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
         let invalid = || ResolveError::InvalidHeader(name.clone());
@@ -155,11 +173,7 @@ fn remote(
             .map_err(|_| ResolveError::InvalidHeader((*name).to_owned()))?;
         map.insert(*name, value);
     }
-
-    let client = HttpClient::builder(&url)
-        .configure_http(|http| http.default_headers(map))
-        .build()?;
-    Ok(Transport::Remote(client))
+    Ok(map)
 }
 
 #[cfg(test)]

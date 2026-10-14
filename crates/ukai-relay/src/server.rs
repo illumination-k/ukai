@@ -21,11 +21,13 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::hub::{ConnId, Hub, Output};
+use crate::reports;
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub listen: SocketAddr,
-    /// Clients must send `Authorization: Bearer <token>` to `/acp`.
+    /// Clients must send `Authorization: Bearer <token>` with every request
+    /// but `/health`.
     pub token: Option<String>,
     /// Exit after this long with no client connected and no turn running.
     pub idle_timeout: Duration,
@@ -76,8 +78,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         theirs
     });
     let token = options.token.clone().map(Arc::<str>::from);
+    let cwd = std::env::current_dir()?;
     let router = server
         .into_router()
+        .merge(reports::router(cwd.clone()))
         .layer(middleware::from_fn(move |request, next| {
             authorize(token.clone(), request, next)
         }));
@@ -117,10 +121,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         }
     };
 
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|dir| dir.to_string_lossy().into_owned());
-    let (mut hub, init) = Hub::new(cwd);
+    let (mut hub, init) = Hub::new(Some(cwd.to_string_lossy().into_owned()));
     dispatch(init, &conns);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -175,8 +176,9 @@ async fn authorize(token: Option<Arc<str>>, request: Request, next: Next) -> Res
     let Some(token) = token else {
         return next.run(request).await;
     };
-    // `/health` stays open for the kubelet's probes.
-    if !request.uri().path().starts_with("/acp") {
+    // `/health` stays open for the kubelet's probes; everything else, `/acp`
+    // and the reports, needs the token.
+    if request.uri().path() == "/health" {
         return next.run(request).await;
     }
     let presented = request
