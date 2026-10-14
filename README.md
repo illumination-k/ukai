@@ -15,8 +15,8 @@ mise run dev    # run the desktop app with hot reload
 mise run ci     # lint + test
 ```
 
-On Linux the webview needs system libraries:
-`libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev libssl-dev`.
+On Linux the webview needs system libraries; on Debian/Ubuntu,
+`mise bootstrap packages apply` installs the ones `mise.toml` declares.
 
 ## Configuration
 
