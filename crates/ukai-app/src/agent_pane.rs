@@ -22,6 +22,7 @@ use ukai_core::slash;
 use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
 
 use crate::alert;
+use crate::clipboard;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::markdown::Markdown;
@@ -625,6 +626,42 @@ fn pick_attachments(composer: Composer, transcript: Signal<Transcript>) {
     });
 }
 
+/// An agent message, with a button that copies its text whole.
+#[component]
+fn AgentMessage(text: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let copy = {
+        let text = text.clone();
+        move |_| {
+            if clipboard::copy(&text) {
+                copied.set(true);
+                spawn(async move {
+                    tokio::time::sleep(COPIED_FOR).await;
+                    copied.set(false);
+                });
+            }
+        }
+    };
+    rsx! {
+        div { class: "agent-msg",
+            div { class: "msg agent",
+                Markdown { source: text.clone() }
+            }
+            div { class: "msg-actions",
+                button {
+                    class: if copied() { "icon copied" } else { "icon" },
+                    title: if copied() { "Copied" } else { "Copy" },
+                    onclick: copy,
+                    Svg { icon: if copied() { Icon::Check } else { Icon::Copy } }
+                }
+            }
+        }
+    }
+}
+
+/// How long the copy button shows that it copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[component]
 fn EntryView(pane: PaneId, entry: Entry) -> Element {
     let app = use_context::<AppSignals>();
@@ -646,9 +683,7 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
             }
         },
         Entry::Agent { text } => rsx! {
-            div { class: "msg agent",
-                Markdown { source: text }
-            }
+            AgentMessage { text }
         },
         Entry::Thought { text } => rsx! {
             details { class: "thought",

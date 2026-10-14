@@ -82,15 +82,27 @@ body {
   font: 13px/1.5 var(--font);
   letter-spacing: 0.01em;
   -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
   user-select: none;
 }
 
-.msg,
-.thought .body,
+/* WebKit (the macOS and Linux web views) honours only the prefixed property,
+   so each rule sets both. The whole transcript selects, so a drag can span
+   several entries; its controls stay out of the selection. */
+.entries,
 pre,
 code,
 textarea {
+  -webkit-user-select: text;
   user-select: text;
+}
+
+.entries button,
+.entries summary,
+.entries .tool-icon,
+.entries .diff-line .ln {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .shell {
@@ -911,6 +923,27 @@ button.new-tab {
   overflow-wrap: anywhere;
 }
 
+.agent-msg {
+  display: flex;
+  flex-direction: column;
+}
+
+.msg-actions {
+  display: flex;
+  height: 24px;
+  margin-top: 2px;
+  visibility: hidden;
+}
+
+.agent-msg:hover .msg-actions,
+.msg-actions .copied {
+  visibility: visible;
+}
+
+.msg-actions .copied {
+  color: var(--fg);
+}
+
 .msg.user {
   white-space: pre-wrap;
   align-self: flex-end;
@@ -1623,7 +1656,6 @@ button.new-tab {
   padding-right: 8px;
   color: color-mix(in srgb, var(--muted-fg) 70%, transparent);
   text-align: right;
-  user-select: none;
 }
 
 .diff-line .code {
