@@ -9,10 +9,13 @@ rust-version.workspace = true
 description = "UI-independent application state for ukai"
 
 [dependencies]
+globset = { workspace = true }
+percent-encoding = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ukai-acp = { workspace = true }
+ukai-config = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

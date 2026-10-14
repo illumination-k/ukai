@@ -13,6 +13,8 @@ pub enum Icon {
     Send,
     Stop,
     Chevron,
+    Document,
+    External,
 }
 
 impl Icon {
@@ -30,6 +32,8 @@ impl Icon {
             Self::Send => &["M8 12.5v-9", "M4 7.5l4-4 4 4"],
             Self::Stop => &["M5.5 5.5h5v5h-5z"],
             Self::Chevron => &["M6 4l4 4-4 4"],
+            Self::Document => &["M4 2.5h5l3 3v8H4z", "M9 2.5v3h3", "M6 9h4", "M6 11h4"],
+            Self::External => &["M9 3h4v4", "M13 3l-6 6", "M11 9.5v3H3.5V5h3"],
         }
     }
 }

@@ -85,8 +85,48 @@ fn problems(src: &str) -> Vec<Problem> {
     "#,
     Problem::UnknownAgent { context: "permissions[0]".into(), agent: "ghost".into() }
 )]
+#[case::absolute_report_dir(
+    "[reports]\ndirs = [\"/tmp/reports\"]",
+    Problem::ReportDirOutsideProject("/tmp/reports".into())
+)]
+#[case::parent_report_dir(
+    "[reports]\ndirs = [\"reports/../../elsewhere\"]",
+    Problem::ReportDirOutsideProject("reports/../../elsewhere".into())
+)]
+#[case::invalid_glob(
+    "[reports]\nglobs = [\"**/*.{html\"]",
+    Problem::InvalidGlob { glob: "**/*.{html".into(), message: "unclosed alternate group; missing '}' (maybe escape '{' with '[{]'?)".into() }
+)]
 fn reports_problem(#[case] src: &str, #[case] expected: Problem) {
     assert_eq!(problems(src), vec![expected]);
+}
+
+#[test]
+fn every_problem_is_reported() {
+    let src = r#"
+        [[permissions]]
+        agent = "ghost"
+        decision = "deny"
+
+        [reports]
+        dirs = ["ok", "../out"]
+        globs = ["[", "**/*.html"]
+    "#;
+    assert_eq!(problems(src).len(), 3);
+}
+
+#[test]
+fn reports_default_to_html_and_images_without_network() {
+    let reports = Reports::default();
+    assert!(reports.globs.contains(&"**/*.html".to_owned()));
+    assert!(reports.globs.contains(&"**/*.png".to_owned()));
+    assert!(!reports.allow_network);
+    assert_eq!(
+        parse("[reports]\ndirs = [\"r\"]")
+            .ok()
+            .map(|c| c.reports.globs),
+        Some(reports.globs)
+    );
 }
 
 #[rstest]

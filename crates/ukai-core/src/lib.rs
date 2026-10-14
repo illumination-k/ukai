@@ -3,6 +3,7 @@
 
 mod layout;
 mod project;
+pub mod report;
 pub mod state;
 mod transcript;
 

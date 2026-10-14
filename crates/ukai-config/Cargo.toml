@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Schema, loading, and validation of ukai.toml project configuration"
 
 [dependencies]
+globset = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }

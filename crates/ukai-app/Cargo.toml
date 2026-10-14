@@ -22,6 +22,7 @@ ukai-acp = { workspace = true }
 ukai-config = { workspace = true }
 ukai-core = { workspace = true }
 uuid = { workspace = true }
+webbrowser = { workspace = true }
 
 [lints]
 workspace = true

@@ -95,19 +95,28 @@ pub enum Decision {
     Ask,
 }
 
+/// Agent-written files a pane can show: HTML reports and images.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reports {
-    /// Directories watched for reports, relative to the project root.
+    /// Directories listed in the sidebar, relative to the project root.
     #[serde(default)]
     pub dirs: Vec<PathBuf>,
+    /// Which files under `dirs` are listed, relative to each directory.
     #[serde(default = "Reports::default_globs")]
     pub globs: Vec<String>,
+    /// Let reports load from the network (CDN scripts, remote images). Off
+    /// by default: a report sees only the files next to it.
+    #[serde(default)]
+    pub allow_network: bool,
 }
 
 impl Reports {
     fn default_globs() -> Vec<String> {
-        vec!["**/*.html".to_owned()]
+        ["html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp"]
+            .iter()
+            .map(|ext| format!("**/*.{ext}"))
+            .collect()
     }
 }
 
@@ -116,6 +125,7 @@ impl Default for Reports {
         Self {
             dirs: Vec::new(),
             globs: Self::default_globs(),
+            allow_network: false,
         }
     }
 }

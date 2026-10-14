@@ -2,6 +2,8 @@
 //! [`ukai_core::Layout`]. Each pane belongs to a project, so one tab can show
 //! agents of several projects side by side.
 
+use std::path::PathBuf;
+
 use dioxus::prelude::*;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
@@ -11,6 +13,7 @@ use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
 use crate::app::MOD_KEY;
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
+use crate::report_pane::{ReportView, pick_report};
 
 /// Open `agent` of `project` in `pane` and start its session. A gateway
 /// agent gets a workspace of the pane's own: `scope`, else the agent's default.
@@ -49,6 +52,36 @@ pub fn open_agent(
     );
     projects.write().select(project);
     connect(app, pane, false);
+}
+
+/// Where something launched from outside the pane tree opens: the focused
+/// pane when it is empty, otherwise a new pane split to its right.
+pub fn launch_target(app: AppSignals) -> Option<PaneId> {
+    let mut layout = app.layout;
+    let focused = layout.peek().focused();
+    if layout.peek().content(focused) == Some(&PaneContent::Empty) {
+        Some(focused)
+    } else {
+        layout.write().split(focused, Direction::Horizontal)
+    }
+}
+
+/// Show the report at `path` (relative to the root of `project`) in `pane`.
+pub fn open_report(app: AppSignals, pane: PaneId, project: &ProjectId, path: PathBuf) {
+    let AppSignals {
+        mut layout,
+        mut projects,
+        ..
+    } = app;
+    layout.write().set_content(
+        pane,
+        PaneContent::Report {
+            project: project.clone(),
+            path,
+        },
+    );
+    layout.write().focus(pane);
+    projects.write().select(project);
 }
 
 /// Close `pane` and end its session.
@@ -282,8 +315,8 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Agent { session, .. } => rsx! {
                     AgentView { pane, has_saved_session: session.is_some() }
                 },
-                PaneContent::Report { path, .. } => rsx! {
-                    div { class: "pane-body placeholder", "report: {path.display()}" }
+                PaneContent::Report { project, path } => rsx! {
+                    ReportView { pane, project, path }
                 },
             }
         }
@@ -376,6 +409,15 @@ fn Picker(pane: PaneId) -> Element {
                                 }
                             }
                         },
+                    }
+                    if let Some(project) = current {
+                        button {
+                            class: "outline open-file",
+                            title: "Show an HTML report or image from this project",
+                            onclick: move |_| pick_report(app, Some(pane), project.clone()),
+                            Svg { icon: Icon::Document }
+                            "Open report or image…"
+                        }
                     }
                 }
             }

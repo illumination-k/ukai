@@ -22,7 +22,7 @@ update it in the same change when the design moves.
 
 - `crates/ukai-config` — `ukai.toml` schema (serde), the user-level `config.toml` it is layered over (`load_layered`), config/state directory resolution, `${env:NAME}` interpolation, and cross-reference validation.
 - `crates/ukai-acp` — resolves an agent spec into an ACP transport (`agent-client-protocol` for stdio, `agent-client-protocol-http` for HTTP/SSE and WebSocket) and runs a session over it: `spawn_session` returns a `SessionHandle` for commands and a channel of `SessionEvent`s. Also the client side of `fs/*`, confined to the project root. No UI types.
-- `crates/ukai-core` — UI-independent state: `Projects` (opened project roots under opaque ids), `Layout` (tabs and pane trees the user arranges at runtime; each pane names its project; invariants are property-tested and re-checked on load), `Transcript` (the fold of `SessionEvent`s an agent pane renders), and `state` (the versioned `state.json`, written atomically).
+- `crates/ukai-core` — UI-independent state: `Projects` (opened project roots under opaque ids), `Layout` (tabs and pane trees the user arranges at runtime; each pane names its project; invariants are property-tested and re-checked on load), `Transcript` (the fold of `SessionEvent`s an agent pane renders), and `state` (the versioned `state.json`, written atomically), and `report` (listing reports and images, and serving one to its web view confined to its base directory).
 - `crates/ukai-app` — the Dioxus 0.7 desktop app (`ukai` binary). Keep logic out of components; put it in a library crate where it can be tested headless.
 - `crates/ukai-relay` — runs a stdio ACP agent behind `/acp` with sessions that outlive client connections: answers reconnects' `initialize` and `session/load` from what it recorded, keeps turns running with no client, and re-sends pending permission requests. The protocol side (`hub`) is pure; extend its tests for behavior changes.
 - `crates/ukai-gateway` — serves the agents in a `gateway.toml` at `/agents/<id>/acp` (WebSocket) from one namespace, starting a pod per workspace and relaying to the `ukai-relay` in it. `config` is the `gateway.toml` schema and its validation; `job` builds the pod's Job spec (pure, tested as JSON); `scripts/workspace.sh` is the sidecar that clones and snapshots, the only container holding git credentials.
@@ -68,8 +68,9 @@ using.
 
 ## Security notes
 
-- Agent-produced HTML is untrusted. It must render in a sandboxed context that
-  cannot reach the app's IPC bridge (see "HTML レポート" in `docs/design.md`).
+- Agent-produced HTML is untrusted. It renders in a child web view of its own
+  with no IPC handler; never in an iframe of the app's web view, whose IPC
+  bridge every frame can reach (see "HTML レポートと画像" in `docs/design.md`).
 - ACP `fs/*` requests are confined to the project root after path
   normalization, including symlinks.
 - Secrets are only ever referenced as `${env:NAME}`; do not add a config key
