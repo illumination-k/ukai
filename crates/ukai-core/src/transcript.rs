@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use ukai_acp::{
     FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome, SessionEvent,
-    ToolStatus,
+    ToolStatus, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,13 +58,15 @@ pub enum Entry {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Transcript {
     pub agent: Option<String>,
     pub status: Status,
     pub entries: Vec<Entry>,
     /// What the agent accepts in a prompt, known once it is ready.
     pub prompt_caps: PromptCaps,
+    /// The agent's latest report of context use and cost, if it sends any.
+    pub usage: Option<Usage>,
 }
 
 impl Default for Transcript {
@@ -74,6 +76,7 @@ impl Default for Transcript {
             status: Status::Connecting,
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
+            usage: None,
         }
     }
 }
@@ -291,6 +294,7 @@ impl Transcript {
                 });
             }
             SessionEvent::FileWritten { path } => self.entries.push(Entry::FileWritten { path }),
+            SessionEvent::Usage(usage) => self.usage = Some(usage),
             SessionEvent::TurnEnded { stop_reason } => {
                 if stop_reason != "end_turn" {
                     self.entries.push(Entry::Notice {
@@ -324,6 +328,39 @@ impl Transcript {
             .iter_mut()
             .rev()
             .find(|entry| matches!(entry, Entry::Tool { id: tid, .. } if tid == id))
+    }
+}
+
+/// Short text for a usage report, e.g. `53k / 200k (27%) · $0.05`.
+pub fn usage_label(usage: &Usage) -> String {
+    let mut label = format!("{} / {}", tokens(usage.used), tokens(usage.size));
+    if usage.size > 0 {
+        let percent = (usage.used as f64 / usage.size as f64 * 100.0).round();
+        label.push_str(&format!(" ({percent}%)"));
+    }
+    if let Some(cost) = &usage.cost {
+        let amount = format!("{:.2}", cost.amount);
+        match cost.currency.as_str() {
+            "USD" => label.push_str(&format!(" · ${amount}")),
+            currency => label.push_str(&format!(" · {amount} {currency}")),
+        }
+    }
+    label
+}
+
+/// A token count rounded for display: `950`, `1.2k`, `53k`, `1.5M`.
+fn tokens(count: u64) -> String {
+    let (value, unit) = match count {
+        0..1_000 => return count.to_string(),
+        // Below 999.5k so rounding never shows `1000k`.
+        1_000..999_500 => (count as f64 / 1_000.0, "k"),
+        _ => (count as f64 / 1_000_000.0, "M"),
+    };
+    if value < 10.0 {
+        let text = format!("{value:.1}");
+        format!("{}{unit}", text.trim_end_matches(".0"))
+    } else {
+        format!("{}{unit}", value.round())
     }
 }
 
@@ -407,6 +444,43 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn usage_keeps_the_latest_report() {
+        let report = |used| {
+            SessionEvent::Usage(Usage {
+                used,
+                size: 100,
+                cost: None,
+            })
+        };
+        let transcript = folded([report(10), msg("a"), report(20)]);
+        assert_eq!(transcript.usage.map(|u| u.used), Some(20));
+        assert_eq!(transcript.entries, vec![Entry::Agent { text: "a".into() }]);
+    }
+
+    #[rstest]
+    #[case::small(950, 1_000, None, "950 / 1k (95%)")]
+    #[case::thousands(53_000, 200_000, Some((0.045, "USD")), "53k / 200k (27%) · $0.04")]
+    #[case::fraction(1_234, 1_000_000, None, "1.2k / 1M (0%)")]
+    #[case::near_million(999_600, 2_000_000, None, "1M / 2M (50%)")]
+    #[case::other_currency(0, 0, Some((1.5, "EUR")), "0 / 0 · 1.50 EUR")]
+    fn usage_labels(
+        #[case] used: u64,
+        #[case] size: u64,
+        #[case] cost: Option<(f64, &str)>,
+        #[case] expected: &str,
+    ) {
+        let usage = Usage {
+            used,
+            size,
+            cost: cost.map(|(amount, currency)| ukai_acp::Cost {
+                amount,
+                currency: currency.into(),
+            }),
+        };
+        assert_eq!(usage_label(&usage), expected);
     }
 
     #[test]

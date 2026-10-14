@@ -13,4 +13,4 @@ mod transcript;
 
 pub use layout::{Direction, Layout, Node, PaneContent, PaneId, Tab};
 pub use project::{Project, ProjectId, Projects};
-pub use transcript::{Alert, Entry, Status, Transcript};
+pub use transcript::{Alert, Entry, Status, Transcript, usage_label};

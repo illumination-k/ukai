@@ -1246,6 +1246,15 @@ button.new-tab {
   font-size: 11px;
 }
 
+/* Context use and cost the agent reports. */
+.composer-footer .usage {
+  margin-left: auto;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* Dropped files, line comments, and attach errors waiting for the next send. */
 .composer-card.dropping {
   border-color: var(--unread);

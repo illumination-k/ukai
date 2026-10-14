@@ -8,7 +8,7 @@ use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionKind, PromptCapabilities, PromptResponse,
     RequestPermissionOutcome, ResumeSessionResponse, SessionCapabilities,
     SessionResumeCapabilities, StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
-    WriteTextFileRequest,
+    UsageUpdate, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
 use agent_client_protocol::{Channel, ConnectionTo};
@@ -32,6 +32,7 @@ struct Caps {
 /// - `fs`: says which `fs/*` methods the client offered, then `end_turn`
 /// - `edit`: reports a tool call with a diff, then updates it with another
 /// - `blocks`: describes every block of the prompt, then `end_turn`
+/// - `usage`: reports context use and cost, then `end_turn`
 /// - anything else: the prompt fails
 ///
 /// `session/load` replays one user and one agent message before answering.
@@ -125,6 +126,13 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                             say(&offered_fs)?;
                         } else if text == "blocks" {
                             say(&blocks)?;
+                        } else if text == "usage" {
+                            cx.send_notification(SessionNotification::new(
+                                session.clone(),
+                                SessionUpdate::UsageUpdate(UsageUpdate::new(53_000, 200_000).cost(
+                                    agent_client_protocol::schema::v1::Cost::new(0.045, "USD"),
+                                )),
+                            ))?;
                         } else if text == "edit" {
                             let update = |update| {
                                 cx.send_notification(SessionNotification::new(
@@ -487,6 +495,26 @@ async fn tool_calls_carry_their_diffs() {
                     new_text: "created".into(),
                 }]),
             },
+            end_turn(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reports_usage() {
+    let mut harness = Harness::start().await;
+    let events = harness.turn("usage").await;
+    assert_eq!(
+        events,
+        vec![
+            SessionEvent::Usage(Usage {
+                used: 53_000,
+                size: 200_000,
+                cost: Some(Cost {
+                    amount: 0.045,
+                    currency: "USD".into(),
+                }),
+            }),
             end_turn(),
         ]
     );

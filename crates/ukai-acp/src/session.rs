@@ -41,7 +41,7 @@ pub type SessionEvents = mpsc::UnboundedReceiver<SessionEvent>;
 pub type PermissionId = u64;
 
 /// Something the agent did, translated for the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// Progress before the agent can be reached, e.g. while its pod starts.
     Preparing { message: String },
@@ -77,6 +77,8 @@ pub enum SessionEvent {
     },
     /// The agent's current plan, replacing any earlier one.
     Plan { entries: Vec<PlanItem> },
+    /// Context window use and session cost, replacing any earlier report.
+    Usage(Usage),
     /// Answer with [`SessionHandle::resolve_permission`].
     PermissionRequested {
         id: PermissionId,
@@ -115,6 +117,24 @@ pub enum ToolStatus {
     InProgress,
     Completed,
     Failed,
+}
+
+/// Context window use and cumulative cost an agent reports for its session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Usage {
+    /// Tokens currently in context.
+    pub used: u64,
+    /// The context window, in tokens.
+    pub size: u64,
+    pub cost: Option<Cost>,
+}
+
+/// Cumulative cost of a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cost {
+    pub amount: f64,
+    /// ISO 4217 code, e.g. `USD`.
+    pub currency: String,
 }
 
 /// A file change a tool call reports.
@@ -658,8 +678,16 @@ fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEve
                 })
                 .collect(),
         },
-        // Echoes of our own prompt, mode/command lists, usage, and the rest
-        // are not shown yet.
+        SessionUpdate::UsageUpdate(usage) => SessionEvent::Usage(Usage {
+            used: usage.used,
+            size: usage.size,
+            cost: usage.cost.map(|cost| Cost {
+                amount: cost.amount,
+                currency: cost.currency,
+            }),
+        }),
+        // Echoes of our own prompt, mode/command lists, and the rest are not
+        // shown yet.
         _ => return None,
     })
 }
