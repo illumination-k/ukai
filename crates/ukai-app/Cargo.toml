@@ -1,0 +1,26 @@
+[package]
+name = "ukai-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "ukai desktop app: drive many ACP agents side by side"
+
+[[bin]]
+name = "ukai"
+path = "src/main.rs"
+
+[dependencies]
+dioxus = { workspace = true, features = ["desktop"] }
+rfd = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ukai-acp = { workspace = true }
+ukai-config = { workspace = true }
+ukai-core = { workspace = true }
+
+[lints]
+workspace = true

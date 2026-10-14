@@ -1,0 +1,123 @@
+[settings]
+lockfile = true
+
+[tools]
+rust = { version = "1.97.1", profile = "default", components = "rustfmt,clippy" }
+"aqua:cargo-bins/cargo-binstall" = "1.18.1"
+dprint = "0.54.0"
+prek = "0.3.8"
+shfmt = "3.13.1"
+shellcheck = "0.11.0"
+actionlint = "1.7.12"
+"aqua:zizmorcore/zizmor" = "1.23.1"
+"aqua:suzuki-shunsuke/ghalint" = "1.5.5"
+"aqua:suzuki-shunsuke/pinact" = "3.9.0"
+
+[tools."cargo:cargo-nextest"]
+version = "0.9.132"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
+[tools."cargo:cargo-deny"]
+version = "0.19.0"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
+[tools."cargo:cargo-audit"]
+version = "0.22.1"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
+# `dx` must match the `dioxus` crate version in Cargo.toml: the CLI speaks a
+# hot-reload/devtools protocol that is versioned with the runtime.
+[tools."cargo:dioxus-cli"]
+version = "0.7.10"
+depends = ["aqua:cargo-bins/cargo-binstall"]
+
+[hooks]
+postinstall = "if [ -z \"${CI:-}\" ]; then prek install -f; fi"
+
+# ---- aggregates --------------------------------------------------------------
+
+[tasks.fmt]
+description = "Run all fmt:* tasks"
+depends = "fmt:*"
+
+[tasks.lint]
+description = "Run all lint:* tasks"
+depends = "lint:*"
+
+[tasks.test]
+description = "Run all test:* tasks"
+depends = "test:*"
+
+[tasks.ci]
+description = "Full required verification; covers everything CI gates on"
+depends = ["lint", "test"]
+
+# ---- base --------------------------------------------------------------------
+
+[tasks."fmt:base"]
+description = "Format with dprint and shfmt"
+run = [
+  "dprint fmt",
+  "git ls-files -z -- '*.sh' | xargs -0 shfmt -w",
+]
+
+[tasks."lint:base"]
+description = "Lint with dprint, shfmt, shellcheck"
+run = [
+  "dprint check",
+  "git ls-files -z -- '*.sh' | xargs -0 shfmt -d",
+  "git ls-files -z -- '*.sh' | xargs -0 shellcheck",
+]
+
+[tasks."lint:gha"]
+description = "Lint GitHub Actions workflows and policies"
+run = [
+  "actionlint",
+  # Claude Code cloud sessions cannot reach the GitHub API, so skip zizmor's
+  # online audits there instead of failing on a 403.
+  "zizmor ${CLAUDE_CODE_REMOTE:+--offline} .",
+  "ghalint run",
+  "pinact run",
+]
+
+[tasks."lint:precommit"]
+description = "Run the prek (pre-commit) hooks over every tracked file"
+run = "prek run --all-files"
+
+# ---- rust --------------------------------------------------------------------
+
+[tasks."fmt:rust"]
+description = "Format Rust code with cargo fmt and dx fmt (rsx! blocks)"
+run = [
+  "cargo fmt --all",
+  "dx fmt --package ukai-app",
+]
+
+[tasks."lint:rust"]
+description = "Lint Rust with clippy, fmt check, cargo-deny, cargo-audit"
+run = [
+  "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+  "cargo fmt --all --check",
+  "dx fmt --check --package ukai-app",
+  "cargo deny check",
+  "cargo audit",
+]
+
+[tasks."test:rust"]
+description = "Run Rust tests with cargo-nextest"
+run = "cargo nextest run --locked --workspace --all-features --no-tests=pass"
+
+[tasks."test:rust:doc"]
+description = "Run Rust doctests (cargo-nextest does not run them)"
+run = "cargo test --doc --locked --all-features --workspace"
+
+# ---- app ---------------------------------------------------------------------
+# Not part of `ci`: these open a window or produce a release bundle.
+
+[tasks.dev]
+description = "Run the desktop app with hot reload (dx serve)"
+run = "dx serve --package ukai-app --platform desktop"
+
+[tasks.bundle]
+description = "Build a release bundle of the desktop app (dx bundle)"
+run = "dx bundle --package ukai-app --platform desktop --release"

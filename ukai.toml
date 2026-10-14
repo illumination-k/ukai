@@ -1,0 +1,40 @@
+# ukai's own project configuration. Doubles as the reference example of the
+# format: `crates/ukai-config` parses this file in its tests.
+#
+# It declares what a pane can open — each `[agents.<id>]` is the command (or
+# endpoint) started when you open that agent in a pane. Tabs and splits are
+# arranged in the app, not here.
+#
+# Personal endpoints and tokens go in `ukai.local.toml` (gitignored); secrets
+# are referenced as `${env:NAME}` and never written here.
+
+[project]
+name = "ukai"
+
+[agents.claude]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+
+[agents.codex]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@agentclientprotocol/codex-acp"]
+
+[agents.gemini]
+transport = "stdio"
+command = "gemini"
+args = ["--acp"]
+
+[agents.cloud]
+transport = "http"
+url = "https://agents.example.com/acp"
+headers = { Authorization = "Bearer ${env:UKAI_CLOUD_TOKEN}" }
+
+[[permissions]]
+agent = "claude"
+tool_kind = "read"
+decision = "allow"
+
+[reports]
+dirs = ["reports"]

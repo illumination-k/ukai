@@ -1,0 +1,44 @@
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "ISC",
+  "Unicode-3.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "MIT-0",
+  # aws-lc-sys (rustls' default crypto provider, via reqwest).
+  "NCSA",
+  # webpki-roots (via reqwest's rustls).
+  "CDLA-Permissive-2.0",
+  # cssparser / selectors / option-ext, via the dioxus desktop stack. File-level
+  # copyleft: fine to link as long as those files are not modified.
+  "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# The desktop stack (dioxus, wry, tao, and their platform bindings) carries
+# several duplicate majors that we cannot collapse from here, so duplicates are
+# reported rather than fatal.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside the workspace are not wildcards.
+allow-wildcard-paths = true
+
+[advisories]
+# Unmaintained-crate notices that only reach us through dioxus-desktop
+# 0.7.10. Revisit on every dioxus bump; drop an entry as soon as the path
+# that pulls it in is gone.
+ignore = [
+  { id = "RUSTSEC-2025-0057", reason = "fxhash via wry -> kuchikiki -> selectors" },
+  { id = "RUSTSEC-2024-0436", reason = "paste via dioxus-desktop -> image (exr, rav1e)" },
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via glib-macros (Linux GTK bindings of tao/muda)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,6 @@
+# :schema https://developers.openai.com/codex/config-schema.json
+
+[shell_environment_policy]
+# Avoid forcing a Rust toolchain in Codex-spawned commands.
+# This lets mise/rust-toolchain selection work as intended.
+exclude = ["^RUSTUP_TOOLCHAIN$"]

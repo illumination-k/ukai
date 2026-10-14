@@ -1,0 +1,29 @@
+name: Lint Base
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - ".github/workflows/**"
+  pull_request:
+    paths-ignore:
+      - ".github/workflows/**"
+
+jobs:
+  lint:
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+
+      - name: Run pre-commit
+        run: prek run --all-files
+
+      - name: lint with mise
+        run: mise run lint:base

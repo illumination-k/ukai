@@ -1,0 +1,10 @@
+[application]
+name = "ukai"
+default_platform = "desktop"
+asset_dir = "assets"
+
+[bundle]
+identifier = "dev.illumination-k.ukai"
+publisher = "illumination-k"
+category = "DeveloperTool"
+short_description = "Drive many ACP agents side by side"

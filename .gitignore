@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# mise
+.mise.local.toml
+
+# Rust
+target/
+
+# Dioxus
+dist/
+.dioxus/
+
+# ukai runtime state and personal overrides
+.ukai/
+ukai.local.toml
+
+.env
+.env.*
+!.env.example
