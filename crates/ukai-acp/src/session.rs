@@ -18,14 +18,17 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, FileSystemCapabilities,
-    Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus,
-    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, ToolCallStatus,
-    WriteTextFileRequest, WriteTextFileResponse,
+    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
+    EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
+    InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus, PromptRequest,
+    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
+    SessionId, SessionNotification, SessionUpdate, TextResourceContents, ToolCallContent,
+    ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::mpsc;
 
 use crate::Transport;
@@ -48,6 +51,8 @@ pub enum SessionEvent {
         /// Pass back as [`SessionOptions::restore`] to continue this session later.
         session_id: String,
         restore: RestoreOutcome,
+        /// What a prompt may carry besides text.
+        prompt: PromptCaps,
     },
     /// A chunk of a user message the agent replays while loading a session.
     UserMessage { text: String },
@@ -60,11 +65,15 @@ pub enum SessionEvent {
         title: String,
         kind: String,
         status: ToolStatus,
+        /// File changes the call proposes or made.
+        diffs: Vec<FileDiff>,
     },
     ToolCallUpdate {
         id: String,
         title: Option<String>,
         status: Option<ToolStatus>,
+        /// Replaces the call's diffs when the update carries content.
+        diffs: Option<Vec<FileDiff>>,
     },
     /// The agent's current plan, replacing any earlier one.
     Plan { entries: Vec<PlanItem> },
@@ -108,6 +117,74 @@ pub enum ToolStatus {
     Failed,
 }
 
+/// A file change a tool call reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    /// Absolute path, as the agent sent it.
+    pub path: PathBuf,
+    /// `None` for a new file.
+    pub old_text: Option<String>,
+    pub new_text: String,
+}
+
+/// Content types an agent accepts in a prompt beyond text and resource links,
+/// from its `promptCapabilities`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptCaps {
+    pub image: bool,
+    pub embedded_context: bool,
+}
+
+/// A user turn: text and what was attached to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prompt {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
+impl From<String> for Prompt {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            attachments: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for Prompt {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+/// Something attached to a prompt. Which variant to send is the caller's
+/// choice, made against the agent's [`PromptCaps`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// Needs [`PromptCaps::image`].
+    Image { mime_type: String, data: Vec<u8> },
+    /// A text file's contents; needs [`PromptCaps::embedded_context`].
+    Text { uri: String, text: String },
+    /// A reference the agent resolves itself; every agent accepts it.
+    Link { name: String, uri: String },
+}
+
+impl Attachment {
+    fn into_block(self) -> ContentBlock {
+        match self {
+            Self::Image { mime_type, data } => {
+                ContentBlock::Image(ImageContent::new(BASE64.encode(data), mime_type))
+            }
+            Self::Text { uri, text } => ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                    text, uri,
+                )),
+            )),
+            Self::Link { name, uri } => ContentBlock::ResourceLink(ResourceLink::new(name, uri)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanItem {
     pub content: String,
@@ -125,7 +202,7 @@ pub struct PermissionChoice {
 
 #[derive(Debug)]
 enum SessionCommand {
-    Prompt(String),
+    Prompt(Prompt),
     Cancel,
     ResolvePermission {
         id: PermissionId,
@@ -141,8 +218,8 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     /// Returns `false` when the session has already ended.
-    pub fn prompt(&self, text: impl Into<String>) -> bool {
-        self.send(SessionCommand::Prompt(text.into()))
+    pub fn prompt(&self, prompt: impl Into<Prompt>) -> bool {
+        self.send(SessionCommand::Prompt(prompt.into()))
     }
 
     /// Cancel the running turn; pending permission requests are answered as cancelled.
@@ -419,10 +496,15 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     )));
                 }
             };
+            let prompt = &init.agent_capabilities.prompt_capabilities;
             let _ = events.send(SessionEvent::Ready {
                 agent: init.agent_info.map(|info| info.title.unwrap_or(info.name)),
                 session_id: session_id.0.to_string(),
                 restore,
+                prompt: PromptCaps {
+                    image: prompt.image,
+                    embedded_context: prompt.embedded_context,
+                },
             });
             ready.store(true, Ordering::SeqCst);
             if running_before_ready.load(Ordering::SeqCst) {
@@ -444,14 +526,16 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         }
                         match command {
                             None => break,
-                            Some(SessionCommand::Prompt(text)) => {
+                            Some(SessionCommand::Prompt(Prompt { text, attachments })) => {
                                 let events = events.clone();
+                                let blocks = (!text.is_empty())
+                                    .then(|| ContentBlock::from(text))
+                                    .into_iter()
+                                    .chain(attachments.into_iter().map(Attachment::into_block))
+                                    .collect();
                                 // Prepared so the turn-end callback is ordered after
                                 // every update the agent sent before its response.
-                                cx.prepare_request(PromptRequest::new(
-                                    session_id.clone(),
-                                    vec![ContentBlock::from(text)],
-                                ))
+                                cx.prepare_request(PromptRequest::new(session_id.clone(), blocks))
                                 .on_receiving_result(async move |result| {
                                     let event = match result {
                                         Ok(response) => SessionEvent::TurnEnded {
@@ -555,11 +639,13 @@ fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEve
             title: call.title,
             kind: serde_label(&call.kind),
             status: tool_status(call.status),
+            diffs: file_diffs(call.content),
         },
         SessionUpdate::ToolCallUpdate(update) => SessionEvent::ToolCallUpdate {
             id: update.tool_call_id.0.to_string(),
             title: update.fields.title,
             status: update.fields.status.map(tool_status),
+            diffs: update.fields.content.map(file_diffs),
         },
         SessionUpdate::Plan(plan) => SessionEvent::Plan {
             entries: plan
@@ -586,6 +672,20 @@ fn content_text(content: ContentBlock) -> Option<String> {
         ContentBlock::Image(_) => Some("[image]".to_owned()),
         _ => None,
     }
+}
+
+fn file_diffs(content: Vec<ToolCallContent>) -> Vec<FileDiff> {
+    content
+        .into_iter()
+        .filter_map(|content| match content {
+            ToolCallContent::Diff(diff) => Some(FileDiff {
+                path: diff.path,
+                old_text: diff.old_text,
+                new_text: diff.new_text,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn tool_status(status: ToolCallStatus) -> ToolStatus {

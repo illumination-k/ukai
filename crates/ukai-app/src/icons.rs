@@ -15,6 +15,8 @@ pub enum Icon {
     Chevron,
     Document,
     External,
+    Paperclip,
+    Search,
 }
 
 impl Icon {
@@ -34,6 +36,13 @@ impl Icon {
             Self::Chevron => &["M6 4l4 4-4 4"],
             Self::Document => &["M4 2.5h5l3 3v8H4z", "M9 2.5v3h3", "M6 9h4", "M6 11h4"],
             Self::External => &["M9 3h4v4", "M13 3l-6 6", "M11 9.5v3H3.5V5h3"],
+            Self::Paperclip => &[
+                "M12.5 7.5l-4.8 4.8a2.8 2.8 0 0 1-4-4l5-5a1.9 1.9 0 0 1 2.7 2.7l-5 5a.9.9 0 0 1-1.3-1.3l4.6-4.6",
+            ],
+            Self::Search => &[
+                "M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 1 0 0-9z",
+                "M10.3 10.3l3.2 3.2",
+            ],
         }
     }
 }

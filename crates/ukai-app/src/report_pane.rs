@@ -10,7 +10,8 @@
 //! (see [`ukai_core::report`]).
 //!
 //! The child view is native, so it sits above the app's DOM: the pane keeps it
-//! over its body by polling the body's position, and drops it on unmount.
+//! over its body by polling the body's position, hides it while the command
+//! palette is open, and drops it on unmount.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -52,7 +53,11 @@ pub fn ReportView(pane: PaneId, project: ProjectId, path: PathBuf) -> Element {
         });
     match report {
         Ok(report) => rsx! {
-            ReportSurface { key: "{pane}-{report.file().display()}", report }
+            ReportSurface {
+                key: "{pane}-{report.file().display()}",
+                report,
+                covered: app.palette,
+            }
         },
         Err(error) => rsx! {
             div { class: "pane-body report-error",
@@ -63,12 +68,25 @@ pub fn ReportView(pane: PaneId, project: ProjectId, path: PathBuf) -> Element {
     }
 }
 
-/// The element the child web view covers.
+/// The element the child web view covers. While `covered` is set something
+/// in the DOM is drawn over the pane, so the view hides.
 #[component]
-fn ReportSurface(report: ReportFile) -> Element {
+fn ReportSurface(report: ReportFile, covered: Signal<bool>) -> Element {
     let view = use_hook(|| Rc::new(RefCell::new(None::<WebView>)));
     let mut host = use_signal(|| None::<Rc<MountedData>>);
     let mut failure = use_signal(|| None::<String>);
+
+    // Hide at once; the poll below shows the view again once uncovered.
+    use_effect({
+        let view = view.clone();
+        move || {
+            if covered()
+                && let Some(webview) = view.borrow().as_ref()
+            {
+                let _ = webview.set_visible(false);
+            }
+        }
+    });
 
     use_drop({
         let view = view.clone();
@@ -91,12 +109,14 @@ fn ReportSurface(report: ReportFile) -> Element {
                         && let Ok(rect) = element.get_client_rect().await
                     {
                         let window_size = window.window.inner_size();
+                        let hidden = *covered.peek();
                         let key = (
                             rect.origin.x,
                             rect.origin.y,
                             rect.size.width,
                             rect.size.height,
                             window_size,
+                            hidden,
                         );
                         if placed != Some(key) {
                             placed = Some(key);
@@ -104,7 +124,8 @@ fn ReportSurface(report: ReportFile) -> Element {
                                 position: LogicalPosition::new(rect.origin.x, rect.origin.y).into(),
                                 size: LogicalSize::new(rect.size.width, rect.size.height).into(),
                             };
-                            let visible = rect.size.width > 0.0 && rect.size.height > 0.0;
+                            let visible =
+                                !hidden && rect.size.width > 0.0 && rect.size.height > 0.0;
                             let mut slot = view.borrow_mut();
                             match slot.as_ref() {
                                 Some(webview) => {
@@ -112,7 +133,10 @@ fn ReportSurface(report: ReportFile) -> Element {
                                     let _ = webview.set_visible(visible);
                                 }
                                 None => match build(&report, bounds, &window.window) {
-                                    Ok(webview) => *slot = Some(webview),
+                                    Ok(webview) => {
+                                        let _ = webview.set_visible(visible);
+                                        *slot = Some(webview);
+                                    }
                                     Err(error) => {
                                         tracing::warn!(%error, "cannot open a report view");
                                         failure.set(Some(error.to_string()));

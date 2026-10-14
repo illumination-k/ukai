@@ -74,14 +74,14 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate          | kind      | 役割                                                                                                                                                   |
-| -------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                   |
-| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                     |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`）。UI フレームワークに依存しない。             |
-| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                  |
-| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。        |
-| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。 |
+| crate          | kind      | 役割                                                                                                                                                                                                             |
+| -------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                             |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                               |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、差分とレビュー `review`、添付 `attachment`、パレットの照合 `palette`）。UI フレームワークに依存しない。 |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                            |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                  |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                           |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -124,7 +124,15 @@ UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEven
 `PermissionRequested` / `FileWritten` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
 UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission`）で操作する。
-ACP のスキーマ変更（v2 への移行など）の影響をこの境界で吸収する。
+
+- `Ready` はエージェントの `promptCapabilities`（`image` / `embeddedContext`）を `PromptCaps` として運ぶ。
+- `ToolCall` / `ToolCallUpdate` はツール呼び出しの `content` のうち `diff`（パス・変更前・変更後）を `FileDiff` として運ぶ。
+  更新に `content` があれば差分を置き換え、なければ残す。
+- `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
+  `PromptCaps` を見て決める（`ukai_core::attachment`）: 画像は `image`（8 MiB まで、非対応なら添付を断る）、
+  `embeddedContext` があれば 256 KiB 以下の UTF-8 テキストは `resource` に埋め込み、それ以外は `resource_link`
+  （`file://` URI。ベースラインなので全エージェントが受ける）。
+  ACP のスキーマ変更（v2 への移行など）の影響をこの境界で吸収する。
 
 実装上の注意（SDK `agent-client-protocol` 3.3）:
 
@@ -289,7 +297,8 @@ allow_network = false # true でレポートからの外部読み込み（CDN �
   （`mod` は macOS で cmd、それ以外で ctrl）。
 - セッション・会話ログ・入力中の下書きは pane id をキーにアプリスコープで保持する。分割やタブ切り替えで
   コンポーネントが作り直されてもセッションは切れない。pane を閉じるとセッションも終わる。
-- 今後: 境界のドラッグでのリサイズ（比率はモデルにある）、パレット。
+- `mod+k` でパレット（後述「UI」）。
+- 今後: 境界のドラッグでのリサイズ（比率はモデルにある）。
 
 ## プロジェクトと永続化
 
@@ -360,7 +369,11 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 
 - 左: サイドバー（プロジェクトごとのエージェント一覧と接続状態、起動できるエージェント、レポート一覧）。
 - 中央: タブバーと pane 木。各 pane はヘッダ（タイトル・状態・分割/閉じるボタン）を持つ。
-- `mod+k`（今後）: パレット（エージェントを開く、レポートを開く）。
+- `mod+k`: パレット。開いている pane へ移動（フォーカス中のものを除く）、全プロジェクトのエージェントを開く、
+  全プロジェクトのレポートを開く、レイアウト操作（新規タブ・分割・閉じる・プロジェクトを開く）を 1 つの
+  あいまい検索（`ukai_core::palette`。空白区切りの語ごとに部分列一致、語頭と連続一致を優先）で選ぶ。
+  ↑↓ で選択、Enter で実行、Esc で閉じる。項目は開いた時点で集める。
+  report pane の子 WebView は DOM より手前に出るので、パレットを開いている間は隠す。
 - エージェント pane: メッセージのストリーミング表示、ツール呼び出しの折りたたみ、plan のチェックリスト、
   パーミッション要求はインラインのカードで応答。
 - スタイルは素の CSS + CSS 変数（ライト/ダークはOS追従）。Node ツールチェーンを持ち込まないため Tailwind は使わない。
@@ -371,6 +384,19 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - エージェントの状態は全面（サイドバー・タブ・pane ヘッダ）で同じ語彙: 作業中は黄のスピナー、待機は緑、
   **未回答のパーミッション要求がある間はオレンジ**（`Transcript::awaiting_permission`）、エラー切断は赤、それ以外は灰。
   タブは中の pane のうち最も注意を要する状態を出す。
+- **未読と通知（orca に倣う）。** ターン終了（ユーザーの cancel を除く）・パーミッション要求・prompt の失敗・
+  エラー切断を `ukai_core::Alert` とし、その pane を見ていなければ（ウィンドウが前面で、かつフォーカス中の pane
+  でなければ）未読にする。未読はサイドバーの行（太字 + 青い点）・タブ（青い点）・pane ヘッダ（`new`）に出し、
+  pane にフォーカスが移るかウィンドウが前面に戻ったときにフォーカス中の pane から消す。ウィンドウが背面にある間は
+  デスクトップ通知（`notify-rust`。Linux は zbus なので libdbus は不要）も出し、パーミッション要求ではウィンドウの
+  注意喚起もする。通知の本文は `エージェント · プロジェクト` と要約だけで、ヘッダ値など設定由来の値は載せない。
+- **差分のレビュー（orca に倣う）。** 差分を持つツール呼び出しは `+n −m` 付きの行になり、開くと行番号付きの
+  unified diff（前後 3 行、`similar`。1 呼び出し 400 行まで）を出す。行にホバーして「+」でコメントを付けると
+  入力欄の上に溜まり、次の送信で `review_prompt` が「場所・コメント・該当行」の一覧を本文の前に付けて送る
+  （本文が空でも送れる）。対象はエージェントが ACP で報告した差分だけで、worktree の `git diff` ではない。
+- **添付（orca に倣う）。** 入力欄へのファイルのドロップと 📎（ファイル選択ダイアログ）で、ファイルや画像を
+  次の prompt に添える。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には
+  添付のファイル名を出す。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
 - 会話は最大幅 46rem で中央寄せ。ユーザー発言は右寄せの淡いバブル、エージェント発言は地のまま、ツール呼び出しは
   1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。
 
@@ -395,7 +421,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 | 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル     |
 | 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み |
 | 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                           |
-| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元（済み）。リサイズ、パレット                                             |
+| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付（済み）。リサイズ             |
 | 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                    |
 | 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                |
 

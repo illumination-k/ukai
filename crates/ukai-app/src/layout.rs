@@ -10,6 +10,7 @@ use ukai_config::AgentSpec;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
+use crate::alert::{is_unread, mark_read};
 use crate::app::MOD_KEY;
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
@@ -66,6 +67,13 @@ pub fn launch_target(app: AppSignals) -> Option<PaneId> {
     }
 }
 
+/// Open `agent` of `project` where [`launch_target`] puts it.
+pub fn launch_agent(app: AppSignals, project: &ProjectId, agent: &str) {
+    if let Some(pane) = launch_target(app) {
+        open_agent(app, pane, project, agent, None);
+    }
+}
+
 /// Show the report at `path` (relative to the root of `project`) in `pane`.
 pub fn open_report(app: AppSignals, pane: PaneId, project: &ProjectId, path: PathBuf) {
     let AppSignals {
@@ -109,7 +117,7 @@ fn close_tab(app: AppSignals, index: usize) {
 }
 
 /// A pane's title: its project's name and what it shows.
-fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> (Option<String>, String) {
+pub fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> (Option<String>, String) {
     let project_name = |id: &ProjectId| {
         projects
             .get(id)
@@ -161,7 +169,7 @@ fn TabBar() -> Element {
     let (tabs, active) = {
         let current = layout.read();
         let projects = app.projects.read();
-        let tabs: Vec<(usize, String, usize, Option<&'static str>)> = current
+        let tabs: Vec<(usize, String, usize, Option<&'static str>, bool)> = current
             .tabs()
             .iter()
             .enumerate()
@@ -171,7 +179,14 @@ fn TabBar() -> Element {
                     || "New tab".to_owned(),
                     |pane| pane_label(&current, &projects, *pane).1,
                 );
-                (index, label, panes.len(), tab_state(app.sessions, &panes))
+                let unread = panes.iter().any(|pane| is_unread(app.sessions, *pane));
+                (
+                    index,
+                    label,
+                    panes.len(),
+                    tab_state(app.sessions, &panes),
+                    unread,
+                )
             })
             .collect();
         (tabs, current.active())
@@ -179,10 +194,14 @@ fn TabBar() -> Element {
 
     rsx! {
         nav { class: "tabbar",
-            for (index, label, count, state) in tabs {
+            for (index, label, count, state, unread) in tabs {
                 div {
                     key: "{index}",
-                    class: if index == active { "tab active" } else { "tab" },
+                    class: match (index == active, unread) {
+                        (true, _) => "tab active",
+                        (false, true) => "tab unread",
+                        (false, false) => "tab",
+                    },
                     onclick: move |_| layout.write().select_tab(index),
                     if let Some(state) = state {
                         span { class: "dot {state}" }
@@ -258,6 +277,7 @@ fn PaneView(pane: PaneId) -> Element {
         PaneContent::Agent { .. } => Some(agent_status(app.sessions, pane)),
         _ => None,
     };
+    let unread = is_unread(app.sessions, pane);
 
     rsx! {
         section {
@@ -266,6 +286,7 @@ fn PaneView(pane: PaneId) -> Element {
                 if layout.peek().focused() != pane {
                     layout.write().focus(pane);
                 }
+                mark_read(app.sessions, pane);
             },
             header {
                 if let Some((state, _, _)) = &status {
@@ -281,6 +302,9 @@ fn PaneView(pane: PaneId) -> Element {
                     if let Some(name) = name {
                         span { class: "agent-name", "{name}" }
                     }
+                }
+                if unread {
+                    span { class: "unread-badge", "new" }
                 }
                 span { class: "spacer" }
                 span { class: "pane-tools",
