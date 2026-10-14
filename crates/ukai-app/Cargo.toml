@@ -22,6 +22,7 @@ tracing-subscriber = { workspace = true }
 ukai-acp = { workspace = true }
 ukai-config = { workspace = true }
 ukai-core = { workspace = true }
+ukai-voice = { workspace = true }
 uuid = { workspace = true }
 webbrowser = { workspace = true }
 

@@ -11,6 +11,7 @@ mod persist;
 mod projects;
 mod report_pane;
 mod shortcuts;
+mod voice;
 
 use std::path::{Path, PathBuf};
 

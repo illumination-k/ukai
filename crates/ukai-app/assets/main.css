@@ -1376,6 +1376,30 @@ button.new-tab {
   font-size: 11px;
 }
 
+/* Dictation: red while the microphone records, amber while transcribing. */
+.composer-footer button.mic.recording {
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.composer-footer button.mic.transcribing {
+  color: var(--working);
+  cursor: progress;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-footer button.mic.recording {
+    animation: none;
+  }
+}
+
 /* Dropped files, line comments, and attach errors waiting for the next send. */
 .composer-card.dropping {
   border-color: var(--unread);

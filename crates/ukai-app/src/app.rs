@@ -19,6 +19,7 @@ use crate::projects::{
 };
 use crate::report_pane::ReportList;
 use crate::shortcuts::{Shortcuts, on_keydown};
+use crate::voice::Voice;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
@@ -70,6 +71,7 @@ pub fn App() -> Element {
     });
 
     let shortcuts = use_context_provider(|| Shortcuts::load(&paths));
+    use_context_provider(|| Voice::load(&paths));
     let palette = app.palette;
 
     rsx! {

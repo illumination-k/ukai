@@ -15,8 +15,10 @@ mise run dev    # run the desktop app with hot reload
 mise run ci     # lint + test
 ```
 
-On Linux the webview needs system libraries:
-`libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev libssl-dev`.
+On Linux the webview and the microphone need system libraries:
+`libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev libssl-dev libasound2-dev`.
+Voice input builds whisper.cpp from source, which needs `cmake` and a C/C++
+compiler with libclang on every platform.
 
 ## Configuration
 
@@ -24,6 +26,18 @@ Open project folders from the sidebar (or `ukai <dir>`). Each project can
 declare the agents a pane may open in a `ukai.toml` at its root; agents shared
 by every project (such as cloud agents) go in `~/.config/ukai/config.toml`.
 This repository's own [`ukai.toml`](ukai.toml) is the annotated example.
+
+Voice input (the 🎤 in the composer, `mod+shift+m`) transcribes on this
+machine with whisper.cpp; nothing is sent anywhere. Download a ggml model
+(e.g. `ggml-base.bin` from
+[ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp)) and
+point `~/.config/ukai/config.toml` at it:
+
+```toml
+[voice]
+model = "models/ggml-base.bin" # relative to config.toml's directory
+language = "ja" # ISO 639-1; detected when omitted
+```
 
 Tabs and splits are arranged in the app and saved, with the projects you
 opened, in `~/.local/state/ukai/state.json`.
