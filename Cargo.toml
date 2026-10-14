@@ -20,6 +20,8 @@ ukai-relay = { path = "crates/ukai-relay" }
 
 agent-client-protocol = "3.3"
 agent-client-protocol-http = "3.3"
+# Text only: no image support, so no `image` crate.
+arboard = { version = "3", default-features = false }
 axum = "0.8"
 base64 = "0.22"
 dioxus = "0.7.10"
