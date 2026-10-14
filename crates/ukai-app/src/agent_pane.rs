@@ -12,8 +12,8 @@ use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
-    Attachment, FileDiff, FsRoot, PaneWorkspace, Prompt, SessionEvent, SessionEvents,
-    SessionHandle, SessionOptions, ToolStatus,
+    Attachment, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot, PaneWorkspace, Prompt,
+    SessionEvent, SessionEvents, SessionHandle, SessionOptions, ToolStatus,
 };
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
@@ -284,6 +284,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let writable = idle || busy;
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
+    let config = transcript.read().config.clone();
     let card_class = match (writable, dropping()) {
         (_, true) => "composer-card dropping",
         (true, false) => "composer-card",
@@ -417,6 +418,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         onclick: move |_| pick_attachments(composer, transcript),
                         Svg { icon: Icon::Paperclip }
                     }
+                    if !config.is_empty() {
+                        ConfigControls { pane, options: config, disabled: !writable }
+                    }
                     if let Some(hint) = send_hint {
                         span { class: "hint",
                             kbd { "{hint}" }
@@ -438,6 +442,80 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                             onclick: move |_| send_on_click(),
                             Svg { icon: Icon::Send }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The agent's settings, e.g. model and reasoning effort, changed through
+/// `session/set_config_option`. A change shows once the agent confirms it.
+#[component]
+fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> Element {
+    let sessions = use_context::<AppSignals>().sessions;
+    let set = move |id: String, value: ConfigInput| {
+        if let Some(handle) = sessions.read().get(&pane).and_then(|s| s.handle.clone()) {
+            handle.set_config(id, value);
+        }
+    };
+    rsx! {
+        div { class: "composer-config",
+            for option in options {
+                {
+                    let id = option.id.clone();
+                    let title = match &option.description {
+                        Some(description) => format!("{}: {description}", option.name),
+                        None => option.name.clone(),
+                    };
+                    match option.value {
+                        ConfigValue::Select { current, choices } => rsx! {
+                            select {
+                                key: "{option.id}",
+                                class: "config-select",
+                                title: "{title}",
+                                aria_label: "{option.name}",
+                                disabled,
+                                onchange: move |event| set(id.clone(), ConfigInput::Select(event.value())),
+                                for (group, run) in ukai_core::config::choice_groups(&choices) {
+                                    match group {
+                                        Some(group) => rsx! {
+                                            optgroup { label: "{group}",
+                                                for choice in run {
+                                                    option {
+                                                        value: "{choice.value}",
+                                                        selected: choice.value == current,
+                                                        title: choice.description.clone().unwrap_or_default(),
+                                                        "{choice.name}"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        None => rsx! {
+                                            for choice in run {
+                                                option {
+                                                    value: "{choice.value}",
+                                                    selected: choice.value == current,
+                                                    title: choice.description.clone().unwrap_or_default(),
+                                                    "{choice.name}"
+                                                }
+                                            }
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        ConfigValue::Toggle(on) => rsx! {
+                            label { key: "{option.id}", class: "config-toggle", title: "{title}",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: on,
+                                    disabled,
+                                    onchange: move |event| set(id.clone(), ConfigInput::Toggle(event.checked())),
+                                }
+                                "{option.name}"
+                            }
+                        },
                     }
                 }
             }

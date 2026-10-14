@@ -74,14 +74,14 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate          | kind      | 役割                                                                                                                                                                                                                                         |
-| -------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                         |
-| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                                                           |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、パレットの照合 `palette`）。UI フレームワークに依存しない。 |
-| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                        |
-| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                              |
-| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                       |
+| crate          | kind      | 役割                                                                                                                                                                                                                                                                          |
+| -------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                          |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                                                                                            |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、エージェント設定の表示 `config`、パレットの照合 `palette`）。UI フレームワークに依存しない。 |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                         |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                               |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                        |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -121,11 +121,19 @@ ukai は ACP の "Client" なので、エージェントからの要求に応え
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
 `Preparing` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` /
-`PermissionRequested` / `FileWritten` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `Closed`。
+`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` /
+`PromptFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
-UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission`）で操作する。
+UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission` / `set_config`）で操作する。
 
 - `Ready` はエージェントの `promptCapabilities`（`image` / `embeddedContext`）を `PromptCaps` として運ぶ。
+- モデル・推論レベル（reasoning effort）・モードなどの切り替えは ACP の Session Config Options で扱う。
+  `session/new` / `load` / `resume` の応答の `configOptions` を `Ready` の `config` に、`config_option_update`
+  通知と `session/set_config_option` の応答を `ConfigChanged`（常に全体を置き換える）に畳む。値は
+  `select`（グループ付きも平らにして `group` を持たせる）と `boolean` を扱い、それ以外の種類は落とす。
+  `boolean` は `clientCapabilities.session.configOptions.boolean` で広告する。`category`（`model` /
+  `thought_level` / `mode` など）は表示のヒントとして運ぶだけ。UI は composer の下段にエージェントの並び順で
+  出し、エージェントが応答で確定した値だけを表示に反映する。旧来の `modes` / `session/set_mode` は扱わない。
 - `ToolCall` / `ToolCallUpdate` はツール呼び出しの `content` のうち `diff`（パス・変更前・変更後）を `FileDiff` として運ぶ。
   更新に `content` があれば差分を置き換え、なければ残す。
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
@@ -178,6 +186,8 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 - セッションごとに `session/update` と、転送したユーザーの prompt を記録する。既知のセッションへの
   `session/load` には記録の再生で答えるので、切断中に起きたことも履歴に入る。relay が知らないセッション
   （relay の再起動後など）はエージェントに load させ、その再生を記録する。
+- セッション作成時の応答（`configOptions` を含む）を記録して load に返す。`session/set_config_option` の応答と
+  `config_option_update` 通知で記録の `configOptions` を差し替え、再接続しても今の設定が出るようにする。
 - ターンはクライアントがいなくても続く。実行中に再接続したクライアントには `_ukai/turn_state`
   （ACP v2 の `state_update` に合わせた形: `running` / `idle` と `stopReason`）で伝える。
 - エージェントからの要求（パーミッション）はクライアントが来るまで保留し、つないできたクライアントに出し直す。

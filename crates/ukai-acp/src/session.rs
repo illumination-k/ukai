@@ -18,12 +18,15 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
+    BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
+    ClientSessionCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
     EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus, PromptRequest,
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionId, SessionNotification, SessionUpdate, TextResourceContents, ToolCallContent,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, TextResourceContents, ToolCallContent,
     ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
@@ -53,7 +56,13 @@ pub enum SessionEvent {
         restore: RestoreOutcome,
         /// What a prompt may carry besides text.
         prompt: PromptCaps,
+        /// Settings the user may change, e.g. model or reasoning effort.
+        config: Vec<ConfigOption>,
     },
+    /// The agent's settings changed, replacing every earlier [`ConfigOption`].
+    ConfigChanged { options: Vec<ConfigOption> },
+    /// The agent rejected a [`SessionHandle::set_config`]; nothing changed.
+    ConfigFailed { message: String },
     /// A chunk of a user message the agent replays while loading a session.
     UserMessage { text: String },
     /// A chunk of the agent's reply; consecutive chunks form one message.
@@ -185,6 +194,45 @@ impl Attachment {
     }
 }
 
+/// A session setting the agent lets the user change (ACP `configOptions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `mode`, `model`, `model_config`, `thought_level`, or the agent's own;
+    /// a hint for presentation only.
+    pub category: Option<String>,
+    pub value: ConfigValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValue {
+    Select {
+        current: String,
+        choices: Vec<ConfigChoice>,
+    },
+    Toggle(bool),
+}
+
+/// One value of a [`ConfigValue::Select`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChoice {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// Name of the group the agent listed it under, if any.
+    pub group: Option<String>,
+}
+
+/// A new value for a [`ConfigOption`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigInput {
+    /// One of a select's [`ConfigChoice::value`]s.
+    Select(String),
+    Toggle(bool),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanItem {
     pub content: String,
@@ -208,6 +256,10 @@ enum SessionCommand {
         id: PermissionId,
         option: Option<String>,
     },
+    SetConfig {
+        id: String,
+        value: ConfigInput,
+    },
 }
 
 /// Sends commands to a running session. Dropping every handle ends it.
@@ -230,6 +282,15 @@ impl SessionHandle {
     /// Answer a [`SessionEvent::PermissionRequested`]; `None` declines without choosing.
     pub fn resolve_permission(&self, id: PermissionId, option: Option<String>) -> bool {
         self.send(SessionCommand::ResolvePermission { id, option })
+    }
+
+    /// Change one of the agent's [`ConfigOption`]s. The result arrives as
+    /// [`SessionEvent::ConfigChanged`] or [`SessionEvent::ConfigFailed`].
+    pub fn set_config(&self, id: impl Into<String>, value: ConfigInput) -> bool {
+        self.send(SessionCommand::SetConfig {
+            id: id.into(),
+            value,
+        })
     }
 
     fn send(&self, command: SessionCommand) -> bool {
@@ -433,9 +494,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         )
         .connect_with(transport, async |cx: ConnectionTo<Agent>| {
             let offer_fs = fs_root.is_some();
-            let capabilities = ClientCapabilities::new().fs(FileSystemCapabilities::new()
-                .read_text_file(offer_fs)
-                .write_text_file(offer_fs));
+            let capabilities = ClientCapabilities::new()
+                .fs(FileSystemCapabilities::new()
+                    .read_text_file(offer_fs)
+                    .write_text_file(offer_fs))
+                .session(ClientSessionCapabilities::new().config_options(
+                    SessionConfigOptionsCapabilities::new()
+                        .boolean(BooleanConfigOptionCapabilities::new()),
+                ));
             let handshake = async {
                 let init = cx
                     .send_request(
@@ -451,7 +517,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     .session_capabilities
                     .resume
                     .is_some();
-                let (session_id, outcome) = match restore {
+                let (session_id, outcome, config) = match restore {
                     Some(id) if can_load => {
                         // History arrives as session/update notifications before
                         // the response; user turns are only forwarded meanwhile.
@@ -461,14 +527,15 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                             .block_task()
                             .await;
                         replaying.store(false, Ordering::SeqCst);
-                        loaded?;
-                        (SessionId::new(id), RestoreOutcome::Replayed)
+                        let loaded = loaded?;
+                        (SessionId::new(id), RestoreOutcome::Replayed, loaded.config_options)
                     }
                     Some(id) if can_resume => {
-                        cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
+                        let resumed = cx
+                            .send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
                             .block_task()
                             .await?;
-                        (SessionId::new(id), RestoreOutcome::Resumed)
+                        (SessionId::new(id), RestoreOutcome::Resumed, resumed.config_options)
                     }
                     restore => {
                         let session = cx
@@ -480,14 +547,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         } else {
                             RestoreOutcome::Fresh
                         };
-                        (session.session_id, outcome)
+                        (session.session_id, outcome, session.config_options)
                     }
                 };
-                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome))
+                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome, config))
             };
             // An agent that never answers (e.g. stuck on expired credentials)
             // would otherwise leave the pane connecting forever.
-            let (init, session_id, restore) = tokio::select! {
+            let (init, session_id, restore, config) = tokio::select! {
                 result = handshake => result?,
                 () = stalled(&last_progress) => {
                     return Err(agent_client_protocol::util::internal_error(format!(
@@ -505,6 +572,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     image: prompt.image,
                     embedded_context: prompt.embedded_context,
                 },
+                config: config_options(config.unwrap_or_default()),
             });
             ready.store(true, Ordering::SeqCst);
             if running_before_ready.load(Ordering::SeqCst) {
@@ -557,6 +625,32 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                                         RequestPermissionOutcome::Cancelled,
                                     ))?;
                                 }
+                            }
+                            Some(SessionCommand::SetConfig { id, value }) => {
+                                let events = events.clone();
+                                let value = match value {
+                                    ConfigInput::Select(value) => {
+                                        SessionConfigOptionValue::value_id(value)
+                                    }
+                                    ConfigInput::Toggle(on) => SessionConfigOptionValue::boolean(on),
+                                };
+                                cx.send_request(SetSessionConfigOptionRequest::new(
+                                    session_id.clone(),
+                                    id,
+                                    value,
+                                ))
+                                .on_receiving_result(async move |result| {
+                                    let event = match result {
+                                        Ok(response) => SessionEvent::ConfigChanged {
+                                            options: config_options(response.config_options),
+                                        },
+                                        Err(error) => SessionEvent::ConfigFailed {
+                                            message: error.to_string(),
+                                        },
+                                    };
+                                    let _ = events.send(event);
+                                    Ok(())
+                                })?;
                             }
                             Some(SessionCommand::ResolvePermission { id, option }) => {
                                 if let Some(responder) = parked.remove(&id) {
@@ -658,10 +752,61 @@ fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEve
                 })
                 .collect(),
         },
+        SessionUpdate::ConfigOptionUpdate(update) => SessionEvent::ConfigChanged {
+            options: config_options(update.config_options),
+        },
         // Echoes of our own prompt, mode/command lists, usage, and the rest
         // are not shown yet.
         _ => return None,
     })
+}
+
+/// The options of kinds this client knows; others are left out.
+fn config_options(options: Vec<SessionConfigOption>) -> Vec<ConfigOption> {
+    options
+        .into_iter()
+        .filter_map(|option| {
+            let value = match option.kind {
+                SessionConfigKind::Select(select) => ConfigValue::Select {
+                    current: select.current_value.0.to_string(),
+                    choices: match select.options {
+                        SessionConfigSelectOptions::Ungrouped(options) => options
+                            .into_iter()
+                            .map(|choice| (None, choice))
+                            .collect::<Vec<_>>(),
+                        SessionConfigSelectOptions::Grouped(groups) => groups
+                            .into_iter()
+                            .flat_map(|group| {
+                                let name = group.name;
+                                group
+                                    .options
+                                    .into_iter()
+                                    .map(move |choice| (Some(name.clone()), choice))
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    }
+                    .into_iter()
+                    .map(|(group, choice)| ConfigChoice {
+                        value: choice.value.0.to_string(),
+                        name: choice.name,
+                        description: choice.description,
+                        group,
+                    })
+                    .collect(),
+                },
+                SessionConfigKind::Boolean(boolean) => ConfigValue::Toggle(boolean.current_value),
+                _ => return None,
+            };
+            Some(ConfigOption {
+                id: option.id.0.to_string(),
+                name: option.name,
+                description: option.description,
+                category: option.category.as_ref().map(serde_label),
+                value,
+            })
+        })
+        .collect()
 }
 
 /// Text to show for a content block; `None` for content not rendered yet.
