@@ -15,10 +15,10 @@ mise run dev    # run the desktop app with hot reload
 mise run ci     # lint + test
 ```
 
-On Linux the webview and the microphone need system libraries:
-`libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev libssl-dev libasound2-dev`.
+On Linux the webview and the microphone need system libraries; on Debian/Ubuntu,
+`mise bootstrap packages apply` installs the ones `mise.toml` declares.
 Voice input builds whisper.cpp from source, which needs `cmake` and a C/C++
-compiler with libclang on every platform.
+compiler with libclang on every platform (included in those packages).
 
 ## Configuration
 

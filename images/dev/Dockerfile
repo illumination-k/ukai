@@ -11,7 +11,7 @@
 # emptyDir.
 FROM node:24-trixie-slim
 
-# Build dependencies match .github/workflows/ci_rust.yml; the rest runs the app
+# Build dependencies match mise.toml's [bootstrap.packages]; the rest runs the app
 # headless: Xvfb, a session bus, input and screenshots, and fonts for the UI.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
