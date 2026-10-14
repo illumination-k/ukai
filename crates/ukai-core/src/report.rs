@@ -56,47 +56,58 @@ pub enum ReportError {
 /// Files under `reports.dirs` matching `reports.globs`, relative to `root`,
 /// newest first. Hidden directories are skipped; unreadable ones are too.
 pub fn list(root: &Path, reports: &Reports) -> Vec<PathBuf> {
-    let mut builder = globset::GlobSetBuilder::new();
-    for glob in &reports.globs {
-        // Validation reports bad globs; here they just match nothing.
-        if let Ok(glob) = globset::Glob::new(glob) {
-            builder.add(glob);
-        }
-    }
-    let Ok(globs) = builder.build() else {
+    let Some(globs) = glob_set(&reports.globs) else {
         return Vec::new();
     };
     let mut found: Vec<(SystemTime, PathBuf)> = Vec::new();
     for dir in &reports.dirs {
-        let mut pending = vec![PathBuf::new()];
-        while let Some(relative) = pending.pop() {
-            let Ok(entries) = std::fs::read_dir(root.join(dir).join(&relative)) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if name.to_string_lossy().starts_with('.') {
-                    continue;
-                }
-                let path = relative.join(&name);
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if file_type.is_dir() {
-                    pending.push(path);
-                } else if globs.is_match(&path) && found.len() < MAX_LISTED {
-                    let modified = entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
-                    found.push((modified, dir.join(path)));
-                }
-            }
-        }
+        walk(root, dir, &globs, &mut found);
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found.dedup_by(|a, b| a.1 == b.1);
     found.into_iter().map(|(_, path)| path).collect()
+}
+
+fn glob_set(globs: &[String]) -> Option<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    // Validation reports bad globs; here they just match nothing.
+    for glob in globs
+        .iter()
+        .filter_map(|glob| globset::Glob::new(glob).ok())
+    {
+        builder.add(glob);
+    }
+    builder.build().ok()
+}
+
+/// Push the files under `root/dir` matching `globs` onto `found`, as paths
+/// relative to `root`, until it holds [`MAX_LISTED`].
+fn walk(root: &Path, dir: &Path, globs: &globset::GlobSet, found: &mut Vec<(SystemTime, PathBuf)>) {
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(dir).join(&relative)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = relative.join(&name);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if globs.is_match(&path) && found.len() < MAX_LISTED {
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                found.push((modified, dir.join(path)));
+            }
+        }
+    }
 }
 
 /// One report, ready to be served to its web view.

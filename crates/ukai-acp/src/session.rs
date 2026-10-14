@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, FileSystemCapabilities,
-    Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus,
-    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, ToolCallStatus,
-    WriteTextFileRequest, WriteTextFileResponse,
+    Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
+    PlanEntryStatus, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
+    ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
 use tokio::sync::mpsc;
@@ -296,20 +296,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                 let events = events.clone();
                 async move |request: RequestPermissionRequest, responder, _cx| {
                     let id = next_permission.fetch_add(1, Ordering::Relaxed);
-                    let fields = request.tool_call.fields;
-                    let title = fields
-                        .title
-                        .unwrap_or_else(|| request.tool_call.tool_call_id.0.to_string());
-                    let options = request
-                        .options
-                        .into_iter()
-                        .map(|option| PermissionChoice {
-                            id: option.option_id.0.to_string(),
-                            name: option.name,
-                            kind: serde_label(&option.kind),
-                        })
-                        .collect();
-                    let _ = events.send(SessionEvent::PermissionRequested { id, title, options });
+                    let _ = events.send(translate_permission(id, request));
                     // If the command loop is gone the responder drops unanswered,
                     // which is fine: the connection is closing anyway.
                     let _ = park_tx.send((id, responder));
@@ -355,59 +342,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async |cx: ConnectionTo<Agent>| {
-            let offer_fs = fs_root.is_some();
-            let capabilities = ClientCapabilities::new().fs(FileSystemCapabilities::new()
-                .read_text_file(offer_fs)
-                .write_text_file(offer_fs));
-            let handshake = async {
-                let init = cx
-                    .send_request(
-                        InitializeRequest::new(ProtocolVersion::V1)
-                            .client_capabilities(capabilities)
-                            .client_info(Implementation::new("ukai", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .block_task()
-                    .await?;
-                let can_load = init.agent_capabilities.load_session;
-                let can_resume = init
-                    .agent_capabilities
-                    .session_capabilities
-                    .resume
-                    .is_some();
-                let (session_id, outcome) = match restore {
-                    Some(id) if can_load => {
-                        // History arrives as session/update notifications before
-                        // the response; user turns are only forwarded meanwhile.
-                        replaying.store(true, Ordering::SeqCst);
-                        let loaded = cx
-                            .send_request(LoadSessionRequest::new(id.clone(), cwd.clone()))
-                            .block_task()
-                            .await;
-                        replaying.store(false, Ordering::SeqCst);
-                        loaded?;
-                        (SessionId::new(id), RestoreOutcome::Replayed)
-                    }
-                    Some(id) if can_resume => {
-                        cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
-                            .block_task()
-                            .await?;
-                        (SessionId::new(id), RestoreOutcome::Resumed)
-                    }
-                    restore => {
-                        let session = cx
-                            .send_request(NewSessionRequest::new(cwd.clone()))
-                            .block_task()
-                            .await?;
-                        let outcome = if restore.is_some() {
-                            RestoreOutcome::Unsupported
-                        } else {
-                            RestoreOutcome::Fresh
-                        };
-                        (session.session_id, outcome)
-                    }
-                };
-                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome))
-            };
+            let handshake = handshake(&cx, fs_root.is_some(), cwd, restore, &replaying);
             // An agent that never answers (e.g. stuck on expired credentials)
             // would otherwise leave the pane connecting forever.
             let (init, session_id, restore) = tokio::select! {
@@ -442,50 +377,8 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         while let Ok((id, responder)) = park_rx.try_recv() {
                             parked.insert(id, responder);
                         }
-                        match command {
-                            None => break,
-                            Some(SessionCommand::Prompt(text)) => {
-                                let events = events.clone();
-                                // Prepared so the turn-end callback is ordered after
-                                // every update the agent sent before its response.
-                                cx.prepare_request(PromptRequest::new(
-                                    session_id.clone(),
-                                    vec![ContentBlock::from(text)],
-                                ))
-                                .on_receiving_result(async move |result| {
-                                    let event = match result {
-                                        Ok(response) => SessionEvent::TurnEnded {
-                                            stop_reason: serde_label(&response.stop_reason),
-                                        },
-                                        Err(error) => SessionEvent::PromptFailed {
-                                            message: error.to_string(),
-                                        },
-                                    };
-                                    let _ = events.send(event);
-                                    // An error here would end the connection.
-                                    Ok(())
-                                })?;
-                            }
-                            Some(SessionCommand::Cancel) => {
-                                cx.send_notification(CancelNotification::new(session_id.clone()))?;
-                                for (_, responder) in parked.drain() {
-                                    responder.respond(RequestPermissionResponse::new(
-                                        RequestPermissionOutcome::Cancelled,
-                                    ))?;
-                                }
-                            }
-                            Some(SessionCommand::ResolvePermission { id, option }) => {
-                                if let Some(responder) = parked.remove(&id) {
-                                    let outcome = match option {
-                                        Some(option) => RequestPermissionOutcome::Selected(
-                                            SelectedPermissionOutcome::new(option),
-                                        ),
-                                        None => RequestPermissionOutcome::Cancelled,
-                                    };
-                                    responder.respond(RequestPermissionResponse::new(outcome))?;
-                                }
-                            }
-                        }
+                        let Some(command) = command else { break };
+                        run_command(&cx, &session_id, &events, &mut parked, command)?;
                     }
                     () = cx.incoming_closed() => break,
                 }
@@ -495,8 +388,122 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         .await
 }
 
-/// `replaying`: a `session/load` is in progress, so user turns are history
-/// to show rather than echoes of a prompt the UI already displays.
+/// `initialize`, then load, resume, or start the session `restore` asks for,
+/// as far as the agent supports.
+async fn handshake(
+    cx: &ConnectionTo<Agent>,
+    offer_fs: bool,
+    cwd: PathBuf,
+    restore: Option<String>,
+    replaying: &AtomicBool,
+) -> Result<(InitializeResponse, SessionId, RestoreOutcome), agent_client_protocol::Error> {
+    let capabilities = ClientCapabilities::new().fs(FileSystemCapabilities::new()
+        .read_text_file(offer_fs)
+        .write_text_file(offer_fs));
+    let init = cx
+        .send_request(
+            InitializeRequest::new(ProtocolVersion::V1)
+                .client_capabilities(capabilities)
+                .client_info(Implementation::new("ukai", env!("CARGO_PKG_VERSION"))),
+        )
+        .block_task()
+        .await?;
+    let can_load = init.agent_capabilities.load_session;
+    let can_resume = init
+        .agent_capabilities
+        .session_capabilities
+        .resume
+        .is_some();
+    let (session_id, outcome) = match restore {
+        Some(id) if can_load => {
+            // History arrives as session/update notifications before
+            // the response; user turns are only forwarded meanwhile.
+            replaying.store(true, Ordering::SeqCst);
+            let loaded = cx
+                .send_request(LoadSessionRequest::new(id.clone(), cwd))
+                .block_task()
+                .await;
+            replaying.store(false, Ordering::SeqCst);
+            loaded?;
+            (SessionId::new(id), RestoreOutcome::Replayed)
+        }
+        Some(id) if can_resume => {
+            cx.send_request(ResumeSessionRequest::new(id.clone(), cwd))
+                .block_task()
+                .await?;
+            (SessionId::new(id), RestoreOutcome::Resumed)
+        }
+        restore => {
+            let session = cx
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await?;
+            let outcome = if restore.is_some() {
+                RestoreOutcome::Unsupported
+            } else {
+                RestoreOutcome::Fresh
+            };
+            (session.session_id, outcome)
+        }
+    };
+    Ok((init, session_id, outcome))
+}
+
+/// Carry out one command from the UI. Prompts only start here: their turn
+/// ends in a callback, so the loop keeps taking commands meanwhile.
+fn run_command(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    events: &Events,
+    parked: &mut HashMap<PermissionId, Responder<RequestPermissionResponse>>,
+    command: SessionCommand,
+) -> Result<(), agent_client_protocol::Error> {
+    match command {
+        SessionCommand::Prompt(text) => {
+            let events = events.clone();
+            // Prepared so the turn-end callback is ordered after
+            // every update the agent sent before its response.
+            cx.prepare_request(PromptRequest::new(
+                session_id.clone(),
+                vec![ContentBlock::from(text)],
+            ))
+            .on_receiving_result(async move |result| {
+                let event = match result {
+                    Ok(response) => SessionEvent::TurnEnded {
+                        stop_reason: serde_label(&response.stop_reason),
+                    },
+                    Err(error) => SessionEvent::PromptFailed {
+                        message: error.to_string(),
+                    },
+                };
+                let _ = events.send(event);
+                // An error here would end the connection.
+                Ok(())
+            })?;
+        }
+        SessionCommand::Cancel => {
+            cx.send_notification(CancelNotification::new(session_id.clone()))?;
+            for (_, responder) in parked.drain() {
+                responder.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ))?;
+            }
+        }
+        SessionCommand::ResolvePermission { id, option } => {
+            if let Some(responder) = parked.remove(&id) {
+                let outcome = match option {
+                    Some(option) => {
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option))
+                    }
+                    None => RequestPermissionOutcome::Cancelled,
+                };
+                responder.respond(RequestPermissionResponse::new(outcome))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolves once [`HANDSHAKE_TIMEOUT`] has passed since `last_progress`,
 /// which progress notifications keep moving forward.
 async fn stalled(last_progress: &Mutex<Instant>) {
@@ -533,6 +540,26 @@ fn translate_extension(message: &UntypedMessage) -> Option<SessionEvent> {
     }
 }
 
+fn translate_permission(id: PermissionId, request: RequestPermissionRequest) -> SessionEvent {
+    let title = request
+        .tool_call
+        .fields
+        .title
+        .unwrap_or_else(|| request.tool_call.tool_call_id.0.to_string());
+    let options = request
+        .options
+        .into_iter()
+        .map(|option| PermissionChoice {
+            id: option.option_id.0.to_string(),
+            name: option.name,
+            kind: serde_label(&option.kind),
+        })
+        .collect();
+    SessionEvent::PermissionRequested { id, title, options }
+}
+
+/// `replaying`: a `session/load` is in progress, so user turns are history
+/// to show rather than echoes of a prompt the UI already displays.
 fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEvent> {
     Some(match update {
         SessionUpdate::UserMessageChunk(ContentChunk { content, .. }) if replaying => {
