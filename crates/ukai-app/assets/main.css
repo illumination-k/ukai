@@ -483,6 +483,11 @@ button:focus-visible,
   font-size: 11px;
 }
 
+.footer-warning {
+  color: var(--attention);
+  cursor: help;
+}
+
 /* ---- tabs ------------------------------------------------------------- */
 
 .workbench {

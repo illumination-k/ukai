@@ -1,4 +1,4 @@
-//! The command palette (`mod+k`): one fuzzy search over open panes, the
+//! The command palette (`palette`, `mod+k` by default): one fuzzy search over open panes, the
 //! agents every project can launch, their reports, and the layout commands.
 //!
 //! Report panes are native views above the DOM, so they hide while the
@@ -7,11 +7,12 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
-use ukai_core::{Direction, PaneContent, PaneId, ProjectId, palette, report};
+use ukai_core::{Direction, PaneContent, PaneId, ProjectId, keymap, palette, report};
 
 use crate::icons::{Icon, Svg};
 use crate::layout::{close_pane, launch_agent, launch_target, open_report, pane_label};
 use crate::projects::{AppSignals, Paths, pick_and_add_project, project_context};
+use crate::shortcuts::Shortcuts;
 
 /// Rows shown at once; the query narrows the rest.
 const LIMIT: usize = 50;
@@ -36,7 +37,7 @@ struct Item {
 }
 
 /// Everything the palette offers, gathered when it opens.
-fn items(app: AppSignals) -> Vec<Item> {
+fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
     let layout = app.layout.peek();
     let projects = app.projects.peek();
     let configs = app.configs.peek();
@@ -84,18 +85,32 @@ fn items(app: AppSignals) -> Vec<Item> {
             }
         }
     }
-    let command = |label: &str, action| Item {
+    let command = |label: &str, action, shortcut: Option<keymap::Action>| Item {
         kind: "Command",
         label: label.to_owned(),
-        detail: String::new(),
+        detail: shortcut
+            .and_then(|shortcut| shortcuts.keymap.hint(shortcut))
+            .unwrap_or_default(),
         action,
     };
     items.extend([
-        command("New tab", Action::NewTab),
-        command("Split right", Action::Split(Direction::Horizontal)),
-        command("Split down", Action::Split(Direction::Vertical)),
-        command("Close pane", Action::ClosePane),
-        command("Open project…", Action::OpenProject),
+        command("New tab", Action::NewTab, Some(keymap::Action::NewTab)),
+        command(
+            "Split right",
+            Action::Split(Direction::Horizontal),
+            Some(keymap::Action::SplitRight),
+        ),
+        command(
+            "Split down",
+            Action::Split(Direction::Vertical),
+            Some(keymap::Action::SplitDown),
+        ),
+        command(
+            "Close pane",
+            Action::ClosePane,
+            Some(keymap::Action::ClosePane),
+        ),
+        command("Open project…", Action::OpenProject, None),
     ]);
     items
 }
@@ -126,7 +141,8 @@ fn perform(app: AppSignals, paths: &Paths, action: Action) {
 pub fn Palette() -> Element {
     let app = use_context::<AppSignals>();
     let paths = use_context::<Paths>();
-    let all = use_hook(|| items(app));
+    let shortcuts = use_context::<Shortcuts>();
+    let all = use_hook(|| items(app, &shortcuts));
     let mut query = use_signal(String::new);
     let mut selected = use_signal(|| 0_usize);
     let mut open = app.palette;

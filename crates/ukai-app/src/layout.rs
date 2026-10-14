@@ -7,14 +7,15 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
+use ukai_core::keymap::Action;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
-use crate::app::MOD_KEY;
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, pick_report};
+use crate::shortcuts::Shortcuts;
 
 /// Open `agent` of `project` in `pane` and start its session. A gateway
 /// agent gets a workspace of the pane's own: `scope`, else the agent's default.
@@ -165,6 +166,7 @@ pub fn Workbench() -> Element {
 #[component]
 fn TabBar() -> Element {
     let app = use_context::<AppSignals>();
+    let shortcuts = use_context::<Shortcuts>();
     let mut layout = app.layout;
     let (tabs, active) = {
         let current = layout.read();
@@ -223,7 +225,7 @@ fn TabBar() -> Element {
             }
             button {
                 class: "icon new-tab",
-                title: "New tab ({MOD_KEY}T)",
+                title: shortcuts.title("New tab", Action::NewTab),
                 onclick: move |_| {
                     layout.write().new_tab();
                 },
@@ -264,6 +266,7 @@ fn NodeView(node: Node) -> Element {
 #[component]
 fn PaneView(pane: PaneId) -> Element {
     let app = use_context::<AppSignals>();
+    let shortcuts = use_context::<Shortcuts>();
     let mut layout = app.layout;
     let (content, focused, (project, item)) = {
         let current = layout.read();
@@ -310,7 +313,7 @@ fn PaneView(pane: PaneId) -> Element {
                 span { class: "pane-tools",
                     button {
                         class: "icon",
-                        title: "Split right ({MOD_KEY}D)",
+                        title: shortcuts.title("Split right", Action::SplitRight),
                         onclick: move |_| {
                             layout.write().split(pane, Direction::Horizontal);
                         },
@@ -318,7 +321,7 @@ fn PaneView(pane: PaneId) -> Element {
                     }
                     button {
                         class: "icon",
-                        title: "Split down ({MOD_KEY}⇧D)",
+                        title: shortcuts.title("Split down", Action::SplitDown),
                         onclick: move |_| {
                             layout.write().split(pane, Direction::Vertical);
                         },
@@ -326,7 +329,7 @@ fn PaneView(pane: PaneId) -> Element {
                     }
                     button {
                         class: "icon",
-                        title: "Close pane ({MOD_KEY}W)",
+                        title: shortcuts.title("Close pane", Action::ClosePane),
                         onclick: move |_| close_pane(app, pane),
                         Svg { icon: Icon::Close }
                     }

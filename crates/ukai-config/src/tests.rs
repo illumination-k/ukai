@@ -136,3 +136,32 @@ fn layout_is_not_configurable(#[case] src: &str) {
     // Tabs and panes are arranged at runtime; the file only says what can be opened.
     assert!(matches!(parse(src), Err(ConfigError::Toml(_))));
 }
+
+#[rstest]
+#[case::one("palette = \"mod+p\"", Keys::One("mod+p".into()), &["mod+p"])]
+#[case::several(
+    "next-tab = [\"ctrl+tab\", \"mod+shift+]\"]",
+    Keys::Many(vec!["ctrl+tab".into(), "mod+shift+]".into()]),
+    &["ctrl+tab", "mod+shift+]"]
+)]
+#[case::unbound("close-pane = []", Keys::Many(Vec::new()), &[])]
+fn keybindings_take_one_chord_or_a_list(
+    #[case] line: &str,
+    #[case] expected: Keys,
+    #[case] chords: &[&str],
+) {
+    let config = parse_unchecked(&format!("[keybindings]\n{line}"));
+    let keys = config
+        .ok()
+        .and_then(|config| config.keybindings.into_values().next());
+    assert_eq!(keys.as_ref(), Some(&expected));
+    assert_eq!(expected.chords(), chords);
+}
+
+#[test]
+fn keybindings_are_user_level_only() {
+    assert_eq!(
+        problems("[keybindings]\npalette = \"mod+p\""),
+        vec![Problem::KeybindingsInProject]
+    );
+}

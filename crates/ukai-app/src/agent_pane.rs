@@ -15,6 +15,7 @@ use ukai_acp::{
     Attachment, FileDiff, FsRoot, PaneWorkspace, Prompt, SessionEvent, SessionEvents,
     SessionHandle, SessionOptions, ToolStatus,
 };
+use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
 use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
@@ -24,6 +25,7 @@ use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::report_pane::project_relative;
+use crate::shortcuts::Shortcuts;
 
 #[derive(Clone)]
 pub struct AgentSession {
@@ -159,6 +161,21 @@ fn start_session(
     ))
 }
 
+/// Stop `pane`'s turn, if it is running one.
+pub fn stop_turn(sessions: Sessions, pane: PaneId) {
+    let Some(session) = sessions.peek().get(&pane).cloned() else {
+        return;
+    };
+    let mut transcript = session.transcript;
+    if transcript.peek().status != Status::Busy {
+        return;
+    }
+    if let Some(handle) = &session.handle {
+        handle.cancel();
+    }
+    transcript.write().cancel();
+}
+
 /// Header status of an agent pane: css class, label, and the agent's own name.
 pub fn agent_status(
     sessions: Sessions,
@@ -184,6 +201,7 @@ pub fn agent_status(
 #[component]
 pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let app = use_context::<AppSignals>();
+    let shortcuts = use_context::<Shortcuts>();
     let Some(session) = app.sessions.read().get(&pane).cloned() else {
         return rsx! {
             div { class: "pane-body placeholder",
@@ -255,24 +273,23 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
             }
         }
     };
-    let cancel = move |_| {
-        if let Some(handle) = &handle {
-            handle.cancel();
-        }
-        transcript.write().cancel();
-    };
+    let cancel = move |_| stop_turn(app.sessions, pane);
 
     let mut send_on_click = send.clone();
     let busy = status == Status::Busy;
     let awaiting = transcript.read().awaiting_permission();
     let idle = status == Status::Idle;
+    // The next message can be written while a turn runs; it sends once idle.
+    let writable = idle || busy;
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
-    let card_class = match (idle, dropping()) {
+    let card_class = match (writable, dropping()) {
         (_, true) => "composer-card dropping",
         (true, false) => "composer-card",
         (false, false) => "composer-card disabled",
     };
+    let send_hint = shortcuts.keymap.hint(Action::Send);
+    let stop_title = shortcuts.title("Stop", Action::Stop);
 
     rsx! {
         // `column-reverse` keeps the view pinned to the newest entry.
@@ -378,15 +395,17 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         Status::Connecting => "Connecting…",
                         Status::Closed { .. } => "Disconnected",
                     },
-                    disabled: !idle,
+                    disabled: !writable,
                     value: "{draft}",
                     oninput: move |event| draft.set(event.value()),
-                    onkeydown: move |event| {
-                        if event.key() == Key::Enter && !event.modifiers().shift()
-                            && !event.is_composing()
-                        {
-                            event.prevent_default();
-                            send();
+                    onkeydown: {
+                        let shortcuts = shortcuts.clone();
+                        move |event: KeyboardEvent| {
+                            if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                send();
+                            }
                         }
                     },
                 }
@@ -397,16 +416,16 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         onclick: move |_| pick_attachments(composer, transcript),
                         Svg { icon: Icon::Paperclip }
                     }
-                    span { class: "hint",
-                        kbd { "Enter" }
-                        " send · "
-                        kbd { "⇧Enter" }
-                        " newline"
+                    if let Some(hint) = send_hint {
+                        span { class: "hint",
+                            kbd { "{hint}" }
+                            " send"
+                        }
                     }
                     if busy {
                         button {
                             class: "round secondary",
-                            title: "Stop",
+                            title: "{stop_title}",
                             onclick: cancel,
                             Svg { icon: Icon::Stop, size: 12 }
                         }
@@ -640,6 +659,7 @@ const MAX_DIFF_LINES: usize = 400;
 #[component]
 fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
     let app = use_context::<AppSignals>();
+    let shortcuts = use_context::<Shortcuts>();
     let mut editing = use_signal(|| None::<(usize, usize)>);
     let mut text = use_signal(String::new);
     let Some(mut review) = app
@@ -747,14 +767,17 @@ fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
                                         onkeydown: {
                                             let path = path.clone();
                                             let line = line.clone();
+                                            let shortcuts = shortcuts.clone();
                                             move |event: KeyboardEvent| {
-                                                if event.key() == Key::Escape {
+                                                if event.key() == Key::Escape && !event.is_composing() {
+                                                    // Not the app's: escape here drops the comment.
+                                                    event.stop_propagation();
                                                     editing.set(None);
-                                                } else if event.key() == Key::Enter
-                                                    && !event.modifiers().shift()
-                                                    && !event.is_composing()
+                                                } else if shortcuts.pressed(Scope::Composer, &event)
+                                                    == Some(Action::Send)
                                                 {
                                                     event.prevent_default();
+                                                    event.stop_propagation();
                                                     add_comment(review, &mut text, &path, &line);
                                                     editing.set(None);
                                                 }
