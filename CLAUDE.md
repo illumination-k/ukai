@@ -32,6 +32,8 @@ update it in the same change when the design moves.
 ## Development Process
 
 Run `mise install` first. All tools and tasks live in the single `mise.toml`.
+On Debian/Ubuntu, `mise bootstrap packages apply` also installs the system
+libraries the webview links against (`[bootstrap.packages]`).
 
 ```bash
 mise run fmt   # cargo fmt, dx fmt (rsx!), dprint, shfmt
