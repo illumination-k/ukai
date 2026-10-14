@@ -1,0 +1,14 @@
+# Point `images` at a build of images/runtime/Dockerfile and replace
+# gateway.toml with your agents, typically in an overlay of this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gateway.yaml
+images:
+  - name: ukai-runtime
+    newName: registry.example.com/ukai-runtime
+    newTag: latest
+configMapGenerator:
+  - name: ukai-gateway
+    files:
+      - gateway.toml

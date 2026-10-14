@@ -12,8 +12,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -24,7 +25,7 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, ToolCallStatus,
     WriteTextFileRequest, WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder};
+use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
 use tokio::sync::mpsc;
 
 use crate::Transport;
@@ -39,6 +40,8 @@ pub type PermissionId = u64;
 /// Something the agent did, translated for the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
+    /// Progress before the agent can be reached, e.g. while its pod starts.
+    Preparing { message: String },
     /// `initialize` and session setup succeeded; prompts can be sent.
     Ready {
         agent: Option<String>,
@@ -73,6 +76,9 @@ pub enum SessionEvent {
     },
     /// The agent wrote a file through `fs/write_text_file`.
     FileWritten { path: PathBuf },
+    /// A turn this client did not start is running: it reattached to a
+    /// session whose turn went on while it was away.
+    TurnRunning,
     /// The prompt turn finished, e.g. with `end_turn` or `cancelled`.
     TurnEnded { stop_reason: String },
     /// The agent rejected the prompt; the session is still usable.
@@ -158,8 +164,9 @@ impl SessionHandle {
 pub struct SessionOptions {
     /// Working directory announced in `session/new`.
     pub cwd: PathBuf,
-    /// Where `fs/*` requests are allowed to read and write.
-    pub fs_root: FsRoot,
+    /// Where `fs/*` requests are allowed to read and write; `None` does not
+    /// offer `fs/*` at all, for agents that are not on this machine's files.
+    pub fs_root: Option<FsRoot>,
     /// Session id from an earlier [`SessionEvent::Ready`] to continue instead
     /// of starting a new session.
     pub restore: Option<String>,
@@ -203,8 +210,17 @@ pub(crate) fn spawn_on<T: ConnectTo<Client> + Send + 'static>(
 
 type Events = mpsc::UnboundedSender<SessionEvent>;
 
-/// Generous enough for `npx` to fetch an adapter on first run.
+/// How long setup may go without progress: generous enough for `npx` to
+/// fetch an adapter on first run. A remote agent that sends `_ukai/progress`
+/// or `_ukai/heartbeat` (e.g. while its pod starts) restarts the clock each
+/// time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Progress before the agent is reachable: `{ "message": string }`.
+pub const PROGRESS_METHOD: &str = "_ukai/progress";
+/// A session's turn state, after ACP v2's `state_update`:
+/// `{ "sessionId", "state": "running" | "idle", "stopReason"? }`.
+pub const TURN_STATE_METHOD: &str = "_ukai/turn_state";
 type Parked = (PermissionId, Responder<RequestPermissionResponse>);
 
 async fn run_session<T: ConnectTo<Client> + 'static>(
@@ -221,6 +237,11 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         restore,
     } = options;
     let replaying = Arc::new(AtomicBool::new(false));
+    let last_progress = Arc::new(Mutex::new(Instant::now()));
+    // A reattached session's turn state can arrive before the load response
+    // completes setup; it is held until `Ready` so the UI sees them in order.
+    let ready = Arc::new(AtomicBool::new(false));
+    let running_before_ready = Arc::new(AtomicBool::new(false));
 
     Client
         .builder()
@@ -233,6 +254,37 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     let replaying = replaying.load(Ordering::SeqCst);
                     if let Some(event) = translate_update(notification.update, replaying) {
                         let _ = events.send(event);
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_notification(
+            {
+                let events = events.clone();
+                let last_progress = last_progress.clone();
+                let ready = ready.clone();
+                let running_before_ready = running_before_ready.clone();
+                async move |message: UntypedMessage, _cx| {
+                    // Any of ukai's own notifications (progress, heartbeats)
+                    // shows that setup is still moving.
+                    if message.method().starts_with("_ukai/")
+                        && let Ok(mut last) = last_progress.lock()
+                    {
+                        *last = Instant::now();
+                    }
+                    match translate_extension(&message) {
+                        Some(
+                            event @ (SessionEvent::TurnRunning | SessionEvent::TurnEnded { .. }),
+                        ) if !ready.load(Ordering::SeqCst) => {
+                            let running = matches!(event, SessionEvent::TurnRunning);
+                            running_before_ready.store(running, Ordering::SeqCst);
+                        }
+                        Some(event) => {
+                            let _ = events.send(event);
+                        }
+                        None => {}
                     }
                     Ok(())
                 }
@@ -269,13 +321,15 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         .on_receive_request(
             {
                 let fs_root = fs_root.clone();
-                async move |request: ReadTextFileRequest, responder, _cx| match fs_root.read(
-                    &request.path,
-                    request.line,
-                    request.limit,
-                ) {
-                    Ok(content) => responder.respond(ReadTextFileResponse::new(content)),
-                    Err(error) => responder.respond_with_error(fs_error(&error)),
+                async move |request: ReadTextFileRequest, responder, _cx| {
+                    let Some(fs_root) = &fs_root else {
+                        return responder
+                            .respond_with_error(agent_client_protocol::Error::method_not_found());
+                    };
+                    match fs_root.read(&request.path, request.line, request.limit) {
+                        Ok(content) => responder.respond(ReadTextFileResponse::new(content)),
+                        Err(error) => responder.respond_with_error(fs_error(&error)),
+                    }
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -283,22 +337,28 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         .on_receive_request(
             {
                 let events = events.clone();
-                async move |request: WriteTextFileRequest, responder, _cx| match fs_root
-                    .write(&request.path, &request.content)
-                {
-                    Ok(path) => {
-                        let _ = events.send(SessionEvent::FileWritten { path });
-                        responder.respond(WriteTextFileResponse::new())
+                let fs_root = fs_root.clone();
+                async move |request: WriteTextFileRequest, responder, _cx| {
+                    let Some(fs_root) = &fs_root else {
+                        return responder
+                            .respond_with_error(agent_client_protocol::Error::method_not_found());
+                    };
+                    match fs_root.write(&request.path, &request.content) {
+                        Ok(path) => {
+                            let _ = events.send(SessionEvent::FileWritten { path });
+                            responder.respond(WriteTextFileResponse::new())
+                        }
+                        Err(error) => responder.respond_with_error(fs_error(&error)),
                     }
-                    Err(error) => responder.respond_with_error(fs_error(&error)),
                 }
             },
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async |cx: ConnectionTo<Agent>| {
+            let offer_fs = fs_root.is_some();
             let capabilities = ClientCapabilities::new().fs(FileSystemCapabilities::new()
-                .read_text_file(true)
-                .write_text_file(true));
+                .read_text_file(offer_fs)
+                .write_text_file(offer_fs));
             let handshake = async {
                 let init = cx
                     .send_request(
@@ -350,19 +410,24 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
             };
             // An agent that never answers (e.g. stuck on expired credentials)
             // would otherwise leave the pane connecting forever.
-            let (init, session_id, restore) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
-                .await
-                .map_err(|_| {
-                    agent_client_protocol::util::internal_error(format!(
-                        "agent did not finish initialize and session setup within {}s",
+            let (init, session_id, restore) = tokio::select! {
+                result = handshake => result?,
+                () = stalled(&last_progress) => {
+                    return Err(agent_client_protocol::util::internal_error(format!(
+                        "agent made no progress on initialize and session setup for {}s",
                         HANDSHAKE_TIMEOUT.as_secs()
-                    ))
-                })??;
+                    )));
+                }
+            };
             let _ = events.send(SessionEvent::Ready {
                 agent: init.agent_info.map(|info| info.title.unwrap_or(info.name)),
                 session_id: session_id.0.to_string(),
                 restore,
             });
+            ready.store(true, Ordering::SeqCst);
+            if running_before_ready.load(Ordering::SeqCst) {
+                let _ = events.send(SessionEvent::TurnRunning);
+            }
 
             let mut parked: HashMap<PermissionId, Responder<RequestPermissionResponse>> =
                 HashMap::new();
@@ -432,6 +497,42 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
 
 /// `replaying`: a `session/load` is in progress, so user turns are history
 /// to show rather than echoes of a prompt the UI already displays.
+/// Resolves once [`HANDSHAKE_TIMEOUT`] has passed since `last_progress`,
+/// which progress notifications keep moving forward.
+async fn stalled(last_progress: &Mutex<Instant>) {
+    loop {
+        let deadline = last_progress
+            .lock()
+            .map_or_else(|_| Instant::now(), |last| *last + HANDSHAKE_TIMEOUT);
+        if deadline <= Instant::now() {
+            return;
+        }
+        tokio::time::sleep_until(deadline.into()).await;
+    }
+}
+
+/// ukai's own notifications from a relay or gateway in front of an agent.
+fn translate_extension(message: &UntypedMessage) -> Option<SessionEvent> {
+    let params = message.params();
+    match message.method() {
+        PROGRESS_METHOD => Some(SessionEvent::Preparing {
+            message: params.get("message")?.as_str()?.to_owned(),
+        }),
+        TURN_STATE_METHOD => match params.get("state")?.as_str()? {
+            "running" => Some(SessionEvent::TurnRunning),
+            "idle" => Some(SessionEvent::TurnEnded {
+                stop_reason: params
+                    .get("stopReason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("end_turn")
+                    .to_owned(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEvent> {
     Some(match update {
         SessionUpdate::UserMessageChunk(ContentChunk { content, .. }) if replaying => {

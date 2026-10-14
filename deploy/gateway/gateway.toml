@@ -1,0 +1,12 @@
+# The agents ukai-gateway serves at /agents/<id>/acp. A client declares one as
+#
+#   [agents.claude]
+#   transport = "websocket"
+#   url = "ws://localhost:8080/agents/claude/acp"
+#
+# Secrets are referenced as `<secret>/<key>` and never written here.
+
+[agents.claude]
+image = "registry.example.com/agent:latest"
+command = "claude-agent-acp"
+workspace = { git = "https://github.com/org/repo.git" }

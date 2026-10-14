@@ -9,7 +9,9 @@ use std::collections::HashMap;
 
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
-use ukai_acp::{FsRoot, SessionEvent, SessionEvents, SessionHandle, SessionOptions, ToolStatus};
+use ukai_acp::{
+    FsRoot, PaneWorkspace, SessionEvent, SessionEvents, SessionHandle, SessionOptions, ToolStatus,
+};
 use ukai_core::{Entry, PaneContent, PaneId, Status, Transcript};
 
 use crate::projects::{AppSignals, ProjectContext, project_context};
@@ -38,6 +40,7 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         project,
         agent,
         session,
+        workspace,
     }) = layout.peek().content(pane).cloned()
     else {
         return;
@@ -50,7 +53,7 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         .unwrap_or_else(|| Signal::new_in_scope(String::new(), ScopeId::APP));
     let restore = if resume { session } else { None };
     let started = project_context(&projects.peek(), &configs.peek(), &project)
-        .and_then(|context| start_session(&context, &agent, restore));
+        .and_then(|context| start_session(&context, &agent, workspace.as_ref(), restore));
     let handle = match started {
         Ok((handle, mut events)) => {
             spawn_forever(async move {
@@ -84,6 +87,7 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
 fn start_session(
     context: &ProjectContext,
     agent: &str,
+    workspace: Option<&PaneWorkspace>,
     restore: Option<String>,
 ) -> Result<(SessionHandle, SessionEvents), String> {
     let spec = context
@@ -91,14 +95,14 @@ fn start_session(
         .agents
         .get(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared for this project"))?;
-    let transport =
-        ukai_acp::resolve(spec, |name| std::env::var(name).ok()).map_err(|e| e.to_string())?;
+    let transport = ukai_acp::resolve(spec, |name| std::env::var(name).ok(), workspace)
+        .map_err(|e| e.to_string())?;
     let fs_root = FsRoot::new(&context.root).map_err(|e| e.to_string())?;
     Ok(ukai_acp::spawn_session(
         transport,
         SessionOptions {
             cwd: context.root.clone(),
-            fs_root,
+            fs_root: Some(fs_root),
             restore,
         },
     ))

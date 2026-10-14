@@ -10,7 +10,7 @@ description = "ACP client connections (HTTP, WebSocket, stdio) for ukai"
 
 [dependencies]
 agent-client-protocol = { workspace = true, features = ["process"] }
-agent-client-protocol-http = { workspace = true }
+agent-client-protocol-http = { workspace = true, features = ["client"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

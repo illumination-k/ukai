@@ -1,0 +1,22 @@
+[package]
+name = "ukai-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Keeps a stdio ACP agent and its sessions alive across client connections"
+
+[dependencies]
+agent-client-protocol = { workspace = true, features = ["process"] }
+agent-client-protocol-http = { workspace = true, features = ["server"] }
+axum = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

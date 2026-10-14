@@ -44,9 +44,27 @@ fn agent_transports_are_tagged() {
 }
 
 #[rstest]
+#[case::default_scope("", WorkspaceScope::Shared)]
+#[case::pod("workspace = \"pod\"", WorkspaceScope::Pod)]
+fn gateway_agents_have_a_workspace_scope(#[case] line: &str, #[case] expected: WorkspaceScope) {
+    let src = format!(
+        "[agents.g]\ntransport = \"gateway\"\nurl = \"ws://localhost:8080/agents/g/acp\"\n{line}"
+    );
+    let config = parse(&src);
+    assert!(
+        matches!(
+            config.as_ref().ok().and_then(|c| c.agents.get("g")),
+            Some(AgentSpec::Gateway { workspace, .. }) if *workspace == expected
+        ),
+        "{config:?}"
+    );
+}
+
+#[rstest]
 #[case::unknown_field("[project]\nnmae = \"x\"")]
 #[case::unknown_transport("[agents.a]\ntransport = \"grpc\"\nurl = \"x\"")]
 #[case::http_without_url("[agents.a]\ntransport = \"http\"")]
+#[case::unknown_scope("[agents.a]\ntransport = \"gateway\"\nurl = \"ws://x\"\nworkspace = \"tab\"")]
 fn rejects_malformed_toml(#[case] src: &str) {
     assert!(matches!(parse(src), Err(ConfigError::Toml(_))));
 }

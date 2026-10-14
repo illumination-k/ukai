@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use ukai_acp::PaneWorkspace;
 
 use crate::project::ProjectId;
 
@@ -52,6 +53,9 @@ pub enum PaneContent {
         /// session after a restart.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// For a gateway agent: the workspace the pane's connections ask for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PaneWorkspace>,
     },
     Report {
         project: ProjectId,

@@ -3,25 +3,46 @@
 //! agents of several projects side by side.
 
 use dioxus::prelude::*;
+use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::{AgentView, agent_status, connect};
 use crate::projects::AppSignals;
 
-/// Open `agent` of `project` in `pane` and start its session.
-pub fn open_agent(app: AppSignals, pane: PaneId, project: &ProjectId, agent: &str) {
+/// Open `agent` of `project` in `pane` and start its session. A gateway
+/// agent gets a workspace of the pane's own: `scope`, else the agent's default.
+pub fn open_agent(
+    app: AppSignals,
+    pane: PaneId,
+    project: &ProjectId,
+    agent: &str,
+    scope: Option<WorkspaceScope>,
+) {
     let AppSignals {
         mut layout,
         mut projects,
+        configs,
         ..
     } = app;
+    let default_scope = match configs.peek().get(project) {
+        Some(Ok(config)) => match config.agents.get(agent) {
+            Some(AgentSpec::Gateway { workspace, .. }) => Some(*workspace),
+            _ => None,
+        },
+        _ => None,
+    };
+    let workspace = default_scope.map(|default_scope| PaneWorkspace {
+        key: uuid::Uuid::new_v4().simple().to_string(),
+        scope: scope.unwrap_or(default_scope),
+    });
     layout.write().set_content(
         pane,
         PaneContent::Agent {
             project: project.clone(),
             agent: agent.to_owned(),
             session: None,
+            workspace,
         },
     );
     projects.write().select(project);
@@ -262,14 +283,10 @@ fn Picker(pane: PaneId) -> Element {
         .clone()
         .filter(|id| projects.iter().any(|(p, _)| p == id))
         .or_else(|| projects.first().map(|(id, _)| id.clone()));
-    let agents: Result<Vec<(String, String, &'static str)>, String> = match &current {
+    let agents: Result<Vec<Choice>, String> = match &current {
         None => Ok(Vec::new()),
         Some(id) => match app.configs.read().get(id) {
-            Some(Ok(config)) => Ok(config
-                .agents
-                .iter()
-                .map(|(agent, spec)| (agent.clone(), launch_line(spec), transport_label(spec)))
-                .collect()),
+            Some(Ok(config)) => Ok(config.agents.iter().flat_map(choices).collect()),
             Some(Err(error)) => Err(error.clone()),
             None => Ok(Vec::new()),
         },
@@ -303,21 +320,21 @@ fn Picker(pane: PaneId) -> Element {
                         }
                     },
                     Ok(agents) => rsx! {
-                        for (agent, line, transport) in agents {
+                        for Choice { agent, line, badge, scope } in agents {
                             button {
-                                key: "{agent}",
+                                key: "{agent}-{badge}",
                                 class: "choice",
                                 onclick: {
                                     let project = current.clone();
                                     let agent = agent.clone();
                                     move |_| {
                                         if let Some(project) = &project {
-                                            open_agent(app, pane, project, &agent);
+                                            open_agent(app, pane, project, &agent, scope);
                                         }
                                     }
                                 },
                                 span { class: "name", "{agent}" }
-                                span { class: "badge", "{transport}" }
+                                span { class: "badge", "{badge}" }
                                 code { "{line}" }
                             }
                         }
@@ -328,17 +345,58 @@ fn Picker(pane: PaneId) -> Element {
     }
 }
 
+/// One way to open an agent in the picker. A gateway agent is offered once
+/// per workspace scope, its default first.
+struct Choice {
+    agent: String,
+    line: String,
+    badge: &'static str,
+    scope: Option<WorkspaceScope>,
+}
+
+fn choices((agent, spec): (&String, &AgentSpec)) -> Vec<Choice> {
+    let choice = |badge, scope| Choice {
+        agent: agent.clone(),
+        line: launch_line(spec),
+        badge,
+        scope,
+    };
+    match spec {
+        AgentSpec::Gateway { workspace, .. } => {
+            let other = match workspace {
+                WorkspaceScope::Shared => WorkspaceScope::Pod,
+                WorkspaceScope::Pod => WorkspaceScope::Shared,
+            };
+            [*workspace, other]
+                .into_iter()
+                .map(|scope| choice(scope_label(scope), Some(scope)))
+                .collect()
+        }
+        _ => vec![choice(transport_label(spec), None)],
+    }
+}
+
+fn scope_label(scope: WorkspaceScope) -> &'static str {
+    match scope {
+        WorkspaceScope::Shared => "gateway · shared",
+        WorkspaceScope::Pod => "gateway · own pod",
+    }
+}
+
 pub fn transport_label(spec: &AgentSpec) -> &'static str {
     match spec {
         AgentSpec::Http { .. } => "http",
         AgentSpec::Websocket { .. } => "ws",
+        AgentSpec::Gateway { .. } => "gateway",
         AgentSpec::Stdio { .. } => "stdio",
     }
 }
 
 fn launch_line(spec: &AgentSpec) -> String {
     match spec {
-        AgentSpec::Http { url, .. } | AgentSpec::Websocket { url, .. } => url.clone(),
+        AgentSpec::Http { url, .. }
+        | AgentSpec::Websocket { url, .. }
+        | AgentSpec::Gateway { url, .. } => url.clone(),
         AgentSpec::Stdio { command, args, .. } => std::iter::once(command.as_str())
             .chain(args.iter().map(String::as_str))
             .collect::<Vec<_>>()
