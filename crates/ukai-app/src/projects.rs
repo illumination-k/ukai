@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 use ukai_config::Config;
-use ukai_core::{Layout, PaneContent, ProjectId, Projects};
+use ukai_core::{Layout, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
 
@@ -128,13 +128,28 @@ pub fn pick_and_add_project(paths: Paths, app: AppSignals) {
     });
 }
 
-/// Number of agent panes open per project.
-pub fn agent_pane_counts(layout: &Layout) -> HashMap<ProjectId, usize> {
-    let mut counts = HashMap::new();
-    for (_, content) in layout.contents() {
-        if let PaneContent::Agent { project, .. } = content {
-            *counts.entry(project.clone()).or_default() += 1;
+/// An agent pane as the sidebar lists it under its project.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenAgent {
+    pub pane: PaneId,
+    pub agent: String,
+    /// Index of the tab holding the pane.
+    pub tab: usize,
+}
+
+/// Agent panes per project, in tab and then pane order.
+pub fn open_agents(layout: &Layout) -> HashMap<ProjectId, Vec<OpenAgent>> {
+    let mut open: HashMap<ProjectId, Vec<OpenAgent>> = HashMap::new();
+    for (tab, panes) in layout.tabs().iter().map(|t| t.root.panes()).enumerate() {
+        for pane in panes {
+            if let Some(PaneContent::Agent { project, agent, .. }) = layout.content(pane) {
+                open.entry(project.clone()).or_default().push(OpenAgent {
+                    pane,
+                    agent: agent.clone(),
+                    tab,
+                });
+            }
         }
     }
-    counts
+    open
 }
