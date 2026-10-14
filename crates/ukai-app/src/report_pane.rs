@@ -23,6 +23,7 @@ use dioxus::desktop::wry::dpi::{LogicalPosition, LogicalSize};
 use dioxus::desktop::wry::http::{Request, Response, header};
 use dioxus::desktop::wry::{NewWindowResponse, Rect, WebView, WebViewBuilder};
 use dioxus::prelude::*;
+use ukai_core::markdown::LINK_SCHEMES;
 use ukai_core::report::{self, ReportFile};
 use ukai_core::{PaneContent, PaneId, ProjectId};
 
@@ -225,13 +226,11 @@ fn allow_navigation(url: &str) -> bool {
     false
 }
 
-fn open_external(url: &str) {
-    if ["https://", "http://", "mailto:"]
-        .iter()
-        .any(|scheme| url.starts_with(scheme))
+pub fn open_external(url: &str) {
+    if LINK_SCHEMES.iter().any(|scheme| url.starts_with(scheme))
         && let Err(error) = webbrowser::open(url)
     {
-        tracing::warn!(%error, "cannot open a link from a report");
+        tracing::warn!(%error, "cannot open a link");
     }
 }
 

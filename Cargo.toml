@@ -33,6 +33,8 @@ kube = { version = "4.2", default-features = false, features = ["client", "rustl
 notify-rust = { version = "4.18", default-features = false, features = ["z"] }
 percent-encoding = "2"
 proptest = "1"
+# No `html` or `getopts`: the app renders the parsed tree itself, never HTML.
+pulldown-cmark = { version = "0.13", default-features = false }
 reqwest = { version = "0.13", default-features = false }
 # No backend feature: dioxus-desktop already depends on rfd with `xdg-portal`
 # on Linux, and rfd refuses to build with both `xdg-portal` and `gtk3`.

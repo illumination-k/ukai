@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, Diff, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PromptCapabilities, PromptResponse,
-    RequestPermissionOutcome, ResumeSessionResponse, SessionCapabilities,
-    SessionResumeCapabilities, StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
-    WriteTextFileRequest,
+    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, Diff, InitializeResponse,
+    LoadSessionResponse, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    PromptCapabilities, PromptResponse, RequestPermissionOutcome, ResumeSessionResponse,
+    SessionCapabilities, SessionResumeCapabilities, StopReason, ToolCall, ToolCallUpdate,
+    ToolCallUpdateFields, UnstructuredCommandInput, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
 use agent_client_protocol::{Channel, ConnectionTo};
@@ -32,6 +32,7 @@ struct Caps {
 /// - `fs`: says which `fs/*` methods the client offered, then `end_turn`
 /// - `edit`: reports a tool call with a diff, then updates it with another
 /// - `blocks`: describes every block of the prompt, then `end_turn`
+/// - `commands`: lists two slash commands, then `end_turn`
 /// - anything else: the prompt fails
 ///
 /// `session/load` replays one user and one agent message before answering.
@@ -125,6 +126,20 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                             say(&offered_fs)?;
                         } else if text == "blocks" {
                             say(&blocks)?;
+                        } else if text == "commands" {
+                            cx.send_notification(SessionNotification::new(
+                                session.clone(),
+                                SessionUpdate::AvailableCommandsUpdate(
+                                    AvailableCommandsUpdate::new(vec![
+                                        AvailableCommand::new("compact", "Compact the context"),
+                                        AvailableCommand::new("review", "Review a change").input(
+                                            AvailableCommandInput::Unstructured(
+                                                UnstructuredCommandInput::new("pr number"),
+                                            ),
+                                        ),
+                                    ]),
+                                ),
+                            ))?;
                         } else if text == "edit" {
                             let update = |update| {
                                 cx.send_notification(SessionNotification::new(
@@ -308,6 +323,31 @@ async fn streams_message_chunks_before_turn_end() {
         vec![
             SessionEvent::AgentMessage { text: "Hel".into() },
             SessionEvent::AgentMessage { text: "lo".into() },
+            end_turn(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn translates_available_commands() {
+    let mut harness = Harness::start().await;
+    assert_eq!(
+        harness.turn("commands").await,
+        vec![
+            SessionEvent::Commands {
+                commands: vec![
+                    SlashCommand {
+                        name: "compact".into(),
+                        description: "Compact the context".into(),
+                        hint: None,
+                    },
+                    SlashCommand {
+                        name: "review".into(),
+                        description: "Review a change".into(),
+                        hint: Some("pr number".into()),
+                    },
+                ],
+            },
             end_turn(),
         ]
     );
