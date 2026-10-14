@@ -31,6 +31,8 @@ pub struct AppSignals {
     pub configs: Configs,
     pub layout: Signal<Layout>,
     pub sessions: Sessions,
+    /// Whether the command palette is open.
+    pub palette: Signal<bool>,
 }
 
 /// What a session needs from its project.
@@ -96,6 +98,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
         mut configs,
         mut layout,
         mut sessions,
+        ..
     } = app;
     let panes: Vec<_> = layout
         .peek()

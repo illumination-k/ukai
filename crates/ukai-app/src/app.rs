@@ -1,12 +1,16 @@
 use std::collections::HashMap;
 
+use dioxus::desktop::tao::event::{Event, WindowEvent};
+use dioxus::desktop::use_wry_event_handler;
 use dioxus::prelude::*;
 use ukai_core::{Direction, ProjectId};
 
 use crate::Startup;
 use crate::agent_pane::agent_status;
+use crate::alert::{is_unread, mark_read};
 use crate::icons::{Icon, Svg};
-use crate::layout::{Workbench, close_pane, launch_target, open_agent, transport_label};
+use crate::layout::{Workbench, close_pane, launch_agent, transport_label};
+use crate::palette::Palette;
 use crate::persist::use_autosave;
 use crate::projects::{
     AppSignals, OpenAgent, Paths, add_project, load_config, open_agents, pick_and_add_project,
@@ -37,6 +41,7 @@ pub fn App() -> Element {
             configs: Signal::new(configs),
             layout: Signal::new(state.layout),
             sessions: Signal::new(HashMap::new()),
+            palette: Signal::new(false),
         }
     });
     use_hook(|| {
@@ -46,7 +51,24 @@ pub fn App() -> Element {
     });
     use_autosave(paths.state_file.clone(), app.projects, app.layout);
 
+    // Whatever pane the user is looking at has nothing unread: the focused
+    // one, once focus moves to it or the window comes back to the front.
+    use_effect(move || {
+        let focused = app.layout.read().focused();
+        mark_read(app.sessions, focused);
+    });
+    use_wry_event_handler(move |event, _| {
+        if let Event::WindowEvent {
+            event: WindowEvent::Focused(true),
+            ..
+        } = event
+        {
+            mark_read(app.sessions, app.layout.peek().focused());
+        }
+    });
+
     let mut layout = app.layout;
+    let mut palette = app.palette;
     let shortcuts = move |event: KeyboardEvent| {
         let modifiers = event.modifiers();
         let primary = if cfg!(target_os = "macos") {
@@ -62,6 +84,7 @@ pub fn App() -> Element {
         }
         let focused = layout.peek().focused();
         match key.to_lowercase().as_str() {
+            "k" => palette.toggle(),
             "t" => {
                 layout.write().new_tab();
             }
@@ -84,6 +107,9 @@ pub fn App() -> Element {
         div { class: "shell", tabindex: "0", onkeydown: shortcuts,
             Sidebar {}
             Workbench {}
+            if palette() {
+                Palette {}
+            }
         }
     }
 }
@@ -211,15 +237,21 @@ fn Sidebar() -> Element {
                         for OpenAgent { pane, agent, tab } in agents {
                             {
                                 let (state, label, _) = agent_status(app.sessions, pane);
+                                let class = match (pane == focused, is_unread(app.sessions, pane)) {
+                                    (true, _) => "row agent-row focused",
+                                    (false, true) => "row agent-row unread",
+                                    (false, false) => "row agent-row",
+                                };
                                 rsx! {
                                     div {
                                         key: "{pane}",
-                                        class: if pane == focused { "row agent-row focused" } else { "row agent-row" },
+                                        class,
                                         title: "{agent} · {label}",
                                         onclick: move |_| layout.write().focus(pane),
                                         span { class: "dot {state}" }
                                         span { class: "name", "{agent}" }
                                         span { class: "meta", "{label}" }
+                                        span { class: "unread-mark", title: "Unread" }
                                         if many_tabs {
                                             span { class: "tab-number", title: "Tab {tab + 1}", "{tab + 1}" }
                                         }
@@ -251,7 +283,7 @@ fn Sidebar() -> Element {
                                     onclick: {
                                         let project = project.clone();
                                         let agent = agent.clone();
-                                        move |_| open_in_focus(app, &project, &agent)
+                                        move |_| launch_agent(app, &project, &agent)
                                     },
                                     span { class: "row-icon",
                                         Svg { icon: Icon::Plus, size: 12 }
@@ -268,6 +300,10 @@ fn Sidebar() -> Element {
                 ReportList { key: "{project}", project, name }
             }
             div { class: "sidebar-footer",
+                span {
+                    kbd { "{MOD_KEY}K" }
+                    " palette"
+                }
                 span {
                     kbd { "{MOD_KEY}T" }
                     " tab"
@@ -291,9 +327,3 @@ pub const MOD_KEY: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+"
 };
-
-fn open_in_focus(app: AppSignals, project: &ProjectId, agent: &str) {
-    if let Some(pane) = launch_target(app) {
-        open_agent(app, pane, project, agent, None);
-    }
-}

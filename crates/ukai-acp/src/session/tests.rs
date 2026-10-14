@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PromptResponse, RequestPermissionOutcome,
-    ResumeSessionResponse, SessionCapabilities, SessionResumeCapabilities, StopReason,
-    ToolCallUpdate, ToolCallUpdateFields, WriteTextFileRequest,
+    AgentCapabilities, Diff, InitializeResponse, LoadSessionResponse, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptCapabilities, PromptResponse,
+    RequestPermissionOutcome, ResumeSessionResponse, SessionCapabilities,
+    SessionResumeCapabilities, StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
 use agent_client_protocol::{Channel, ConnectionTo};
@@ -29,6 +30,8 @@ struct Caps {
 /// - `write <path>`: writes `<path>` through the client, then `end_turn`
 /// - `ask`: requests permission, echoes the chosen option id, then `end_turn`
 /// - `fs`: says which `fs/*` methods the client offered, then `end_turn`
+/// - `edit`: reports a tool call with a diff, then updates it with another
+/// - `blocks`: describes every block of the prompt, then `end_turn`
 /// - anything else: the prompt fails
 ///
 /// `session/load` replays one user and one agent message before answering.
@@ -53,7 +56,12 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                             .agent_capabilities(
                                 AgentCapabilities::new()
                                     .load_session(caps.load)
-                                    .session_capabilities(session_caps),
+                                    .session_capabilities(session_caps)
+                                    .prompt_capabilities(
+                                        PromptCapabilities::new()
+                                            .image(true)
+                                            .embedded_context(true),
+                                    ),
                             )
                             .agent_info(Implementation::new("mock", "0").title("Mock Agent")),
                     )
@@ -95,6 +103,7 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                     Some(ContentBlock::Text(text)) => text.text.clone(),
                     _ => String::new(),
                 };
+                let blocks = describe_blocks(&request.prompt);
                 // Waiting on the client from inside a handler would hold the
                 // dispatch loop, so the turn runs in its own task.
                 cx.spawn({
@@ -114,6 +123,25 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                             say("lo")?;
                         } else if text == "fs" {
                             say(&offered_fs)?;
+                        } else if text == "blocks" {
+                            say(&blocks)?;
+                        } else if text == "edit" {
+                            let update = |update| {
+                                cx.send_notification(SessionNotification::new(
+                                    session.clone(),
+                                    update,
+                                ))
+                            };
+                            update(SessionUpdate::ToolCall(
+                                ToolCall::new("edit-1", "Edit a.txt").content(vec![
+                                    Diff::new("/p/a.txt", "new").old_text("old").into(),
+                                ]),
+                            ))?;
+                            update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                                "edit-1",
+                                ToolCallUpdateFields::new()
+                                    .content(vec![Diff::new("/p/b.txt", "created").into()]),
+                            )))?;
                         } else if let Some(path) = text.strip_prefix("write ") {
                             cx.send_request(WriteTextFileRequest::new(
                                 session.clone(),
@@ -164,6 +192,26 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
         )
 }
 
+/// `kind:detail` per prompt block, joined with `,`.
+fn describe_blocks(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(text) => format!("text:{}", text.text),
+            ContentBlock::Image(image) => format!("image:{}:{}", image.mime_type, image.data),
+            ContentBlock::Resource(resource) => match &resource.resource {
+                EmbeddedResourceResource::TextResourceContents(text) => {
+                    format!("resource:{}:{}", text.uri, text.text)
+                }
+                _ => "resource:blob".to_owned(),
+            },
+            ContentBlock::ResourceLink(link) => format!("link:{}:{}", link.name, link.uri),
+            _ => "other".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 struct Harness {
     _dir: TempDir,
     root: PathBuf,
@@ -174,14 +222,7 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let (harness, before_ready) = Self::connect(Caps::default(), None).await;
-        assert_eq!(
-            before_ready,
-            vec![SessionEvent::Ready {
-                agent: Some("Mock Agent".into()),
-                session_id: SESSION.into(),
-                restore: RestoreOutcome::Fresh,
-            }]
-        );
+        assert_eq!(before_ready, vec![ready(SESSION, RestoreOutcome::Fresh)]);
         harness
     }
 
@@ -411,7 +452,77 @@ fn ready(session_id: &str, restore: RestoreOutcome) -> SessionEvent {
         agent: Some("Mock Agent".into()),
         session_id: session_id.into(),
         restore,
+        prompt: PromptCaps {
+            image: true,
+            embedded_context: true,
+        },
     }
+}
+
+#[tokio::test]
+async fn tool_calls_carry_their_diffs() {
+    let mut harness = Harness::start().await;
+    let events = harness.turn("edit").await;
+    assert_eq!(
+        events,
+        vec![
+            SessionEvent::ToolCall {
+                id: "edit-1".into(),
+                title: "Edit a.txt".into(),
+                kind: "other".into(),
+                status: ToolStatus::Pending,
+                diffs: vec![FileDiff {
+                    path: "/p/a.txt".into(),
+                    old_text: Some("old".into()),
+                    new_text: "new".into(),
+                }],
+            },
+            SessionEvent::ToolCallUpdate {
+                id: "edit-1".into(),
+                title: None,
+                status: None,
+                diffs: Some(vec![FileDiff {
+                    path: "/p/b.txt".into(),
+                    old_text: None,
+                    new_text: "created".into(),
+                }]),
+            },
+            end_turn(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prompts_carry_their_attachments() {
+    let mut harness = Harness::start().await;
+    let prompt = Prompt {
+        text: "blocks".into(),
+        attachments: vec![
+            Attachment::Image {
+                mime_type: "image/png".into(),
+                data: b"png".to_vec(),
+            },
+            Attachment::Text {
+                uri: "file:///p/a.txt".into(),
+                text: "hi".into(),
+            },
+            Attachment::Link {
+                name: "b.bin".into(),
+                uri: "file:///p/b.bin".into(),
+            },
+        ],
+    };
+    assert!(harness.handle.prompt(prompt));
+    assert_eq!(
+        harness.until_turn_end().await,
+        vec![
+            SessionEvent::AgentMessage {
+                text: "text:blocks,image:image/png:cG5n,resource:file:///p/a.txt:hi,link:b.bin:file:///p/b.bin"
+                    .into()
+            },
+            end_turn(),
+        ]
+    );
 }
 
 #[tokio::test]

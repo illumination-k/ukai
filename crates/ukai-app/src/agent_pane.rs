@@ -9,13 +9,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dioxus::core::spawn_forever;
+use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
-    FsRoot, PaneWorkspace, SessionEvent, SessionEvents, SessionHandle, SessionOptions, ToolStatus,
+    Attachment, FileDiff, FsRoot, PaneWorkspace, Prompt, SessionEvent, SessionEvents,
+    SessionHandle, SessionOptions, ToolStatus,
 };
 use ukai_core::report::ReportKind;
-use ukai_core::{Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
+use ukai_core::review::{self, LineKind, ReviewComment};
+use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
 
+use crate::alert;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, ProjectContext, project_context};
@@ -26,7 +30,39 @@ pub struct AgentSession {
     /// `None` when the session could not be started.
     handle: Option<SessionHandle>,
     transcript: Signal<Transcript>,
+    composer: Composer,
+    /// Something happened in the session that the user has not looked at.
+    pub unread: Signal<bool>,
+}
+
+/// What the user is putting together for the next prompt. It outlives a
+/// reconnect of the pane's session.
+#[derive(Clone, Copy, PartialEq)]
+struct Composer {
     draft: Signal<String>,
+    attachments: Signal<Vec<Pending>>,
+    /// Comments on diff lines, sent ahead of the draft.
+    review: Signal<Vec<ReviewComment>>,
+    /// Why the last file could not be attached.
+    error: Signal<Option<String>>,
+}
+
+impl Composer {
+    fn new() -> Self {
+        Self {
+            draft: Signal::new_in_scope(String::new(), ScopeId::APP),
+            attachments: Signal::new_in_scope(Vec::new(), ScopeId::APP),
+            review: Signal::new_in_scope(Vec::new(), ScopeId::APP),
+            error: Signal::new_in_scope(None, ScopeId::APP),
+        }
+    }
+}
+
+/// A file attached to the next prompt.
+#[derive(Debug, Clone, PartialEq)]
+struct Pending {
+    name: String,
+    attachment: Attachment,
 }
 
 /// Every pane's session, provided as context by the app root.
@@ -40,6 +76,7 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         configs,
         mut layout,
         mut sessions,
+        ..
     } = app;
     let Some(PaneContent::Agent {
         project,
@@ -51,22 +88,30 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         return;
     };
     let mut transcript = Signal::new_in_scope(Transcript::default(), ScopeId::APP);
-    let draft = sessions
-        .peek()
-        .get(&pane)
-        .map(|session| session.draft)
-        .unwrap_or_else(|| Signal::new_in_scope(String::new(), ScopeId::APP));
+    let (composer, unread) = sessions.peek().get(&pane).map_or_else(
+        || (Composer::new(), Signal::new_in_scope(false, ScopeId::APP)),
+        |session| (session.composer, session.unread),
+    );
     let restore = if resume { session } else { None };
+    let source = match projects.peek().get(&project) {
+        Some(project) => format!("{agent} · {}", project.name()),
+        None => agent.clone(),
+    };
     let started = project_context(&projects.peek(), &configs.peek(), &project)
         .and_then(|context| start_session(&context, &agent, workspace.as_ref(), restore));
     let handle = match started {
         Ok((handle, mut events)) => {
+            let window = dioxus::desktop::window();
             spawn_forever(async move {
                 while let Some(event) = events.recv().await {
                     if let SessionEvent::Ready { session_id, .. } = &event {
                         layout.write().record_session(pane, session_id.clone());
                     }
+                    let raised = Alert::of(&event);
                     transcript.write().apply(event);
+                    if let Some(raised) = raised {
+                        alert::raise(&window, layout, pane, unread, &source, &raised);
+                    }
                 }
             });
             Some(handle)
@@ -84,7 +129,8 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         AgentSession {
             handle,
             transcript,
-            draft,
+            composer,
+            unread,
         },
     );
 }
@@ -171,20 +217,41 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let AgentSession {
         handle,
         mut transcript,
-        mut draft,
+        composer,
+        ..
     } = session;
+    let Composer {
+        mut draft,
+        mut attachments,
+        mut review,
+        mut error,
+    } = composer;
     let status = transcript.read().status.clone();
+    let mut dropping = use_signal(|| false);
 
     let mut send = {
         let handle = handle.clone();
         move || {
             let text = draft.read().trim().to_owned();
-            if text.is_empty() || transcript.read().status != Status::Idle {
+            let comments = review.read().clone();
+            let pending = attachments.read().clone();
+            if (text.is_empty() && comments.is_empty() && pending.is_empty())
+                || transcript.read().status != Status::Idle
+            {
                 return;
             }
-            if handle.as_ref().is_some_and(|h| h.prompt(text.clone())) {
-                transcript.write().push_prompt(text);
+            let text = review::review_prompt(&comments, &text);
+            let names = pending.iter().map(|p| p.name.clone()).collect();
+            let prompt = Prompt {
+                text: text.clone(),
+                attachments: pending.into_iter().map(|p| p.attachment).collect(),
+            };
+            if handle.as_ref().is_some_and(|h| h.prompt(prompt)) {
+                transcript.write().push_prompt(text, names);
                 draft.set(String::new());
+                review.set(Vec::new());
+                attachments.set(Vec::new());
+                error.set(None);
             }
         }
     };
@@ -200,6 +267,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let awaiting = transcript.read().awaiting_permission();
     let idle = status == Status::Idle;
     let empty = transcript.read().entries.is_empty();
+    let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
+    let card_class = match (idle, dropping()) {
+        (_, true) => "composer-card dropping",
+        (true, false) => "composer-card",
+        (false, false) => "composer-card disabled",
+    };
 
     rsx! {
         // `column-reverse` keeps the view pinned to the newest entry.
@@ -233,11 +306,74 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     }
                 }
             }
-            div { class: if idle { "composer-card" } else { "composer-card disabled" },
+            div {
+                class: card_class,
+                ondragover: move |event| {
+                    event.prevent_default();
+                    if !dropping() {
+                        dropping.set(true);
+                    }
+                },
+                ondragleave: move |_| dropping.set(false),
+                ondrop: move |event| {
+                    event.prevent_default();
+                    dropping.set(false);
+                    for file in event.files() {
+                        spawn(async move {
+                            let path = file.path();
+                            match file.read_bytes().await {
+                                Ok(bytes) => attach(composer, transcript, &path, bytes.to_vec()),
+                                Err(e) => error.set(Some(format!("{}: {e}", path.display()))),
+                            }
+                        });
+                    }
+                },
+                if !review.read().is_empty() {
+                    div { class: "composer-review",
+                        for (index, comment) in review.read().iter().enumerate() {
+                            div { key: "{index}", class: "review-item",
+                                span { class: "location", "{comment.location()}" }
+                                span { class: "body", "{comment.body}" }
+                                button {
+                                    class: "icon",
+                                    title: "Remove comment",
+                                    onclick: move |_| {
+                                        review.write().remove(index);
+                                    },
+                                    Svg { icon: Icon::Close, size: 12 }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !attachments.read().is_empty() {
+                    div { class: "composer-attachments",
+                        for (index, pending) in attachments.read().iter().enumerate() {
+                            span {
+                                key: "{index}",
+                                class: "chip",
+                                title: "{pending.name}",
+                                Svg { icon: Icon::Paperclip, size: 12 }
+                                span { class: "name", "{pending.name}" }
+                                button {
+                                    class: "icon",
+                                    title: "Remove",
+                                    onclick: move |_| {
+                                        attachments.write().remove(index);
+                                    },
+                                    Svg { icon: Icon::Close, size: 11 }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(message) = error() {
+                    div { class: "composer-error", "{message}" }
+                }
                 textarea {
                     rows: "2",
                     placeholder: match status {
-                        Status::Idle => "Message the agent",
+                        Status::Idle => "Message the agent — drop files or images here",
                         Status::Busy => "Waiting for the agent…",
                         Status::Connecting => "Connecting…",
                         Status::Closed { .. } => "Disconnected",
@@ -255,6 +391,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     },
                 }
                 div { class: "composer-footer",
+                    button {
+                        class: "icon",
+                        title: "Attach files…",
+                        onclick: move |_| pick_attachments(composer, transcript),
+                        Svg { icon: Icon::Paperclip }
+                    }
                     span { class: "hint",
                         kbd { "Enter" }
                         " send · "
@@ -272,7 +414,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         button {
                             class: "round primary",
                             title: "Send",
-                            disabled: !idle || draft.read().trim().is_empty(),
+                            disabled: !idle || (draft.read().trim().is_empty() && !has_extras),
                             onclick: move |_| send_on_click(),
                             Svg { icon: Icon::Send }
                         }
@@ -283,13 +425,62 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     }
 }
 
+/// Add the file at `path` to the next prompt, in the form the agent accepts.
+fn attach(composer: Composer, transcript: Signal<Transcript>, path: &Path, bytes: Vec<u8>) {
+    let Composer {
+        mut attachments,
+        mut error,
+        ..
+    } = composer;
+    let caps = transcript.peek().prompt_caps;
+    match ukai_core::attachment::attachment(path, bytes, caps) {
+        Ok(attachment) => {
+            attachments.write().push(Pending {
+                name: ukai_core::attachment::file_name(path),
+                attachment,
+            });
+            error.set(None);
+        }
+        Err(e) => error.set(Some(e.to_string())),
+    }
+}
+
+/// Ask for files with the native dialog and attach them.
+fn pick_attachments(composer: Composer, transcript: Signal<Transcript>) {
+    spawn(async move {
+        let Some(files) = rfd::AsyncFileDialog::new()
+            .set_title("Attach files")
+            .pick_files()
+            .await
+        else {
+            return;
+        };
+        for file in files {
+            let bytes = file.read().await;
+            attach(composer, transcript, file.path(), bytes);
+        }
+    });
+}
+
 #[component]
 fn EntryView(pane: PaneId, entry: Entry) -> Element {
     let app = use_context::<AppSignals>();
     let sessions = app.sessions;
     match entry {
-        Entry::User { text } => rsx! {
-            div { class: "msg user", "{text}" }
+        Entry::User { text, attachments } => rsx! {
+            div { class: "msg user",
+                "{text}"
+                if !attachments.is_empty() {
+                    div { class: "msg-attachments",
+                        for (index, name) in attachments.iter().enumerate() {
+                            span { key: "{index}", class: "chip",
+                                Svg { icon: Icon::Paperclip, size: 11 }
+                                span { class: "name", "{name}" }
+                            }
+                        }
+                    }
+                }
+            }
         },
         Entry::Agent { text } => rsx! {
             div { class: "msg agent", "{text}" }
@@ -309,6 +500,7 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
             title,
             kind,
             status,
+            diffs,
             ..
         } => {
             let state = match status {
@@ -317,11 +509,35 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                 ToolStatus::Completed => "done",
                 ToolStatus::Failed => "failed",
             };
+            if diffs.is_empty() {
+                return rsx! {
+                    div { class: "tool {state}", title: "{kind} · {state}",
+                        span { class: "tool-icon" }
+                        span { class: "verb", "{kind}" }
+                        span { class: "name", "{title}" }
+                    }
+                };
+            }
+            let (added, removed) = diffs
+                .iter()
+                .map(|d| review::stats(&review::hunks(d.old_text.as_deref(), &d.new_text)))
+                .fold((0, 0), |(a, r), (da, dr)| (a + da, r + dr));
             rsx! {
-                div { class: "tool {state}", title: "{kind} · {state}",
-                    span { class: "tool-icon" }
-                    span { class: "verb", "{kind}" }
-                    span { class: "name", "{title}" }
+                details { class: "tool-diffs",
+                    summary {
+                        class: "tool {state}",
+                        title: "{kind} · {state} · click to review",
+                        span { class: "tool-icon" }
+                        span { class: "verb", "{kind}" }
+                        span { class: "name", "{title}" }
+                        span { class: "diffstat",
+                            span { class: "added", "+{added}" }
+                            span { class: "removed", "−{removed}" }
+                        }
+                    }
+                    for (index, diff) in diffs.into_iter().enumerate() {
+                        DiffView { key: "{index}", pane, diff }
+                    }
                 }
             }
         }
@@ -414,6 +630,196 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
             div { class: if error { "notice-line error" } else { "notice-line" }, "{text}" }
         },
     }
+}
+
+/// Lines of a diff shown before the rest is cut off.
+const MAX_DIFF_LINES: usize = 400;
+
+/// One file's change with its lines open to comments, which go to the
+/// pane's next prompt.
+#[component]
+fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
+    let app = use_context::<AppSignals>();
+    let mut editing = use_signal(|| None::<(usize, usize)>);
+    let mut text = use_signal(String::new);
+    let Some(mut review) = app
+        .sessions
+        .read()
+        .get(&pane)
+        .map(|session| session.composer.review)
+    else {
+        return rsx! {};
+    };
+    let path = shown_path(app, pane, &diff.path);
+    let hunks = review::hunks(diff.old_text.as_deref(), &diff.new_text);
+    let total: usize = hunks.iter().map(Vec::len).sum();
+    let mut budget = MAX_DIFF_LINES;
+    let shown: Vec<(usize, Vec<(usize, review::DiffLine)>)> = hunks
+        .into_iter()
+        .enumerate()
+        .map_while(|(h, hunk)| {
+            (budget > 0).then(|| {
+                let take = hunk.len().min(budget);
+                budget -= take;
+                (h, hunk.into_iter().take(take).enumerate().collect())
+            })
+        })
+        .collect();
+    let hidden = total.saturating_sub(MAX_DIFF_LINES);
+    let comments = review.read().clone();
+    let is_new = diff.old_text.is_none();
+
+    rsx! {
+        div { class: "diff",
+            div { class: "diff-path",
+                span { class: "name", "{path}" }
+                if is_new {
+                    span { class: "badge", "new" }
+                }
+            }
+            if shown.is_empty() {
+                div { class: "diff-gap", "No changes" }
+            }
+            for (h, lines) in shown {
+                if h > 0 {
+                    div { key: "gap-{h}", class: "diff-gap", "⋯" }
+                }
+                for (i, line) in lines {
+                    {
+                        let class = match line.kind {
+                            LineKind::Added => "diff-line added",
+                            LineKind::Removed => "diff-line removed",
+                            LineKind::Context => "diff-line",
+                        };
+                        let marker = match line.kind {
+                            LineKind::Added => "+",
+                            LineKind::Removed => "-",
+                            LineKind::Context => " ",
+                        };
+                        let old = line.old.map(|n| n.to_string()).unwrap_or_default();
+                        let new = line.new.map(|n| n.to_string()).unwrap_or_default();
+                        let on_line: Vec<(usize, String)> = comments
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.path == path && c.line == line)
+                            .map(|(index, c)| (index, c.body.clone()))
+                            .collect();
+                        let open = editing() == Some((h, i));
+                        let path = path.clone();
+                        rsx! {
+                            div { key: "{h}-{i}", class: "{class}",
+                                span { class: "ln", "{old}" }
+                                span { class: "ln", "{new}" }
+                                button {
+                                    class: "comment-add",
+                                    title: "Comment on this line",
+                                    onclick: move |_| {
+                                        text.set(String::new());
+                                        editing.set(Some((h, i)));
+                                    },
+                                    "+"
+                                }
+                                span { class: "code", "{marker}{line.text}" }
+                            }
+                            for (index, body) in on_line {
+                                div { key: "c-{h}-{i}-{index}", class: "diff-comment",
+                                    span { class: "body", "{body}" }
+                                    button {
+                                        class: "icon",
+                                        title: "Remove comment",
+                                        onclick: move |_| {
+                                            review.write().remove(index);
+                                        },
+                                        Svg { icon: Icon::Close, size: 11 }
+                                    }
+                                }
+                            }
+                            if open {
+                                div { key: "e-{h}-{i}", class: "diff-comment-editor",
+                                    textarea {
+                                        rows: "2",
+                                        placeholder: "Comment for the agent; sent with your next message",
+                                        value: "{text}",
+                                        onmounted: move |event| async move {
+                                            let _ = event.set_focus(true).await;
+                                        },
+                                        oninput: move |event| text.set(event.value()),
+                                        onkeydown: {
+                                            let path = path.clone();
+                                            let line = line.clone();
+                                            move |event: KeyboardEvent| {
+                                                if event.key() == Key::Escape {
+                                                    editing.set(None);
+                                                } else if event.key() == Key::Enter
+                                                    && !event.modifiers().shift()
+                                                    && !event.is_composing()
+                                                {
+                                                    event.prevent_default();
+                                                    add_comment(review, &mut text, &path, &line);
+                                                    editing.set(None);
+                                                }
+                                            }
+                                        },
+                                    }
+                                    div { class: "actions",
+                                        button { class: "small outline", onclick: move |_| editing.set(None), "Cancel" }
+                                        button {
+                                            class: "small primary",
+                                            disabled: text.read().trim().is_empty(),
+                                            onclick: {
+                                                let path = path.clone();
+                                                let line = line.clone();
+                                                move |_| {
+                                                    add_comment(review, &mut text, &path, &line);
+                                                    editing.set(None);
+                                                }
+                                            },
+                                            "Add comment"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if hidden > 0 {
+                div { class: "diff-gap", "{hidden} more lines not shown" }
+            }
+        }
+    }
+}
+
+fn add_comment(
+    mut review: Signal<Vec<ReviewComment>>,
+    text: &mut Signal<String>,
+    path: &str,
+    line: &review::DiffLine,
+) {
+    let body = text.read().trim().to_owned();
+    if body.is_empty() {
+        return;
+    }
+    review.write().push(ReviewComment {
+        path: path.to_owned(),
+        line: line.clone(),
+        body,
+    });
+    text.set(String::new());
+}
+
+/// `path` relative to the root of `pane`'s project when inside it.
+fn shown_path(app: AppSignals, pane: PaneId, path: &Path) -> String {
+    let root = app
+        .layout
+        .peek()
+        .content(pane)
+        .and_then(PaneContent::project)
+        .and_then(|project| app.projects.peek().get(project).map(|p| p.root.clone()));
+    root.and_then(|root| path.strip_prefix(root).ok().map(Path::to_owned))
+        .unwrap_or_else(|| path.to_owned())
+        .display()
+        .to_string()
 }
 
 /// The project of agent `pane` and `path` relative to its root, when `path`

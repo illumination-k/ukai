@@ -1,9 +1,11 @@
 //! ukai desktop app.
 
 mod agent_pane;
+mod alert;
 mod app;
 mod icons;
 mod layout;
+mod palette;
 mod persist;
 mod projects;
 mod report_pane;

@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    PermissionChoice, PermissionId, PlanItem, RestoreOutcome, SessionEvent, ToolStatus,
+    FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome, SessionEvent,
+    ToolStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum Status {
 pub enum Entry {
     User {
         text: String,
+        /// Names of the files attached to the turn.
+        attachments: Vec<String>,
     },
     Agent {
         text: String,
@@ -34,6 +37,7 @@ pub enum Entry {
         title: String,
         kind: String,
         status: ToolStatus,
+        diffs: Vec<FileDiff>,
     },
     Plan {
         items: Vec<PlanItem>,
@@ -59,6 +63,8 @@ pub struct Transcript {
     pub agent: Option<String>,
     pub status: Status,
     pub entries: Vec<Entry>,
+    /// What the agent accepts in a prompt, known once it is ready.
+    pub prompt_caps: PromptCaps,
 }
 
 impl Default for Transcript {
@@ -67,14 +73,60 @@ impl Default for Transcript {
             agent: None,
             status: Status::Connecting,
             entries: Vec::new(),
+            prompt_caps: PromptCaps::default(),
+        }
+    }
+}
+
+/// Something in a session the user should hear about even when not looking
+/// at its pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Alert {
+    /// A turn ended on its own (not by the user's cancel).
+    Finished,
+    /// The agent is blocked on a permission request.
+    NeedsInput { title: String },
+    /// A prompt failed or the connection dropped.
+    Failed { message: String },
+}
+
+impl Alert {
+    /// The alert `event` raises, if any.
+    pub fn of(event: &SessionEvent) -> Option<Self> {
+        match event {
+            SessionEvent::TurnEnded { stop_reason } if stop_reason != "cancelled" => {
+                Some(Self::Finished)
+            }
+            SessionEvent::PermissionRequested { title, .. } => Some(Self::NeedsInput {
+                title: title.clone(),
+            }),
+            SessionEvent::PromptFailed { message } => Some(Self::Failed {
+                message: message.clone(),
+            }),
+            SessionEvent::Closed { error: Some(error) } => Some(Self::Failed {
+                message: format!("disconnected: {error}"),
+            }),
+            _ => None,
+        }
+    }
+
+    /// One line for a notification body.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Finished => "Finished its turn".to_owned(),
+            Self::NeedsInput { title } => format!("Needs permission: {title}"),
+            Self::Failed { message } => message.clone(),
         }
     }
 }
 
 impl Transcript {
-    /// Record a prompt the user sent.
-    pub fn push_prompt(&mut self, text: impl Into<String>) {
-        self.entries.push(Entry::User { text: text.into() });
+    /// Record a prompt the user sent, with the names of its attachments.
+    pub fn push_prompt(&mut self, text: impl Into<String>, attachments: Vec<String>) {
+        self.entries.push(Entry::User {
+            text: text.into(),
+            attachments,
+        });
         self.status = Status::Busy;
     }
 
@@ -117,8 +169,14 @@ impl Transcript {
                 error: false,
             }),
             SessionEvent::TurnRunning => self.status = Status::Busy,
-            SessionEvent::Ready { agent, restore, .. } => {
+            SessionEvent::Ready {
+                agent,
+                restore,
+                prompt,
+                ..
+            } => {
                 self.agent = agent;
+                self.prompt_caps = prompt;
                 self.status = Status::Idle;
                 let notice = match restore {
                     RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
@@ -137,8 +195,11 @@ impl Transcript {
                 }
             }
             SessionEvent::UserMessage { text } => match self.entries.last_mut() {
-                Some(Entry::User { text: last }) => last.push_str(&text),
-                _ => self.entries.push(Entry::User { text }),
+                Some(Entry::User { text: last, .. }) => last.push_str(&text),
+                _ => self.entries.push(Entry::User {
+                    text,
+                    attachments: Vec::new(),
+                }),
             },
             SessionEvent::AgentMessage { text } => match self.entries.last_mut() {
                 Some(Entry::Agent { text: last }) => last.push_str(&text),
@@ -153,28 +214,38 @@ impl Transcript {
                 title,
                 kind,
                 status,
+                diffs,
             } => match self.tool_mut(&id) {
                 Some(Entry::Tool {
                     title: t,
                     kind: k,
                     status: s,
+                    diffs: d,
                     ..
                 }) => {
                     *t = title;
                     *k = kind;
                     *s = status;
+                    *d = diffs;
                 }
                 _ => self.entries.push(Entry::Tool {
                     id,
                     title,
                     kind,
                     status,
+                    diffs,
                 }),
             },
-            SessionEvent::ToolCallUpdate { id, title, status } => match self.tool_mut(&id) {
+            SessionEvent::ToolCallUpdate {
+                id,
+                title,
+                status,
+                diffs,
+            } => match self.tool_mut(&id) {
                 Some(Entry::Tool {
                     title: t,
                     status: s,
+                    diffs: d,
                     ..
                 }) => {
                     if let Some(title) = title {
@@ -183,6 +254,9 @@ impl Transcript {
                     if let Some(status) = status {
                         *s = status;
                     }
+                    if let Some(diffs) = diffs {
+                        *d = diffs;
+                    }
                 }
                 // An update for a call we never saw: show it rather than drop it.
                 _ => self.entries.push(Entry::Tool {
@@ -190,6 +264,7 @@ impl Transcript {
                     id,
                     kind: "other".to_owned(),
                     status: status.unwrap_or(ToolStatus::Pending),
+                    diffs: diffs.unwrap_or_default(),
                 }),
             },
             SessionEvent::Plan { entries: items } => {
@@ -271,6 +346,7 @@ mod tests {
             agent: agent.map(str::to_owned),
             session_id: "s".into(),
             restore,
+            prompt: PromptCaps::default(),
         }
     }
 
@@ -284,10 +360,7 @@ mod tests {
         ]);
         assert_eq!(
             transcript.entries,
-            vec![
-                Entry::User { text: "q?".into() },
-                Entry::Agent { text: "a".into() }
-            ]
+            vec![user("q?"), Entry::Agent { text: "a".into() }]
         );
     }
 
@@ -302,6 +375,13 @@ mod tests {
         ));
     }
 
+    fn user(text: &str) -> Entry {
+        Entry::User {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
     fn msg(text: &str) -> SessionEvent {
         SessionEvent::AgentMessage { text: text.into() }
     }
@@ -312,6 +392,7 @@ mod tests {
             title: format!("tool {id}"),
             kind: "read".into(),
             status,
+            diffs: Vec::new(),
         }
     }
 
@@ -347,6 +428,7 @@ mod tests {
                     title: "tool 1".into(),
                     kind: "read".into(),
                     status: ToolStatus::Pending,
+                    diffs: Vec::new(),
                 },
                 Entry::Agent { text: "c".into() },
             ]
@@ -356,11 +438,11 @@ mod tests {
     #[rstest]
     #[case::known_call(
         vec![tool("1", ToolStatus::Pending)],
-        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "read".into(), status: ToolStatus::Completed },
+        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "read".into(), status: ToolStatus::Completed, diffs: vec![diff()] },
     )]
     #[case::unknown_call(
         vec![],
-        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "other".into(), status: ToolStatus::Completed },
+        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "other".into(), status: ToolStatus::Completed, diffs: vec![diff()] },
     )]
     fn tool_updates_patch_in_place(#[case] before: Vec<SessionEvent>, #[case] expected: Entry) {
         let mut transcript = folded(before);
@@ -368,8 +450,75 @@ mod tests {
             id: "1".into(),
             title: Some("renamed".into()),
             status: Some(ToolStatus::Completed),
+            diffs: Some(vec![diff()]),
         });
         assert_eq!(transcript.entries, vec![expected]);
+    }
+
+    fn diff() -> FileDiff {
+        FileDiff {
+            path: "/p/a.txt".into(),
+            old_text: None,
+            new_text: "a".into(),
+        }
+    }
+
+    #[test]
+    fn tool_updates_without_content_keep_diffs() {
+        let mut transcript = folded([SessionEvent::ToolCall {
+            id: "1".into(),
+            title: "edit".into(),
+            kind: "edit".into(),
+            status: ToolStatus::Pending,
+            diffs: vec![diff()],
+        }]);
+        transcript.apply(SessionEvent::ToolCallUpdate {
+            id: "1".into(),
+            title: None,
+            status: Some(ToolStatus::Completed),
+            diffs: None,
+        });
+        assert!(matches!(
+            transcript.entries.as_slice(),
+            [Entry::Tool { diffs, .. }] if *diffs == vec![diff()]
+        ));
+    }
+
+    #[rstest]
+    #[case::finished(SessionEvent::TurnEnded { stop_reason: "end_turn".into() }, Some(Alert::Finished))]
+    #[case::refused(SessionEvent::TurnEnded { stop_reason: "refusal".into() }, Some(Alert::Finished))]
+    #[case::cancelled(SessionEvent::TurnEnded { stop_reason: "cancelled".into() }, None)]
+    #[case::permission(
+        SessionEvent::PermissionRequested { id: 0, title: "rm".into(), options: vec![] },
+        Some(Alert::NeedsInput { title: "rm".into() }),
+    )]
+    #[case::failed(
+        SessionEvent::PromptFailed { message: "boom".into() },
+        Some(Alert::Failed { message: "boom".into() }),
+    )]
+    #[case::dropped(
+        SessionEvent::Closed { error: Some("eof".into()) },
+        Some(Alert::Failed { message: "disconnected: eof".into() }),
+    )]
+    #[case::closed_cleanly(SessionEvent::Closed { error: None }, None)]
+    #[case::chunk(SessionEvent::AgentMessage { text: "x".into() }, None)]
+    fn alerts(#[case] event: SessionEvent, #[case] alert: Option<Alert>) {
+        assert_eq!(Alert::of(&event), alert);
+    }
+
+    #[test]
+    fn ready_records_prompt_caps() {
+        let caps = PromptCaps {
+            image: true,
+            embedded_context: false,
+        };
+        let transcript = folded([SessionEvent::Ready {
+            agent: None,
+            session_id: "s".into(),
+            restore: RestoreOutcome::Fresh,
+            prompt: caps,
+        }]);
+        assert_eq!(transcript.prompt_caps, caps);
     }
 
     #[test]
@@ -378,7 +527,7 @@ mod tests {
         assert_eq!(transcript.entries.len(), 2);
         assert!(matches!(&transcript.entries[0], Entry::Plan { items } if items.len() == 2));
 
-        transcript.push_prompt("next");
+        transcript.push_prompt("next", Vec::new());
         transcript.apply(plan(&["c"]));
         assert_eq!(transcript.entries.len(), 4);
     }
@@ -386,13 +535,19 @@ mod tests {
     #[test]
     fn prompt_and_turn_end_toggle_busy() {
         let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
-        transcript.push_prompt("hi");
+        transcript.push_prompt("hi", vec!["a.png".into()]);
         assert_eq!(transcript.status, Status::Busy);
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
         });
         assert_eq!(transcript.status, Status::Idle);
-        assert_eq!(transcript.entries, vec![Entry::User { text: "hi".into() }]);
+        assert_eq!(
+            transcript.entries,
+            vec![Entry::User {
+                text: "hi".into(),
+                attachments: vec!["a.png".into()]
+            }]
+        );
     }
 
     #[rstest]
@@ -417,7 +572,7 @@ mod tests {
         #[case] status: Status,
     ) {
         let mut transcript = Transcript::default();
-        transcript.push_prompt("hi");
+        transcript.push_prompt("hi", Vec::new());
         transcript.apply(event);
         assert_eq!(transcript.entries.last(), Some(&notice));
         assert_eq!(transcript.status, status);
