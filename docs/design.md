@@ -21,7 +21,8 @@ Status: draft (2026-10-14)
 
 - エディタ機能（コード編集・LSP）。ukai はエージェントの操縦席であって IDE ではない。
 - 端末エミュレータ pane。将来の pane 種別として予約だけしておく（後述）。
-- ACP エージェント側の実装。ただし stdio エージェントを HTTP に公開する薄いブリッジは持つ（`ukai-bridge`）。
+- ACP エージェント側の実装。ただし stdio エージェントのセッションを接続より長く保つ中継（`ukai-relay`）と、
+  それを Kubernetes 上でワークスペースごとに動かす `ukai-gateway` は持つ（「クラウド実行」）。
 - モバイル / Web ビルド。Dioxus なので将来の余地はあるが、初期は desktop のみ。
 
 ## 背景: ACP のトランスポート
@@ -67,19 +68,20 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
          │ HTTP/2 + SSE / WebSocket     │ stdio
          ▼                              ▼
   cloud ACP agents                local ACP agents
-  (Goose server, ukai-bridge       (claude-agent-acp, codex-acp,
-   wrapping any stdio agent, ...)   gemini --experimental-acp, ...)
+  (Goose server, ukai-gateway      (claude-agent-acp, codex-acp,
+   + ukai-relay per stdio agent)    gemini --experimental-acp, ...)
 ```
 
 ### Crates
 
-| crate         | kind | 役割                                                                                                                                                     |
-| ------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config` | lib  | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                     |
-| `ukai-acp`    | lib  | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                       |
-| `ukai-core`   | lib  | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`。今後レポート索引）。UI フレームワークに依存しない。                            |
-| `ukai-app`    | bin  | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                    |
-| `ukai-bridge` | bin  | (Phase 2) 任意の stdio ACP エージェントを `AcpHttpServer` で `/acp` に公開する。これでローカル用エージェントもコンテナ / VM に置いて HTTP 越しに使える。 |
+| crate          | kind      | 役割                                                                                                                                                   |
+| -------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                   |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                     |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`。今後レポート索引）。UI フレームワークに依存しない。                          |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                  |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。        |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。 |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -118,8 +120,9 @@ ukai は ACP の "Client" なので、エージェントからの要求に応え
 ### イベント正規化
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
-`Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` /
-`PermissionRequested` / `FileWritten` / `TurnEnded` / `PromptFailed` / `Closed`。
+`Preparing` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` /
+`PermissionRequested` / `FileWritten` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `Closed`。
+`Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
 UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission`）で操作する。
 ACP のスキーマ変更（v2 への移行など）の影響をこの境界で吸収する。
 
@@ -132,12 +135,84 @@ ACP のスキーマ変更（v2 への移行など）の影響をこの境界で�
   prompt は `prepare_request(...).on_receiving_result` で自前で送り、エラーは `PromptFailed` に変換する
   （`prepare_request` にすることで、ターン終了がそれ以前の `session/update` より後に届く順序も保証される）。
 - `initialize` + `session/new` には 120 秒のタイムアウトを付ける（認証切れで無応答になるエージェント対策）。
+  `_ukai/` の通知（`progress` / `heartbeat`）が届くたびに数え直すので、Pod の起動を待つ間は切れない。
 
 ### 再接続
 
-RFD v1 はメッセージ再送を定義していない（v2 で `Last-Event-ID` 等）。
-初期実装は「切断を UI に明示 → 手動 / 指数バックオフで再接続 → `session/load`」まで。
-途中のターンは失われうることを UI 上で正直に出す。
+Streamable HTTP の RFD v1 では、セッションは接続とは独立にサーバー側で生き続け、切断後は新しい接続で
+`initialize` → `session/load` を送って再開する。切断中のメッセージ再送（`Last-Event-ID`）は v2 に回されて
+いるので、取りこぼしは `session/load` の履歴再生で埋める。SDK の HTTP クライアントは SSE が切れると
+トランスポートの失敗として扱い、自動ではつなぎ直さない。
+
+今は「切断を UI に出す → Resume で `session/load`」まで。自動再接続（指数バックオフ）は今後。
+セッションを接続より長く保つのはサーバー側の責務で、stdio エージェントについては「クラウド実行」の
+`ukai-relay` が引き受ける。素の stdio エージェントにローカルでつないでいる場合、途中のターンは失われうる。
+
+## クラウド実行（`ukai-gateway` / `ukai-relay`）
+
+stdio の ACP エージェント（claude-agent-acp など）は 1 接続 = 1 プロセスで、上の「セッションは接続より長く
+生きる」を自分では満たせない。ukai はその役を Kubernetes 上の 2 つのコンポーネントで持つ。クライアントの
+ukai は ACP の WebSocket プロファイルで話すクライアントのまま（`transport = "gateway"`）で、Kubernetes を
+知らない。gateway について知っているのは、pane ごとのワークスペースの選び方（後述）だけ。
+
+```
+ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <pod IP>:7070 ukai-relay ──stdio──▶ agent
+                 │                                     （ワークスペースごとの Job の Pod）
+                 └─ Job の作成・待機・置き換え
+```
+
+### `ukai-relay`
+
+- エージェントを子プロセスに持ち、`AcpHttpServer` で `/acp` を出す。中核（`hub`）は I/O を持たない状態機械で、
+  JSON-RPC の値を受けて送り先付きの出力を返す。
+- エージェントには `initialize` を 1 回だけ送り、各クライアントの `initialize` には記録で答える
+  （`loadSession` を広告する）。
+- セッションごとに `session/update` と、転送したユーザーの prompt を記録する。既知のセッションへの
+  `session/load` には記録の再生で答えるので、切断中に起きたことも履歴に入る。relay が知らないセッション
+  （relay の再起動後など）はエージェントに load させ、その再生を記録する。
+- ターンはクライアントがいなくても続く。実行中に再接続したクライアントには `_ukai/turn_state`
+  （ACP v2 の `state_update` に合わせた形: `running` / `idle` と `stopReason`）で伝える。
+- エージェントからの要求（パーミッション）はクライアントが来るまで保留し、つないできたクライアントに出し直す。
+- クライアントの `cwd` はクライアントの手元のパスなので、`session/new` / `load` / `resume` の `cwd` は
+  relay の作業ディレクトリに置き換える。エージェントには `fs/*` も terminal も広告しない。
+- 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
+- クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
+
+### `ukai-gateway`
+
+- namespace に 1 つ（StatefulSet）。`gateway.toml` の `[agents.<id>]`（イメージ、コマンド、リポジトリ、
+  Secret 参照、既存 PVC の mount、リソース、`idle_timeout`）を `GET /agents/<id>/acp` の WebSocket で出す。
+- 接続が来たらそのワークスペースの Job を確保して Pod の ready を待ち、Pod 内の relay に中継する。
+  待つ間はクライアントに `_ukai/progress`（状況が変わるたび）と `_ukai/heartbeat`（20 秒ごと）を送り、
+  クライアントからのメッセージは溜めておく。
+- 権限は namespace の Role だけ（jobs、pods と events の参照）。CRD も cluster-scoped な権限も要らない。
+- pane ごとのワークスペース: ukai は gateway のエージェントを開いた pane に鍵を作って `state.json` に残し、
+  接続のたびにヘッダー `Ukai-Workspace-Scope`（`shared` / `pod`）と `Ukai-Workspace`（鍵）を送る。
+  `shared` はそのエージェントの全 pane で 1 つの Pod と作業ツリーを共有し、`pod` は pane ごとに Pod を分ける
+  （鍵がワークスペースの識別子に入る）。既定は設定の `workspace` で、pane を開くときに選び直せる。
+  同じ Pod の中で作業を分けたいときは、エージェント自身に git worktree を使わせる。
+- セッションの状態は relay が持つので、gateway を再起動してもエージェントは落ちない。
+
+### ワークスペース Pod
+
+- gateway の `job`（Job spec を作る純粋関数）と `cluster`（Job の確保・Pod の待機）が扱う。
+- Job 1 つがワークスペース 1 つ。識別子は（利用者、namespace、リポジトリ、ref、エージェントのコマンド、
+  `pod` なら pane の鍵）のハッシュで、同じものを開く接続は同じ Pod に合流する。
+- コンテナは 3 つ。`relay-install`（relay の静的バイナリをコピーする。エージェントのイメージは ukai を知らなくて
+  よい）、`workspace` サイドカー（clone と snapshot）、`agent`（relay が PID 1）。
+- GitHub の token（`workspace.github_token`）はサイドカーとエージェントの両方に `GH_TOKEN` として渡す。
+  エージェントは git の credential helper を `gh` に向けてあり、自分で push して pull request を作れる。
+  サイドカーは snapshot をエージェントの `.git` ではなく pristine の `.git` で作る。
+- 作業ツリーは emptyDir で、PVC は作らない。エージェントの履歴（`~/.claude` など）を残したいときは既存の
+  PVC を `mounts` で重ねる。
+- snapshot: サイドカーが pristine の `.git` とエージェントの作業ツリーから一時 index で tree を作り、
+  `commit-tree` して `refs/ukai/wip/<id>` に push する（定期的に、ターン終了ごとに、Pod の停止時に）。
+  次の Pod は clone 時にそれを、記録したブランチの上の未コミットの変更として戻す。
+- Pod は Pod Security の restricted に合わせる（非 root、capabilities なし、seccomp RuntimeDefault）。
+
+`deploy/gateway` が kustomize の base、`images/runtime` が gateway と relay のイメージ、`images/dev` が
+このリポジトリを開発するエージェント用のイメージ（`mise.toml` のツール群、desktop のビルド依存、
+仮想ディスプレイ入り）。
 
 ## プロジェクト設定 `ukai.toml`
 
@@ -173,6 +248,12 @@ args = ["-y", "@agentclientprotocol/claude-agent-acp"]
 transport = "http"
 url = "https://agents.example.com/acp"
 headers = { Authorization = "Bearer ${env:GOOSE_TOKEN}" }
+
+[agents.cluster-claude] # ukai-gateway のエージェント（「クラウド実行」）
+transport = "gateway"
+url = "wss://ukai.example.com/agents/claude/acp"
+headers = { Authorization = "Bearer ${env:UKAI_GATEWAY_TOKEN}" }
+workspace = "pod" # 新しい pane の既定: shared | pod
 
 # ---- パーミッション自動応答（未実装） -------------------------------------
 [[permissions]]
@@ -225,8 +306,8 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - **SQLite を入れる条件:** `session/load` を持たないエージェントの会話も残したい、横断検索、レポート索引が
   必要になったとき。そのときは orca と同じく追記専用の会話ジャーナルを別ファイルにする。
 - **今後:** herdr / orca はどちらも常駐プロセスがエージェントを持ち、UI の再起動ではエージェントが死なない。
-  ukai ではリモートエージェントは元々サーバー側で生きている。ローカルの stdio エージェントは `ukai-bridge` を
-  ローカル常駐させて HTTP で話す形にすれば同じ扱いにできる。
+  ukai ではリモートエージェントは元々サーバー側で生きている。ローカルの stdio エージェントも `ukai-relay` を
+  ローカル常駐させて WebSocket で話す形にすれば同じ扱いにできる。
 
 ## HTML レポート
 
@@ -281,7 +362,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル     |
 | 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み |
-| 2     | HTTP / WebSocket 接続、`ukai-bridge`、複数エージェント                                                                                                         |
+| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                           |
 | 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元（済み）。リサイズ、パレット                                             |
 | 4     | HTML レポート pane（spike → sandbox iframe or 別ウィンドウ）、ファイル監視、ACP コンテンツからのレポート                                                       |
 | 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                |
@@ -293,3 +374,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - ACP v2（`unstable_protocol_v2`）をいつ追うか。`SessionEvent` 境界で吸収できる前提だが要確認。
 - 同一エージェントへの複数セッションを 1 connection に載せるか、セッションごとに connection を張るか
   （サーバ側実装の対応状況次第）。
+- `_ukai/turn_state` / `_ukai/progress` を、ACP v2 の `state_update` やリモートトランスポートの仕様が
+  固まったらそちらに置き換える。
+- snapshot の `refs/ukai/wip/*` を各ホスティングが受けるか。ブランチにすると CI の push トリガーに乗る。
+- gateway の外部公開と認証（今は bearer token か port-forward）。

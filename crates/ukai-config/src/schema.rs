@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The whole `ukai.toml` document.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -45,6 +45,16 @@ pub enum AgentSpec {
         #[serde(default)]
         headers: BTreeMap<String, String>,
     },
+    /// An agent served by `ukai-gateway` at `/agents/<id>/acp`: the WebSocket
+    /// profile, plus where each pane's work runs.
+    Gateway {
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        /// The default for new panes; a pane can choose the other.
+        #[serde(default)]
+        workspace: WorkspaceScope,
+    },
     /// A local subprocess speaking ACP over stdio.
     Stdio {
         command: String,
@@ -53,6 +63,17 @@ pub enum AgentSpec {
         #[serde(default)]
         env: BTreeMap<String, String>,
     },
+}
+
+/// Where a gateway agent's pane works.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceScope {
+    /// The pod and checkout every pane of this agent shares.
+    #[default]
+    Shared,
+    /// A pod and checkout of the pane's own.
+    Pod,
 }
 
 /// An automatic answer to `session/request_permission`.

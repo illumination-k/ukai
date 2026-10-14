@@ -28,26 +28,36 @@ struct Caps {
 /// - `hello`: two message chunks, then `end_turn`
 /// - `write <path>`: writes `<path>` through the client, then `end_turn`
 /// - `ask`: requests permission, echoes the chosen option id, then `end_turn`
+/// - `fs`: says which `fs/*` methods the client offered, then `end_turn`
 /// - anything else: the prompt fails
 ///
 /// `session/load` replays one user and one agent message before answering.
 fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
+    let offered_fs = Arc::new(std::sync::Mutex::new(String::new()));
     Agent
         .builder()
         .name("mock")
         .on_receive_request(
-            async move |request: InitializeRequest, responder, _cx| {
-                let session_caps = SessionCapabilities::new()
-                    .resume(caps.resume.then(SessionResumeCapabilities::new));
-                responder.respond(
-                    InitializeResponse::new(request.protocol_version)
-                        .agent_capabilities(
-                            AgentCapabilities::new()
-                                .load_session(caps.load)
-                                .session_capabilities(session_caps),
-                        )
-                        .agent_info(Implementation::new("mock", "0").title("Mock Agent")),
-                )
+            {
+                let offered_fs = offered_fs.clone();
+                async move |request: InitializeRequest, responder, _cx| {
+                    let fs = &request.client_capabilities.fs;
+                    if let Ok(mut offered) = offered_fs.lock() {
+                        *offered =
+                            format!("read={} write={}", fs.read_text_file, fs.write_text_file);
+                    }
+                    let session_caps = SessionCapabilities::new()
+                        .resume(caps.resume.then(SessionResumeCapabilities::new));
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(
+                                AgentCapabilities::new()
+                                    .load_session(caps.load)
+                                    .session_capabilities(session_caps),
+                            )
+                            .agent_info(Implementation::new("mock", "0").title("Mock Agent")),
+                    )
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -79,7 +89,8 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |request: PromptRequest, responder, cx: ConnectionTo<Client>| {
+            async move |request: PromptRequest, responder, cx: ConnectionTo<Client>| {
+                let offered_fs = offered_fs.lock().map(|o| o.clone()).unwrap_or_default();
                 let text = match request.prompt.first() {
                     Some(ContentBlock::Text(text)) => text.text.clone(),
                     _ => String::new(),
@@ -101,6 +112,8 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                         if text == "hello" {
                             say("Hel")?;
                             say("lo")?;
+                        } else if text == "fs" {
+                            say(&offered_fs)?;
                         } else if let Some(path) = text.strip_prefix("write ") {
                             cx.send_request(WriteTextFileRequest::new(
                                 session.clone(),
@@ -174,13 +187,22 @@ impl Harness {
 
     /// Connect and collect events up to and including `Ready`.
     async fn connect(caps: Caps, restore: Option<&str>) -> (Self, Vec<SessionEvent>) {
+        Self::connect_with(caps, restore, true).await
+    }
+
+    /// [`Self::connect`], offering `fs/*` only when `fs` is set.
+    async fn connect_with(
+        caps: Caps,
+        restore: Option<&str>,
+        fs: bool,
+    ) -> (Self, Vec<SessionEvent>) {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         let root = dir.path().canonicalize().unwrap_or_else(|e| panic!("{e}"));
         let (client_end, agent_end) = Channel::duplex();
         tokio::spawn(mock_agent(caps).connect_to(agent_end));
         let options = SessionOptions {
             cwd: root.clone(),
-            fs_root: FsRoot::new(&root).unwrap_or_else(|e| panic!("{e}")),
+            fs_root: fs.then(|| FsRoot::new(&root).unwrap_or_else(|e| panic!("{e}"))),
             restore: restore.map(str::to_owned),
         };
         let (handle, events) = spawn_on(client_end, options);
@@ -292,6 +314,39 @@ async fn refuses_writes_outside_root() {
         [SessionEvent::PromptFailed { .. }] | [SessionEvent::Closed { .. }]
     ));
     assert!(!outside.exists());
+}
+
+#[tokio::test]
+async fn offers_fs_only_with_a_root() {
+    let mut harness = Harness::start().await;
+    assert_eq!(
+        harness.turn("fs").await,
+        vec![
+            SessionEvent::AgentMessage {
+                text: "read=true write=true".into()
+            },
+            end_turn()
+        ]
+    );
+
+    let (mut harness, _) = Harness::connect_with(Caps::default(), None, false).await;
+    assert_eq!(
+        harness.turn("fs").await,
+        vec![
+            SessionEvent::AgentMessage {
+                text: "read=false write=false".into()
+            },
+            end_turn()
+        ]
+    );
+    // An agent that writes anyway is refused, and nothing reaches the disk.
+    let target = harness.root.join("r.html");
+    let events = harness.turn(&format!("write {}", target.display())).await;
+    assert!(matches!(
+        events.as_slice(),
+        [SessionEvent::PromptFailed { .. }] | [SessionEvent::Closed { .. }]
+    ));
+    assert!(!target.exists());
 }
 
 #[tokio::test]

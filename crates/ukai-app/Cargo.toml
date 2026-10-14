@@ -21,6 +21,7 @@ tracing-subscriber = { workspace = true }
 ukai-acp = { workspace = true }
 ukai-config = { workspace = true }
 ukai-core = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

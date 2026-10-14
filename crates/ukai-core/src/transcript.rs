@@ -105,6 +105,11 @@ impl Transcript {
 
     pub fn apply(&mut self, event: SessionEvent) {
         match event {
+            SessionEvent::Preparing { message } => self.entries.push(Entry::Notice {
+                text: message,
+                error: false,
+            }),
+            SessionEvent::TurnRunning => self.status = Status::Busy,
             SessionEvent::Ready { agent, restore, .. } => {
                 self.agent = agent;
                 self.status = Status::Idle;

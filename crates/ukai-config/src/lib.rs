@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 pub use interpolate::{InterpolateError, interpolate};
 pub use layered::{USER_FILE_NAME, config_dir, load_layered, merge, state_dir};
-pub use schema::{AgentSpec, Config, Decision, PermissionRule, Project, Reports};
+pub use schema::{AgentSpec, Config, Decision, PermissionRule, Project, Reports, WorkspaceScope};
 pub use validate::Problem;
 
 /// File name looked up at the project root.

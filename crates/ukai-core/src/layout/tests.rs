@@ -98,6 +98,7 @@ fn closing_the_last_tab_opens_a_fresh_one() {
             project: ProjectId("p1".into()),
             agent: "claude".into(),
             session: None,
+            workspace: None,
         },
     );
     assert_eq!(layout.close_tab(0), vec![0]);

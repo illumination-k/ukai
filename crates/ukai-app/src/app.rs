@@ -222,6 +222,6 @@ fn open_in_focus(app: AppSignals, project: &ProjectId, agent: &str) {
         layout.write().split(focused, Direction::Horizontal)
     };
     if let Some(pane) = pane {
-        open_agent(app, pane, project, agent);
+        open_agent(app, pane, project, agent, None);
     }
 }

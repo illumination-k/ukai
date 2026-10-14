@@ -179,11 +179,27 @@ mod tests {
                 project,
                 agent: "claude".into(),
                 session: None,
+                workspace: None,
             },
         );
         layout.record_session(pane, "sess-1".into());
         layout.split(pane, Direction::Horizontal);
         AppState::new(projects, layout)
+    }
+
+    #[test]
+    fn reads_agent_panes_saved_without_a_workspace() {
+        // Files written before panes had workspaces still load.
+        let content: Result<PaneContent, _> = serde_json::from_str(
+            r#"{"kind":"agent","project":"p1","agent":"claude","session":"s"}"#,
+        );
+        assert!(matches!(
+            content,
+            Ok(PaneContent::Agent {
+                workspace: None,
+                ..
+            })
+        ));
     }
 
     #[rstest]
