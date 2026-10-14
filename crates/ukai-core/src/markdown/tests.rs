@@ -164,3 +164,73 @@ fn task_lists() {
         )]
     );
 }
+
+fn link(url: &str) -> Node {
+    element(
+        Kind::Link {
+            url: Some(url.to_owned()),
+        },
+        vec![text(url)],
+    )
+}
+
+#[rstest]
+#[case::alone("https://example.com/a?b=1", vec![link("https://example.com/a?b=1")])]
+#[case::http("see http://example.com", vec![text("see "), link("http://example.com")])]
+#[case::trailing_punctuation(
+    "at https://example.com/a.",
+    vec![text("at "), link("https://example.com/a"), text(".")]
+)]
+#[case::unbalanced_paren(
+    "(https://example.com/a)",
+    vec![text("("), link("https://example.com/a"), text(")")]
+)]
+#[case::balanced_paren(
+    "https://en.wikipedia.org/wiki/Rust_(language)",
+    vec![link("https://en.wikipedia.org/wiki/Rust_(language)")]
+)]
+#[case::japanese_after(
+    "https://example.comを見て",
+    vec![link("https://example.com"), text("を見て")]
+)]
+#[case::two(
+    "https://a.example, https://b.example",
+    vec![link("https://a.example"), text(", "), link("https://b.example")]
+)]
+#[case::mid_word("xhttps://example.com", vec![text("xhttps://example.com")])]
+#[case::scheme_only("https:// is a scheme", vec![text("https:// is a scheme")])]
+#[case::other_scheme("ftp://example.com", vec![text("ftp://example.com")])]
+fn bare_urls_become_links(#[case] source: &str, #[case] expected: Vec<Node>) {
+    assert_eq!(parse(source), [paragraph(expected)]);
+}
+
+#[rstest]
+#[case::inline_code("`https://example.com`", vec![paragraph(vec![Node::Code("https://example.com".into())])])]
+#[case::code_block(
+    "```\nhttps://example.com\n```",
+    vec![Node::CodeBlock { lang: None, text: "https://example.com\n".into() }]
+)]
+#[case::link_text(
+    "[https://a.example](https://b.example)",
+    vec![paragraph(vec![element(
+        Kind::Link { url: Some("https://b.example".into()) },
+        vec![text("https://a.example")],
+    )])]
+)]
+fn urls_in_code_and_links_are_left_alone(#[case] source: &str, #[case] expected: Vec<Node>) {
+    assert_eq!(parse(source), expected);
+}
+
+#[test]
+fn bare_urls_link_inside_nested_blocks() {
+    assert_eq!(
+        parse("- **https://example.com**"),
+        [element(
+            Kind::List { start: None },
+            vec![element(
+                Kind::Item,
+                vec![element(Kind::Strong, vec![link("https://example.com")])]
+            )]
+        )]
+    );
+}
