@@ -441,7 +441,7 @@ async fn run_prompt(
             format!("Bearer {}", endpoint.token),
         )]),
     };
-    let transport = match ukai_acp::resolve(&spec, |_| None, None) {
+    let transport = match ukai_acp::resolve(&spec, |_, _| None, None) {
         Ok(transport) => transport,
         Err(error) => return failed(error.to_string()),
     };

@@ -6935,6 +6935,7 @@ dependencies = [
  "base64 0.23.1",
  "reqwest",
  "rstest",
+ "security-framework",
  "serde",
  "serde_json",
  "tempfile",

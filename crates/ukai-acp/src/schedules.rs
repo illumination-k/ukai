@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use ukai_config::AgentSpec;
+use ukai_config::{AgentSpec, Source};
 
 use crate::{ResolveError, header_map};
 
@@ -153,7 +153,7 @@ impl SchedulesEndpoint {
     /// agent: nothing else keeps schedules.
     pub fn resolve(
         spec: &AgentSpec,
-        lookup: impl Fn(&str) -> Option<String> + Copy,
+        lookup: impl Fn(Source, &str) -> Option<String> + Copy,
     ) -> Result<Option<Self>, ResolveError> {
         let AgentSpec::Gateway { url, headers, .. } = spec else {
             return Ok(None);
@@ -271,7 +271,7 @@ mod tests {
             headers: BTreeMap::from([("Authorization".into(), "Bearer t".into())]),
             workspace: WorkspaceScope::Pod,
         };
-        let endpoint = SchedulesEndpoint::resolve(&spec, |_| None)
+        let endpoint = SchedulesEndpoint::resolve(&spec, |_, _| None)
             .unwrap_or_else(|e| panic!("{e}"))
             .unwrap_or_else(|| panic!("a gateway agent has schedules"));
         assert_eq!(
@@ -289,7 +289,7 @@ mod tests {
     #[case::websocket(AgentSpec::Websocket { url: "wss://example.com/acp".into(), headers: BTreeMap::new() })]
     fn other_transports_have_no_schedules(#[case] spec: AgentSpec) {
         assert!(matches!(
-            SchedulesEndpoint::resolve(&spec, |_| None),
+            SchedulesEndpoint::resolve(&spec, |_, _| None),
             Ok(None)
         ));
     }
