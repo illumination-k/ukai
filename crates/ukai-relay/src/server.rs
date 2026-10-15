@@ -124,7 +124,20 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         }
     };
 
-    let (mut hub, init) = Hub::new(cwd.map(|dir| dir.to_string_lossy().into_owned()));
+    // The agent starts this binary again as an MCP server that tells it
+    // what ukai does with its reports; see `crate::mcp`.
+    let mcp_servers = match (&cwd, std::env::current_exe()) {
+        (Some(root), Ok(program)) => vec![crate::mcp::server_entry(&program, root)],
+        (_, Err(error)) => {
+            tracing::warn!(%error, "cannot find the relay binary; sessions get no ukai MCP server");
+            Vec::new()
+        }
+        (None, _) => Vec::new(),
+    };
+    let (mut hub, init) = Hub::new(
+        cwd.map(|dir| dir.to_string_lossy().into_owned()),
+        mcp_servers,
+    );
     dispatch(init, &conns);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));

@@ -18,7 +18,9 @@
 //! - Agent requests, such as permission prompts, wait for a client and are
 //!   sent again to each client that attaches until one answers.
 //! - A client's `cwd` names a directory on its own machine, not the agent's,
-//!   so session setup is pointed at the relay's working directory instead.
+//!   so session setup is pointed at the relay's working directory instead,
+//!   and given the relay's own MCP servers (see [`crate::mcp`]) next to the
+//!   client's.
 //!
 //! Every input returns the messages to send; nothing here does I/O.
 
@@ -112,6 +114,9 @@ struct Pending {
 pub struct Hub {
     /// The directory sessions are set up in, whatever `cwd` clients send.
     cwd: Option<String>,
+    /// ACP `mcpServers` entries added to every session set up, replacing a
+    /// client's entry of the same name.
+    mcp_servers: Vec<Value>,
     agent_init: Option<Value>,
     waiting_init: Vec<(ConnId, Value)>,
     next_id: u64,
@@ -127,10 +132,12 @@ impl Hub {
     /// agent no client capabilities: `fs/*` and terminals would have to reach
     /// a client that may not be there, and an agent's edits belong in the
     /// checkout it works in. What it writes there is read back over HTTP
-    /// instead (see [`crate::reports`]).
-    pub fn new(cwd: Option<String>) -> (Self, Vec<Output>) {
+    /// instead (see [`crate::reports`]). Sessions are set up in `cwd` with
+    /// `mcp_servers` added to the client's.
+    pub fn new(cwd: Option<String>, mcp_servers: Vec<Value>) -> (Self, Vec<Output>) {
         let mut hub = Self {
             cwd,
+            mcp_servers,
             ..Self::default()
         };
         let id = hub.id(Origin::Initialize);
@@ -212,12 +219,7 @@ impl Hub {
         mut message: Value,
     ) -> Vec<Output> {
         let session = session_id(&message);
-        if let (Some(cwd), "session/new" | "session/load" | "session/resume" | "session/list") =
-            (&self.cwd, method)
-            && let Some(params) = message.get_mut("params").and_then(Value::as_object_mut)
-        {
-            params.insert("cwd".to_owned(), json!(cwd));
-        }
+        self.set_up_here(method, &mut message);
         match method {
             "initialize" => match &self.agent_init {
                 Some(init) => vec![Output::Client(conn, result(id, init.clone()))],
@@ -264,6 +266,35 @@ impl Hub {
                 outputs
             }
             _ => self.forward(conn, id, method, session, message),
+        }
+    }
+
+    /// Point session setup at the relay's directory and MCP servers.
+    fn set_up_here(&self, method: &str, message: &mut Value) {
+        let setup = matches!(method, "session/new" | "session/load" | "session/resume");
+        if !setup && method != "session/list" {
+            return;
+        }
+        let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) else {
+            return;
+        };
+        if let Some(cwd) = &self.cwd {
+            params.insert("cwd".to_owned(), json!(cwd));
+        }
+        if !setup || self.mcp_servers.is_empty() {
+            return;
+        }
+        let servers = params
+            .entry("mcpServers")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(servers) = servers.as_array_mut() {
+            let ours = |server: &Value| {
+                self.mcp_servers
+                    .iter()
+                    .any(|mine| mine.get("name") == server.get("name"))
+            };
+            servers.retain(|server| !ours(server));
+            servers.extend(self.mcp_servers.iter().cloned());
         }
     }
 

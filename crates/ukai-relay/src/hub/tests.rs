@@ -1,3 +1,4 @@
+use rstest::rstest;
 use serde_json::{Value, json};
 
 use super::*;
@@ -39,7 +40,7 @@ fn client_messages(outputs: &[Output], conn: ConnId) -> Vec<Value> {
 
 /// A hub whose agent is initialized, with client `A` connected to session `SID`.
 fn with_session() -> Hub {
-    let (mut hub, init) = Hub::new(None);
+    let (mut hub, init) = Hub::new(None, Vec::new());
     let init_id = agent_id(&init);
     hub.from_agent(result(
         json!(init_id),
@@ -75,7 +76,7 @@ fn prompt(hub: &mut Hub, conn: ConnId, id: u64, text: &str) -> u64 {
 
 #[test]
 fn answers_initialize_from_the_agents_with_load_session() {
-    let (mut hub, init) = Hub::new(None);
+    let (mut hub, init) = Hub::new(None, Vec::new());
     assert_eq!(init[0], Output::Agent(init_request(&init)));
     hub.connect(A);
     // Before the agent answers, a client's initialize waits.
@@ -312,7 +313,7 @@ fn a_permission_sent_to_a_departed_client_goes_to_the_next() {
 
 #[test]
 fn loads_a_session_the_relay_does_not_know_through_the_agent() {
-    let (mut hub, init) = Hub::new(None);
+    let (mut hub, init) = Hub::new(None, Vec::new());
     hub.from_agent(result(json!(agent_id(&init)), json!({})));
     hub.connect(A);
     let sent = hub.from_client(A, req(1, "session/load", json!({ "sessionId": SID })));
@@ -332,7 +333,7 @@ fn loads_a_session_the_relay_does_not_know_through_the_agent() {
 
 #[test]
 fn a_failed_load_forgets_the_session() {
-    let (mut hub, init) = Hub::new(None);
+    let (mut hub, init) = Hub::new(None, Vec::new());
     hub.from_agent(result(json!(agent_id(&init)), json!({})));
     hub.connect(A);
     let load = agent_id(&hub.from_client(A, req(1, "session/load", json!({ "sessionId": SID }))));
@@ -361,7 +362,7 @@ fn a_new_attachment_takes_the_session_over() {
 
 #[test]
 fn session_setup_runs_in_the_relays_directory() {
-    let (mut hub, init) = Hub::new(Some("/workspace/repo".into()));
+    let (mut hub, init) = Hub::new(Some("/workspace/repo".into()), Vec::new());
     hub.from_agent(result(json!(agent_id(&init)), json!({})));
     hub.connect(A);
     // `session/list` too, so it lists the sessions in this workspace.
@@ -383,9 +384,75 @@ fn session_setup_runs_in_the_relays_directory() {
     }
 }
 
+fn relay_server(name: &str) -> Value {
+    json!({ "name": name, "command": "/relay/ukai-relay", "args": ["mcp"], "env": [] })
+}
+
+#[rstest]
+#[case::new("session/new", json!({ "cwd": "/w", "mcpServers": [] }))]
+#[case::load("session/load", json!({ "sessionId": SID, "cwd": "/w", "mcpServers": [] }))]
+#[case::resume("session/resume", json!({ "sessionId": SID, "cwd": "/w" }))]
+fn session_setup_gets_the_relays_mcp_servers(#[case] method: &str, #[case] params: Value) {
+    let (mut hub, init) = Hub::new(None, vec![relay_server("ukai")]);
+    hub.from_agent(result(json!(agent_id(&init)), json!({})));
+    hub.connect(A);
+    match hub.from_client(A, req(1, method, params)).as_slice() {
+        [Output::Agent(message)] => {
+            assert_eq!(
+                message["params"]["mcpServers"],
+                json!([relay_server("ukai")])
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_relays_mcp_servers_join_the_clients_and_replace_a_namesake() {
+    let (mut hub, init) = Hub::new(None, vec![relay_server("ukai")]);
+    hub.from_agent(result(json!(agent_id(&init)), json!({})));
+    hub.connect(A);
+    let theirs =
+        json!({ "type": "http", "name": "docs", "url": "https://docs.example", "headers": [] });
+    let sent = hub.from_client(
+        A,
+        req(
+            1,
+            "session/new",
+            json!({
+                "cwd": "/w",
+                "mcpServers": [theirs.clone(), { "name": "ukai", "command": "elsewhere", "args": [], "env": [] }]
+            }),
+        ),
+    );
+    match sent.as_slice() {
+        [Output::Agent(message)] => assert_eq!(
+            message["params"]["mcpServers"],
+            json!([theirs, relay_server("ukai")])
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[rstest]
+#[case::list("session/list")]
+#[case::prompt("session/prompt")]
+fn other_requests_get_no_mcp_servers(#[case] method: &str) {
+    let (mut hub, init) = Hub::new(None, vec![relay_server("ukai")]);
+    hub.from_agent(result(json!(agent_id(&init)), json!({})));
+    hub.connect(A);
+    match hub
+        .from_client(A, req(1, method, json!({ "sessionId": SID, "prompt": [] })))
+        .as_slice()
+    {
+        [Output::Agent(message)] => assert!(message["params"].get("mcpServers").is_none()),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn agent_requests_outside_a_session_are_refused() {
-    let (mut hub, _) = Hub::new(None);
+    let (mut hub, _) = Hub::new(None, Vec::new());
     match hub
         .from_agent(req(
             5,

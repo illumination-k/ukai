@@ -5,13 +5,18 @@
 //! must present comes from `UKAI_RELAY_TOKEN`, the idle timeout in seconds from
 //! `UKAI_IDLE_TIMEOUT` (default 1800), and `UKAI_SNAPSHOT_TRIGGER` names a file
 //! to write after every finished turn.
+//!
+//! `ukai-relay mcp [--root DIR]` is the MCP server the relay hands the agent
+//! for each session (see `ukai_relay::mcp`), on stdin/stdout for the
+//! checkout at DIR (default: the current directory).
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use ukai_relay::server::{Options, run};
 
-const USAGE: &str = "usage: ukai-relay [--listen ADDR] -- COMMAND [ARGS...]";
+const USAGE: &str =
+    "usage: ukai-relay [--listen ADDR] -- COMMAND [ARGS...]\n       ukai-relay mcp [--root DIR]";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -22,7 +27,11 @@ async fn main() -> ExitCode {
                 .unwrap_or_else(|_| "ukai_relay=info".into()),
         )
         .init();
-    let options = match options(std::env::args().skip(1).collect()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(ukai_relay::mcp::SUBCOMMAND) {
+        return mcp(&args[1..]);
+    }
+    let options = match options(args) {
         Ok(options) => options,
         Err(message) => {
             tracing::error!("{message}\n{USAGE}");
@@ -33,6 +42,24 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(%error, "relay failed");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn mcp(args: &[String]) -> ExitCode {
+    let root = match args {
+        [] => std::path::PathBuf::from("."),
+        [flag, root] if flag == "--root" => std::path::PathBuf::from(root),
+        _ => {
+            tracing::error!("unexpected arguments to `mcp`\n{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match ukai_relay::mcp::serve(&root) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(%error, "mcp server failed");
             ExitCode::FAILURE
         }
     }
