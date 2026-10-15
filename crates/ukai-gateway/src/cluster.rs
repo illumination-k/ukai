@@ -1,15 +1,18 @@
 //! The cluster side: find or create a workspace's Job and wait for its pod to
 //! serve. Only namespaced, built-in resources are touched: `jobs` (get,
-//! create, delete), `pods` (list), and optionally `events` (list) for
-//! progress.
+//! create, delete), `pods` (list, and `exec` for a schedule's command),
+//! optionally `events` (list) for progress, and `configmaps` (list, patch,
+//! delete) holding schedules.
 
 use std::io::Read;
 use std::time::Duration;
 
 use k8s_openapi::api::authentication::v1::{SelfSubjectReview, SelfSubjectReviewStatus};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ContainerStatus, Event, Pod};
-use kube::api::{Api, DeleteParams, ListParams, PostParams};
+use k8s_openapi::api::core::v1::{ConfigMap, ContainerStatus, Event, Pod};
+use kube::api::{
+    Api, AttachParams, AttachedProcess, DeleteParams, ListParams, Patch, PatchParams, PostParams,
+};
 use kube::config::InferConfigError;
 use kube::{Client, Config};
 
@@ -65,6 +68,46 @@ impl Cluster {
 
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// The ConfigMaps labelled `label`, e.g. every saved schedule.
+    pub async fn config_maps(&self, label: &str) -> Result<Vec<ConfigMap>> {
+        let maps: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.namespace);
+        Ok(maps.list(&ListParams::default().labels(label)).await?.items)
+    }
+
+    /// Create or replace `map` (server-side apply, so the gateway owns it).
+    pub async fn apply_config_map(&self, map: &ConfigMap) -> Result<()> {
+        let maps: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.namespace);
+        let name = map.metadata.name.clone().unwrap_or_default();
+        maps.patch(
+            &name,
+            &PatchParams::apply("ukai-gateway").force(),
+            &Patch::Apply(map),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Delete a ConfigMap; one already gone is not an error.
+    pub async fn delete_config_map(&self, name: &str) -> Result<()> {
+        let maps: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.namespace);
+        match maps.delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Run `command` in `pod`'s agent container, reading its stdout and stderr.
+    pub async fn exec_in_agent(&self, pod: &str, command: Vec<String>) -> Result<AttachedProcess> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let params = AttachParams::default()
+            .container(AGENT_CONTAINER)
+            .stdin(false)
+            .stdout(true)
+            .stderr(true);
+        Ok(pods.exec(pod, command, &params).await?)
     }
 
     /// The image of `pod`'s first container.
@@ -266,7 +309,7 @@ impl RelayEndpoint {
 }
 
 /// 128 random bits, hex: the relay's token for one Job.
-fn token() -> Result<String> {
+pub fn token() -> Result<String> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut bytes))

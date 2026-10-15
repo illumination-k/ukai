@@ -14,18 +14,22 @@ futures = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
 percent-encoding = { workspace = true }
-# No TLS: the only thing the gateway asks for over HTTP is a report, from a
-# `ukai-relay` at a pod address inside the cluster.
+# No TLS of its own: the gateway asks for reports from a `ukai-relay` at a
+# pod address inside the cluster.
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+time = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 tokio-tungstenite = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ukai-acp = { workspace = true }
+ukai-config = { workspace = true }
+ukai-core = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

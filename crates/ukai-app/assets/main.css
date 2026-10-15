@@ -2075,3 +2075,203 @@ button.config-trigger:disabled {
   font: 12px/1.6 var(--mono);
   white-space: pre-wrap;
 }
+
+/* ---- schedules ---------------------------------------------------------- */
+
+.schedule-row .meta {
+  margin-left: auto;
+  color: var(--muted-fg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.schedule-row .dot {
+  margin: 0 4px;
+}
+
+.schedule-agent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  padding: 0 0 0 8px;
+  font-size: 12px;
+}
+
+.schedule {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 16px;
+}
+
+.schedule-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 640px;
+}
+
+.schedule-panel + .schedule-panel {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.schedule-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.schedule input:not([type="checkbox"]),
+.schedule textarea {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 var(--font);
+}
+
+.schedule input:focus,
+.schedule textarea:focus {
+  border-color: var(--ring);
+}
+
+.schedule textarea {
+  resize: vertical;
+}
+
+.schedule .mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.schedule input.schedule-name {
+  flex: 1;
+  border-color: transparent;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.schedule input.schedule-name:hover {
+  border-color: var(--input);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.field-hint {
+  font-size: 12px;
+}
+
+.cron-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule input.cron {
+  width: 14rem;
+}
+
+.problems {
+  margin: 0;
+  padding: 8px 10px 8px 28px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 30%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--destructive) 5%, transparent);
+  color: var(--destructive);
+  font-size: 12px;
+}
+
+.schedule-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button.outline.danger {
+  color: var(--destructive);
+}
+
+.run {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.run summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.run summary::-webkit-details-marker {
+  display: none;
+}
+
+.run summary:hover {
+  background: var(--hover);
+}
+
+.run-time {
+  color: var(--muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.run-outcome {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.run-output {
+  max-height: 320px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font: 11.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run > button {
+  margin: 0 12px 10px;
+}
+
+.run > .hint {
+  margin: 8px 12px;
+}

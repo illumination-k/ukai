@@ -197,6 +197,12 @@ impl ReportsEndpoint {
 /// endpoint over HTTP, with `/acp` replaced. `None` for a URL whose scheme
 /// is not one a gateway speaks.
 pub fn reports_base(url: &str) -> Option<String> {
+    endpoint_base(url, REPORTS_PATH)
+}
+
+/// A gateway agent's HTTP endpoint next to its `/acp` at `url`: `suffix` in
+/// place of `/acp`.
+pub(crate) fn endpoint_base(url: &str, suffix: &str) -> Option<String> {
     let (scheme, rest) = match url.split_once("://")? {
         ("ws", rest) => ("http", rest),
         ("wss", rest) => ("https", rest),
@@ -209,7 +215,7 @@ pub fn reports_base(url: &str) -> Option<String> {
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let rest = rest.strip_suffix("/acp").unwrap_or(rest);
     let rest = rest.trim_end_matches('/');
-    (!rest.is_empty()).then(|| format!("{scheme}://{rest}{REPORTS_PATH}"))
+    (!rest.is_empty()).then(|| format!("{scheme}://{rest}{suffix}"))
 }
 
 /// What a status that is not 200 means: a workspace whose pod has gone is a

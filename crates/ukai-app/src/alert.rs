@@ -31,8 +31,18 @@ pub fn raise(
             .window
             .request_user_attention(Some(UserAttentionType::Informational));
     }
-    let summary = source.to_owned();
-    let body = alert.summary();
+    show(source.to_owned(), alert.summary());
+}
+
+/// Show a desktop notification while the window is in the background, for
+/// news that has no pane to mark, such as a schedule's failed run.
+pub fn notify_if_away(summary: &str, body: &str) {
+    if !dioxus::desktop::window().window.is_focused() {
+        show(summary.to_owned(), body.to_owned());
+    }
+}
+
+fn show(summary: String, body: String) {
     // Showing can block on the notification daemon.
     std::thread::spawn(move || {
         if let Err(error) = notify_rust::Notification::new()

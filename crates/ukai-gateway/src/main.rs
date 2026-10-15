@@ -15,6 +15,13 @@
 //! them in its pod. Same token, same workspace headers; a report request
 //! never starts a pod.
 //!
+//! `/agents/<id>/schedules` keeps the agent's [`schedules`]: commands and
+//! prompts the gateway runs on a cron pattern, in a workspace of each
+//! schedule's own. `GET` lists them and `POST` adds one; `GET`, `PUT`, and
+//! `DELETE` on `<it>/<schedule>` read, change, and remove one;
+//! `GET <schedule>/runs` lists its recent runs, and `POST <schedule>/run` and
+//! `<schedule>/stop` start and stop one now.
+//!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
 //! - `UKAI_GATEWAY_LISTEN`: address to serve (default `0.0.0.0:8080`)
@@ -36,7 +43,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
@@ -48,10 +55,13 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 mod cluster;
 mod config;
 mod job;
+mod schedules;
 
 use crate::cluster::{Cluster, RelayEndpoint};
 use crate::config::KubernetesAgent;
 use crate::job::Plan;
+use crate::schedules::Scheduler;
+use ukai_core::schedule::{ScheduleSpec, Trigger};
 
 struct Gateway {
     agents: BTreeMap<String, KubernetesAgent>,
@@ -59,6 +69,7 @@ struct Gateway {
     user: String,
     relay_image: String,
     token: Option<String>,
+    schedules: Scheduler,
 }
 
 #[tokio::main]
@@ -99,19 +110,39 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let user = cluster.whoami().await?;
     tracing::info!(namespace = cluster.namespace(), %user, %relay_image, agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
+    let (schedules, saver) = Scheduler::load(&cluster).await?;
     let gateway = Arc::new(Gateway {
         agents: config.agents,
         cluster,
         user,
         relay_image,
         token: env("UKAI_GATEWAY_TOKEN"),
+        schedules,
     });
+    tokio::spawn(saver.run(gateway.clone()));
+    tokio::spawn(schedules::tick(gateway.clone()));
     let router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/agents", get(list))
         .route("/agents/{id}/acp", get(connect))
         .route("/agents/{id}/reports", get(reports))
         .route("/agents/{id}/reports/files/{*path}", get(reports))
+        .route(
+            "/agents/{id}/schedules",
+            get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/agents/{id}/schedules/{schedule}",
+            get(get_schedule)
+                .put(update_schedule)
+                .delete(delete_schedule),
+        )
+        .route("/agents/{id}/schedules/{schedule}/runs", get(schedule_runs))
+        .route("/agents/{id}/schedules/{schedule}/run", post(run_schedule))
+        .route(
+            "/agents/{id}/schedules/{schedule}/stop",
+            post(stop_schedule),
+        )
         .with_state(gateway);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(%listen, "serving");
@@ -291,6 +322,141 @@ async fn fetch(endpoint: &RelayEndpoint, suffix: &str) -> Result<Response, BoxEr
 /// How long the gateway waits on the pod for one report.
 const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// Answers for one agent's schedules: `Err` is the response when the
+/// request is not authorized or names no agent of the gateway's.
+fn schedules_of<'g>(
+    gateway: &'g Gateway,
+    headers: &HeaderMap,
+    agent: &str,
+) -> Result<&'g Scheduler, StatusCode> {
+    if !authorized(gateway, headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !gateway.agents.contains_key(agent) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(&gateway.schedules)
+}
+
+fn refused(problems: Vec<String>) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        axum::Json(json!({ "problems": problems })),
+    )
+        .into_response()
+}
+
+fn found<T: serde::Serialize>(value: Option<T>) -> Response {
+    match value {
+        Some(value) => axum::Json(value).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn list_schedules(
+    State(gateway): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => axum::Json(schedules.list(&id)).into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+async fn create_schedule(
+    State(gateway): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    axum::Json(spec): axum::Json<ScheduleSpec>,
+) -> Response {
+    let schedules = match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => schedules,
+        Err(status) => return status.into_response(),
+    };
+    match schedules.create(&id, spec) {
+        Ok(info) => (StatusCode::CREATED, axum::Json(info)).into_response(),
+        Err(problems) => refused(problems),
+    }
+}
+
+async fn get_schedule(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, schedule)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => found(schedules.info(&id, &schedule)),
+        Err(status) => status.into_response(),
+    }
+}
+
+async fn update_schedule(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, schedule)): Path<(String, String)>,
+    headers: HeaderMap,
+    axum::Json(spec): axum::Json<ScheduleSpec>,
+) -> Response {
+    let schedules = match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => schedules,
+        Err(status) => return status.into_response(),
+    };
+    match schedules.update(&id, &schedule, spec) {
+        Ok(info) => found(info),
+        Err(problems) => refused(problems),
+    }
+}
+
+async fn delete_schedule(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, schedule)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => found(schedules.delete(&id, &schedule).then(|| json!({}))),
+        Err(status) => status.into_response(),
+    }
+}
+
+async fn schedule_runs(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, schedule)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => found(schedules.runs(&id, &schedule)),
+        Err(status) => status.into_response(),
+    }
+}
+
+/// Start a run now. One already going is not an error: the answer shows it.
+async fn run_schedule(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, schedule)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let schedules = match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => schedules,
+        Err(status) => return status.into_response(),
+    };
+    if schedules.info(&id, &schedule).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    schedules::fire(&gateway, &schedule, Trigger::Manual);
+    found(gateway.schedules.info(&id, &schedule))
+}
+
+async fn stop_schedule(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, schedule)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match schedules_of(&gateway, &headers, &id) {
+        Ok(schedules) => found(schedules.stop(&id, &schedule)),
+        Err(status) => status.into_response(),
+    }
+}
+
 /// The pane key when the client asks for a pod of the pane's own.
 fn pane_key(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
     let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
@@ -398,6 +564,10 @@ async fn prepare(
 
 async fn connect_relay(pod: &Pod) -> Result<Upstream, BoxError> {
     let endpoint = RelayEndpoint::of(pod).ok_or("the agent pod has no address yet")?;
+    connect_relay_at(&endpoint).await
+}
+
+async fn connect_relay_at(endpoint: &RelayEndpoint) -> Result<Upstream, BoxError> {
     let mut request = endpoint.acp_url().as_str().into_client_request()?;
     request.headers_mut().insert(
         header::AUTHORIZATION,

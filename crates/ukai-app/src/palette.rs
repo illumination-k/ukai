@@ -50,7 +50,7 @@ fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
             {
                 continue;
             }
-            let (project, label) = pane_label(&layout, &projects, pane);
+            let (project, label) = pane_label(&layout, &projects, &app.schedule_names.peek(), pane);
             items.push(Item {
                 kind: "Go to",
                 label,

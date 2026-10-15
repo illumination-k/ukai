@@ -4134,6 +4134,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "objc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6464,7 +6473,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -6941,6 +6952,7 @@ dependencies = [
  "dioxus",
  "notify-rust",
  "rfd",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -6978,6 +6990,7 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "ukai-acp",
  "ukai-config",
 ]
@@ -6997,11 +7010,15 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "ukai-acp",
+ "ukai-config",
+ "ukai-core",
 ]
 
 [[package]]

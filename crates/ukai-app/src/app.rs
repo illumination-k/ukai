@@ -19,6 +19,7 @@ use crate::projects::{
 };
 use crate::remote_reports::Follow;
 use crate::report_pane::ReportList;
+use crate::schedules::ScheduleList;
 use crate::shortcuts::{Shortcuts, on_keydown};
 use crate::voice::Voice;
 
@@ -47,6 +48,8 @@ pub fn App() -> Element {
             sessions: Signal::new(HashMap::new()),
             reports: Signal::new(HashMap::new()),
             palette: Signal::new(false),
+            schedule_names: Signal::new(HashMap::new()),
+            schedule_revision: Signal::new(0),
         }
     });
     use_hook(|| {
@@ -127,6 +130,8 @@ fn Sidebar() -> Element {
     let selected_name = projects.selected().map(|p| p.name());
     let report_project = selected.clone();
     let report_project_name = selected_name.clone();
+    let schedule_project = selected.clone();
+    let schedule_project_name = selected_name.clone();
     drop(projects);
     let agents: Result<Vec<(String, &'static str)>, String> = match &selected {
         None => Ok(Vec::new()),
@@ -274,6 +279,9 @@ fn Sidebar() -> Element {
                         },
                     }
                 }
+            }
+            if let (Some(project), Some(name)) = (schedule_project, schedule_project_name) {
+                ScheduleList { key: "schedules-{project}", project, name }
             }
             if let (Some(project), Some(name)) = (report_project, report_project_name) {
                 ReportList { key: "{project}", project, name }

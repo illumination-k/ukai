@@ -68,6 +68,14 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "ReportSource::is_project")]
         source: ReportSource,
     },
+    /// A schedule the gateway behind `[agents.<agent>]` of `project` runs;
+    /// `None` while a new one is being written and not yet saved.
+    Schedule {
+        project: ProjectId,
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schedule: Option<String>,
+    },
 }
 
 /// Where a report pane reads its file from.
@@ -113,9 +121,9 @@ impl PaneContent {
     pub fn project(&self) -> Option<&ProjectId> {
         match self {
             PaneContent::Empty => None,
-            PaneContent::Agent { project, .. } | PaneContent::Report { project, .. } => {
-                Some(project)
-            }
+            PaneContent::Agent { project, .. }
+            | PaneContent::Report { project, .. }
+            | PaneContent::Schedule { project, .. } => Some(project),
         }
     }
 }

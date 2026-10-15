@@ -37,6 +37,10 @@ pub struct AppSignals {
     pub reports: Listings,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
+    /// The names of the gateway schedules the app has listed, for pane titles.
+    pub schedule_names: Signal<HashMap<String, String>>,
+    /// Bumped after a schedule changes, so its listings read it again.
+    pub schedule_revision: Signal<u64>,
 }
 
 /// What a session needs from its project.
