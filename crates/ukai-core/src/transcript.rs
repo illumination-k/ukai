@@ -448,12 +448,12 @@ impl Transcript {
     }
 }
 
-/// A past session's name in a menu: its title, else its id.
-pub fn session_label(past: &PastSession) -> String {
-    match past.title.as_deref().map(str::trim) {
-        Some(title) if !title.is_empty() => title.to_owned(),
-        _ => past.id.clone(),
-    }
+/// A past session's title, unless it has none worth showing.
+pub fn session_label(past: &PastSession) -> Option<&str> {
+    past.title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
 }
 
 /// `2026-10-14T12:00:00Z` as `2026-10-14 12:00`; anything else as sent.
@@ -578,10 +578,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case::title(Some("Fix the build"), "Fix the build")]
-    #[case::blank_title(Some("  "), "abc")]
-    #[case::no_title(None, "abc")]
-    fn session_labels(#[case] title: Option<&str>, #[case] expected: &str) {
+    #[case::title(Some(" Fix the build "), Some("Fix the build"))]
+    #[case::blank_title(Some("  "), None)]
+    #[case::no_title(None, None)]
+    fn session_labels(#[case] title: Option<&str>, #[case] expected: Option<&str>) {
         assert_eq!(session_label(&past("abc", title, None)), expected);
     }
 

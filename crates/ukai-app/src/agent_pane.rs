@@ -194,7 +194,8 @@ pub fn HistoryMenu(pane: PaneId) -> Element {
         div { class: "history",
             button {
                 class: if open() { "icon open" } else { "icon" },
-                title: "Sessions",
+                // The tooltip would cover the open menu.
+                title: if !open() { "Sessions" },
                 aria_haspopup: "menu",
                 aria_expanded: open(),
                 onclick: move |_| {
@@ -246,7 +247,14 @@ pub fn HistoryMenu(pane: PaneId) -> Element {
                                             }
                                         },
                                         span { class: "check" }
-                                        span { class: "label", "{session_label(&past)}" }
+                                        match session_label(&past) {
+                                            Some(title) => rsx! {
+                                                span { class: "label", "{title}" }
+                                            },
+                                            None => rsx! {
+                                                span { class: "label untitled", "Untitled session" }
+                                            },
+                                        }
                                         if let Some(updated) = &past.updated_at {
                                             span { class: "description", "{updated_label(updated)}" }
                                         }

@@ -1523,6 +1523,15 @@ button.config-trigger:disabled {
   position: relative;
 }
 
+.history button.open {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.history-menu .untitled {
+  color: var(--muted-fg);
+}
+
 .history-menu {
   top: calc(100% + 4px);
   right: 0;
