@@ -241,7 +241,7 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
   `/<schedule>/runs`（新しい順）、`/<schedule>/run` と `/<schedule>/stop`（`POST`）。トークンは `/acp` と同じ。
   型は `ukai_acp::schedules`（クライアント `SchedulesEndpoint` も）、判定は `ukai_core::schedule`（純粋）で、
   両端が同じものを使う。
-- 中身: 名前、cron（5 フィールドか `@daily` などの別名）、作った人の UTC オフセット（保存時のもの。
+- 中身: 名前、cron（5 フィールドか `@daily` などの別名。解析と次回時刻は `ukai_core::schedule::Cron` が `time` で行う）、作った人の UTC オフセット（保存時のもの。
   夏時間には追従しない）、タスク（`command`: エージェントのコンテナで checkout から `sh -c`、`prompt`: 専用の
   セッションで 1 ターン）、有効かどうか。問題（名前なし・cron 不正・空のコマンド / prompt・オフセット範囲外）は
   全部集めて 422 で返す。アプリも保存前に同じ判定を出す。

@@ -10,7 +10,6 @@ description = "Serves a namespace's agents over ACP's WebSocket profile, one pod
 
 [dependencies]
 axum = { workspace = true, features = ["ws"] }
-chrono = { workspace = true }
 futures = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
@@ -22,6 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 tokio-tungstenite = { workspace = true }
 toml = { workspace = true }

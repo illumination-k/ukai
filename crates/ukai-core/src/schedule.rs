@@ -3,14 +3,13 @@
 //! them and the app that edits them agree, and so it is tested here.
 //!
 //! The types are [`ukai_acp::schedules`]'s, since they cross the wire.
-//! Times are Unix seconds in storage; cron patterns are read at the offset
-//! from UTC the schedule's author saved them with.
+//! Times are Unix seconds in storage; cron patterns ([`Cron`]) are read at
+//! the offset from UTC the schedule's author saved them with.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
-use croner::Cron;
-use croner::parser::{CronParser, Seconds, Year};
+pub use cron::Cron;
+use time::{OffsetDateTime, UtcOffset};
 pub use ukai_acp::schedules::{Outcome, Run, Schedule, ScheduleInfo, ScheduleSpec, Task, Trigger};
 
 /// Runs kept per schedule; older ones are dropped.
@@ -40,7 +39,7 @@ pub fn problems(spec: &ScheduleSpec) -> Vec<Problem> {
     if spec.name.trim().is_empty() {
         problems.push(Problem::EmptyName);
     }
-    if let Err(error) = parse_cron(&spec.cron) {
+    if let Err(error) = Cron::parse(&spec.cron) {
         problems.push(Problem::InvalidCron(error));
     }
     match &spec.task {
@@ -58,51 +57,36 @@ pub fn problems(spec: &ScheduleSpec) -> Vec<Problem> {
     problems
 }
 
-fn offset(minutes: i32) -> Option<FixedOffset> {
-    FixedOffset::east_opt(minutes.checked_mul(60)?)
+fn offset(minutes: i32) -> Option<UtcOffset> {
+    UtcOffset::from_whole_seconds(minutes.checked_mul(60)?).ok()
 }
 
-/// When `schedule` fires next after it was last due; `None` when it is
-/// disabled or its pattern does not parse or never matches.
-pub fn next_due(schedule: &Schedule) -> Option<DateTime<Utc>> {
+/// When `schedule` fires next after it was last due, in UTC; `None` when it
+/// is disabled or its pattern does not parse or never matches.
+pub fn next_due(schedule: &Schedule) -> Option<OffsetDateTime> {
     if !schedule.spec.enabled {
         return None;
     }
     let zone = offset(schedule.spec.utc_offset_minutes)?;
-    let after = zone.timestamp_opt(schedule.last_due, 0).single()?;
-    next_after(&schedule.spec.cron, &after)
+    let after = OffsetDateTime::from_unix_timestamp(schedule.last_due)
+        .ok()?
+        .to_offset(zone);
+    next_after(&schedule.spec.cron, after)
         .ok()
-        .map(|next| next.with_timezone(&Utc))
+        .map(|next| next.to_offset(UtcOffset::UTC))
 }
 
-/// The first time after `after` that `pattern` matches, in `after`'s zone.
-pub fn next_after<Tz: TimeZone>(
-    pattern: &str,
-    after: &DateTime<Tz>,
-) -> Result<DateTime<Tz>, String> {
-    parse_cron(pattern)?
-        .find_next_occurrence(after, false)
-        .map_err(|error| error.to_string())
+/// The first minute after `after` that `pattern` matches, in `after`'s offset.
+pub fn next_after(pattern: &str, after: OffsetDateTime) -> Result<OffsetDateTime, String> {
+    Cron::parse(pattern)?
+        .next_after(after)
+        .ok_or_else(|| "the pattern never matches".to_owned())
 }
 
-/// `pattern` in words, e.g. "At 09:00 on Monday"; `None` when it does not parse.
+/// `pattern` in words, e.g. "At 09:00, Monday through Friday"; `None` when
+/// it does not parse.
 pub fn describe(pattern: &str) -> Option<String> {
-    parse_cron(pattern).ok().map(|cron| cron.describe())
-}
-
-fn parse_cron(pattern: &str) -> Result<Cron, String> {
-    let pattern = pattern.trim();
-    if pattern.is_empty() {
-        return Err("empty".to_owned());
-    }
-    // Minute granularity: due schedules are looked for every few seconds,
-    // not every second.
-    CronParser::builder()
-        .seconds(Seconds::Disallowed)
-        .year(Year::Disallowed)
-        .build()
-        .parse(pattern)
-        .map_err(|error| error.to_string())
+    Cron::parse(pattern).ok().map(|cron| cron.describe())
 }
 
 /// The schedules of a gateway and their recent runs.
@@ -185,7 +169,7 @@ impl Schedules {
         let schedule = self.get(id)?;
         Some(ScheduleInfo {
             schedule: schedule.clone(),
-            next_due: next_due(schedule).map(|next| next.timestamp()),
+            next_due: next_due(schedule).map(OffsetDateTime::unix_timestamp),
             last_run: self.last_run(id).cloned(),
         })
     }
@@ -198,7 +182,7 @@ impl Schedules {
         let mut fire = Vec::new();
         let running: Vec<bool> = self.list.iter().map(|s| self.is_running(&s.id)).collect();
         for (schedule, running) in self.list.iter_mut().zip(running) {
-            let due = next_due(schedule).is_some_and(|next| next.timestamp() <= now);
+            let due = next_due(schedule).is_some_and(|next| next.unix_timestamp() <= now);
             if !due {
                 continue;
             }
@@ -271,5 +255,6 @@ impl Schedules {
     }
 }
 
+mod cron;
 #[cfg(test)]
 mod tests;

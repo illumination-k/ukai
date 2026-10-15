@@ -1,12 +1,25 @@
-use chrono::{DateTime, TimeZone, Utc};
 use rstest::rstest;
+use time::macros::datetime;
 
 use super::*;
 
+/// `YYYY-MM-DDTHH:MM:SSZ` in Unix seconds.
 fn at(text: &str) -> i64 {
-    DateTime::parse_from_rfc3339(text)
-        .unwrap_or_else(|e| panic!("{text}: {e}"))
-        .timestamp()
+    let field = |range: std::ops::Range<usize>| -> i64 {
+        text.get(range)
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or_else(|| panic!("{text}"))
+    };
+    let month = time::Month::try_from(u8::try_from(field(5..7)).unwrap_or(0))
+        .unwrap_or_else(|e| panic!("{text}: {e}"));
+    let date = time::Date::from_calendar_date(
+        i32::try_from(field(0..4)).unwrap_or(0),
+        month,
+        u8::try_from(field(8..10)).unwrap_or(0),
+    )
+    .unwrap_or_else(|e| panic!("{text}: {e}"));
+    let seconds = field(11..13) * 3600 + field(14..16) * 60 + field(17..19);
+    date.midnight().assume_utc().unix_timestamp() + seconds
 }
 
 fn spec(cron: &str, offset: i32) -> ScheduleSpec {
@@ -41,7 +54,7 @@ fn daily(saved: &str) -> Schedules {
 #[case::garbage("every day", false)]
 #[case::empty("  ", false)]
 fn cron_patterns_have_minute_granularity(#[case] pattern: &str, #[case] valid: bool) {
-    assert_eq!(parse_cron(pattern).is_ok(), valid, "{pattern}");
+    assert_eq!(Cron::parse(pattern).is_ok(), valid, "{pattern}");
 }
 
 #[test]
@@ -58,7 +71,7 @@ fn the_pattern_is_read_at_the_authors_offset() {
         .id
         .clone();
     let next = schedules.get(&id).and_then(next_due);
-    assert_eq!(next, Utc.with_ymd_and_hms(2026, 10, 16, 0, 0, 0).single());
+    assert_eq!(next, Some(datetime!(2026-10-16 00:00 UTC)));
 }
 
 #[rstest]

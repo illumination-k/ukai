@@ -206,7 +206,7 @@ fn refuse(spec: &ScheduleSpec) -> Result<(), Vec<String>> {
 }
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// Writes schedules to their ConfigMaps in the order they changed, each from

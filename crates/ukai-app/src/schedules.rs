@@ -10,10 +10,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, TimeZone, Utc};
 use dioxus::prelude::*;
+use time::{OffsetDateTime, UtcOffset};
 use tokio::time::Instant;
 use ukai_acp::schedules::{SchedulesEndpoint, SchedulesError};
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
@@ -152,26 +153,48 @@ fn open_run_session(app: AppSignals, project: &ProjectId, info: &ScheduleInfo, s
     connect(app, pane, true);
 }
 
+/// The machine's offset from UTC, read once at startup: `time` can only read
+/// it while the process has a single thread.
+static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
+
+/// Read the local offset; call before any thread starts. UTC if it cannot be read.
+pub fn read_local_offset() {
+    let _ = LOCAL_OFFSET.set(UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC));
+}
+
+fn local_offset() -> UtcOffset {
+    LOCAL_OFFSET.get().copied().unwrap_or(UtcOffset::UTC)
+}
+
+fn local_now() -> OffsetDateTime {
+    OffsetDateTime::now_utc().to_offset(local_offset())
+}
+
 /// `at` as the user reads it: time today, else date and time.
-fn when<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Local>) -> String {
-    let at = at.with_timezone(&Local);
-    if at.date_naive() == now.date_naive() {
-        at.format("%H:%M").to_string()
-    } else if at.format("%Y").to_string() == now.format("%Y").to_string() {
-        at.format("%b %-d %H:%M").to_string()
+fn when(at: OffsetDateTime, now: OffsetDateTime) -> String {
+    let at = at.to_offset(now.offset());
+    let clock = format!("{:02}:{:02}", at.hour(), at.minute());
+    if at.date() == now.date() {
+        clock
+    } else if at.year() == now.year() {
+        let month = at.month().to_string();
+        format!("{} {} {clock}", month.get(..3).unwrap_or(&month), at.day())
     } else {
-        at.format("%Y-%m-%d %H:%M").to_string()
+        format!(
+            "{}-{:02}-{:02} {clock}",
+            at.year(),
+            u8::from(at.month()),
+            at.day()
+        )
     }
 }
 
-fn when_unix(seconds: i64, now: &DateTime<Local>) -> String {
-    Utc.timestamp_opt(seconds, 0)
-        .single()
-        .map_or_else(String::new, |at| when(&at, now))
+fn when_unix(seconds: i64, now: OffsetDateTime) -> String {
+    OffsetDateTime::from_unix_timestamp(seconds).map_or_else(|_| String::new(), |at| when(at, now))
 }
 
 /// The dot class and short label of a schedule, as the sidebar shows it.
-fn state_of(info: &ScheduleInfo, now: &DateTime<Local>) -> (&'static str, String) {
+fn state_of(info: &ScheduleInfo, now: OffsetDateTime) -> (&'static str, String) {
     let last = info.last_run.as_ref().map(|run| &run.outcome);
     if last == Some(&Outcome::Running) {
         return ("busy", "running".to_owned());
@@ -238,7 +261,7 @@ pub fn ScheduleList(project: ProjectId, name: String) -> Element {
             })
         }
     });
-    let now = Local::now();
+    let now = local_now();
     let open = match app.layout.read().content(app.layout.read().focused()) {
         Some(PaneContent::Schedule { schedule, .. }) => schedule.clone(),
         _ => None,
@@ -289,7 +312,7 @@ pub fn ScheduleList(project: ProjectId, name: String) -> Element {
                                     key: "{info.schedule.id}",
                                     project: project.clone(),
                                     focused: open.as_deref() == Some(info.schedule.id.as_str()),
-                                    state: state_of(&info, &now),
+                                    state: state_of(&info, now),
                                     info,
                                 }
                             }
@@ -388,7 +411,7 @@ const PRESETS: [(&str, &str); 4] = [
 
 /// The local offset from UTC now, which a saved pattern is read at.
 fn local_offset_minutes() -> i32 {
-    Local::now().offset().local_minus_utc() / 60
+    i32::from(local_offset().whole_minutes())
 }
 
 fn new_spec() -> ScheduleSpec {
@@ -511,11 +534,11 @@ pub fn ScheduleView(
         .iter()
         .map(ToString::to_string)
         .collect();
-    let now = Local::now();
+    let now = local_now();
     let description = schedule::describe(&current.cron);
-    let next = schedule::next_after(&current.cron, &now)
+    let next = schedule::next_after(&current.cron, now)
         .ok()
-        .map(|next| when(&next, &now));
+        .map(|next| when(next, now));
     let running = info
         .as_ref()
         .and_then(|info| info.last_run.as_ref())
@@ -871,7 +894,7 @@ async fn read(endpoint: &SchedulesEndpoint, id: &str) -> Loaded {
 #[component]
 fn RunRow(project: ProjectId, info: ScheduleInfo, run: Run, open: bool) -> Element {
     let app = use_context::<AppSignals>();
-    let now = Local::now();
+    let now = local_now();
     let (state, outcome) = match &run.outcome {
         Outcome::Running => ("busy", "Running".to_owned()),
         Outcome::Succeeded => ("ready", "Succeeded".to_owned()),
@@ -879,7 +902,7 @@ fn RunRow(project: ProjectId, info: ScheduleInfo, run: Run, open: bool) -> Eleme
         Outcome::Stopped => ("idle", "Stopped".to_owned()),
         Outcome::Interrupted => ("idle", "Interrupted (the gateway restarted)".to_owned()),
     };
-    let started = when_unix(run.started, &now);
+    let started = when_unix(run.started, now);
     let took = run
         .finished
         .map(|finished| duration(finished - run.started))

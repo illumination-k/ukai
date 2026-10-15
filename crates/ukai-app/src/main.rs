@@ -33,6 +33,8 @@ pub struct Startup {
 }
 
 fn main() {
+    // Before any thread starts, or the local offset cannot be read.
+    schedules::read_local_offset();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

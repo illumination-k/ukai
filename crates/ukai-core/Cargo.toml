@@ -9,8 +9,6 @@ rust-version.workspace = true
 description = "UI-independent application state for ukai"
 
 [dependencies]
-chrono = { workspace = true }
-croner = { workspace = true }
 globset = { workspace = true }
 percent-encoding = { workspace = true }
 pulldown-cmark = { workspace = true }
@@ -18,6 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 ukai-acp = { workspace = true }
 ukai-config = { workspace = true }
 
@@ -25,6 +24,7 @@ ukai-config = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }
+time = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true
