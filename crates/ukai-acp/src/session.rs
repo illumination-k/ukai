@@ -21,10 +21,10 @@ use agent_client_protocol::schema::v1::{
     AvailableCommandInput, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
     EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
-    InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus, PromptRequest,
-    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus,
+    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, TextResourceContents, ToolCallContent,
     ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
@@ -58,7 +58,14 @@ pub enum SessionEvent {
         prompt: PromptCaps,
         /// Settings the user may change, e.g. model or reasoning effort.
         config: Vec<ConfigOption>,
+        /// The agent answers [`SessionHandle::list_sessions`].
+        list_sessions: bool,
     },
+    /// The sessions the agent keeps for this working directory, from
+    /// [`SessionHandle::list_sessions`].
+    Sessions { sessions: Vec<PastSession> },
+    /// [`SessionHandle::list_sessions`] failed.
+    SessionsFailed { message: String },
     /// The agent's settings changed, replacing every earlier [`ConfigOption`].
     ConfigChanged { options: Vec<ConfigOption> },
     /// The agent rejected a [`SessionHandle::set_config`]; nothing changed.
@@ -132,6 +139,16 @@ pub enum ToolStatus {
     InProgress,
     Completed,
     Failed,
+}
+
+/// A session an agent keeps, as `session/list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastSession {
+    /// Pass as [`SessionOptions::restore`] to continue it.
+    pub id: String,
+    pub title: Option<String>,
+    /// ISO 8601, as the agent sent it.
+    pub updated_at: Option<String>,
 }
 
 /// Context window use and cumulative cost an agent reports for its session.
@@ -311,6 +328,7 @@ enum SessionCommand {
         id: String,
         value: ConfigInput,
     },
+    ListSessions,
 }
 
 /// Sends commands to a running session. Dropping every handle ends it.
@@ -349,6 +367,13 @@ impl SessionHandle {
             id: id.into(),
             value,
         })
+    }
+
+    /// Ask for the sessions the agent keeps for this working directory; needs
+    /// `list_sessions` in [`SessionEvent::Ready`]. The result arrives as
+    /// [`SessionEvent::Sessions`] or [`SessionEvent::SessionsFailed`].
+    pub fn list_sessions(&self) -> bool {
+        self.send(SessionCommand::ListSessions)
     }
 
     fn send(&self, command: SessionCommand) -> bool {
@@ -642,6 +667,11 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         .unwrap_or(false),
                 },
                 config: config_options(config.unwrap_or_default()),
+                list_sessions: init
+                    .agent_capabilities
+                    .session_capabilities
+                    .list
+                    .is_some(),
             });
             ready.store(true, Ordering::SeqCst);
             if running_before_ready.load(Ordering::SeqCst) {
@@ -733,6 +763,20 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                                     Ok(())
                                 })?;
                             }
+                            Some(SessionCommand::ListSessions) => {
+                                let events = events.clone();
+                                let request = list_sessions(cx.clone(), cwd.clone());
+                                cx.spawn(async move {
+                                    let event = match request.await {
+                                        Ok(sessions) => SessionEvent::Sessions { sessions },
+                                        Err(error) => SessionEvent::SessionsFailed {
+                                            message: error.to_string(),
+                                        },
+                                    };
+                                    let _ = events.send(event);
+                                    Ok(())
+                                })?;
+                            }
                             Some(SessionCommand::ResolvePermission { id, option }) => {
                                 if let Some(responder) = parked.remove(&id) {
                                     let outcome = match option {
@@ -752,6 +796,34 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
             Ok(())
         })
         .await
+}
+
+/// Pages of `session/list` to follow before giving up on the rest.
+const MAX_SESSION_PAGES: usize = 10;
+
+/// Every session the agent keeps for `cwd`, following `nextCursor`.
+async fn list_sessions(
+    cx: ConnectionTo<Agent>,
+    cwd: PathBuf,
+) -> Result<Vec<PastSession>, agent_client_protocol::Error> {
+    let mut sessions = Vec::new();
+    let mut cursor = None;
+    for _ in 0..MAX_SESSION_PAGES {
+        let page = cx
+            .send_request(ListSessionsRequest::new().cwd(cwd.clone()).cursor(cursor))
+            .block_task()
+            .await?;
+        sessions.extend(page.sessions.into_iter().map(|info| PastSession {
+            id: info.session_id.0.to_string(),
+            title: info.title,
+            updated_at: info.updated_at,
+        }));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(sessions)
 }
 
 /// Start a turn. The request is prepared so the turn-end event is ordered

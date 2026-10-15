@@ -472,6 +472,11 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと 📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には
   添付のファイル名を出す。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
+- **過去のセッション（hermes に倣う）。** エージェントが `sessionCapabilities.list` を持つと、agent pane のヘッダに
+  時計のボタンを出す。開くと `session/list`（pane のプロジェクトの cwd で絞り、`nextCursor` を 10 ページまで追う）で
+  pane 以外のセッションを更新日時の新しい順に並べ、選ぶとその id を pane に記録して `session/load` / `session/resume`
+  でつなぎ直す（「New session」で新規）。ターン中は切り替えない（接続を落とすとターンが切れうるため）。
+  relay は `session/list` の cwd もワークスペースのものに書き換える。fork（`session/fork`）は ACP で unstable なので未対応。
 - **音声入力。** 入力欄の 🎤（既定 `mod+shift+m`、フォーカス中の pane の入力欄に効く）で録音を始め、もう一度押すと
   止めて文字起こしし、下書きの末尾に足す（日本語・中国語の間は空白なしで、それ以外は空白で繋ぐ）。文字起こしは
   **端末内で完結させる**: whisper.cpp（`ukai-voice`。macOS では Metal）で、外部の API には何も送らない。
