@@ -1,0 +1,27 @@
+[package]
+name = "ukai-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Voice input for ukai: microphone capture and on-device transcription with whisper.cpp"
+
+[dependencies]
+cpal = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+whisper-rs = { workspace = true, features = ["tracing_backend"] }
+
+# Metal makes whisper.cpp fast enough on Apple silicon to dictate with the
+# larger models.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { workspace = true, features = ["tracing_backend", "metal"] }
+
+[dev-dependencies]
+hound = { workspace = true }
+rstest = { workspace = true }
+
+[lints]
+workspace = true

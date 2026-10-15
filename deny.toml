@@ -18,6 +18,9 @@ allow = [
   "MPL-2.0",
   # clipboard-win / error-code, arboard's Windows backend.
   "BSL-1.0",
+  # whisper-rs / whisper-rs-sys (voice input). A public-domain dedication;
+  # whisper.cpp itself is MIT.
+  "Unlicense",
 ]
 confidence-threshold = 0.8
 

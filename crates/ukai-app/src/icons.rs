@@ -20,6 +20,7 @@ pub enum Icon {
     Copy,
     Check,
     History,
+    Mic,
 }
 
 impl Icon {
@@ -51,6 +52,11 @@ impl Icon {
             Self::History => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
                 "M8 5v3l2 1.5",
+            ],
+            Self::Mic => &[
+                "M6 4.5a2 2 0 0 1 4 0v3a2 2 0 0 1-4 0z",
+                "M3.5 7.5a4.5 4.5 0 0 0 9 0",
+                "M8 12v2",
             ],
         }
     }

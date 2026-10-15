@@ -11,13 +11,13 @@
 # emptyDir.
 FROM node:24-trixie-slim
 
-# Build dependencies match .github/workflows/ci_rust.yml; the rest runs the app
+# Build dependencies match mise.toml's [bootstrap.packages]; the rest runs the app
 # headless: Xvfb, a session bus, input and screenshots, and fonts for the UI.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     build-essential ca-certificates curl gh git jq less pkg-config procps ripgrep unzip \
     libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-    libxdo-dev librsvg2-dev libssl-dev \
+    libxdo-dev librsvg2-dev libssl-dev libasound2-dev cmake clang libclang-dev \
     xvfb xauth dbus dbus-x11 xdotool scrot \
     fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*

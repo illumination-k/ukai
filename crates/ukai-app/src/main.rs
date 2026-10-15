@@ -13,6 +13,7 @@ mod projects;
 mod remote_reports;
 mod report_pane;
 mod shortcuts;
+mod voice;
 
 use std::path::{Path, PathBuf};
 

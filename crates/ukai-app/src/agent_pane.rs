@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
@@ -33,6 +34,7 @@ use crate::markdown::Markdown;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::report_pane::project_relative;
 use crate::shortcuts::Shortcuts;
+use crate::voice::{self, Dictation, DictationOwner, Voice};
 
 #[derive(Clone)]
 pub struct AgentSession {
@@ -42,6 +44,8 @@ pub struct AgentSession {
     composer: Composer,
     /// Something happened in the session that the user has not looked at.
     pub unread: Signal<bool>,
+    /// Ends the composer's recording once no session holds the composer.
+    dictation: Rc<DictationOwner>,
 }
 
 /// What the user is putting together for the next prompt. It outlives a
@@ -52,8 +56,9 @@ struct Composer {
     attachments: Signal<Vec<Pending>>,
     /// Comments on diff lines, sent ahead of the draft.
     review: Signal<Vec<ReviewComment>>,
-    /// Why the last file could not be attached.
+    /// Why the last file could not be attached, or dictation failed.
     error: Signal<Option<String>>,
+    dictation: Signal<Dictation>,
 }
 
 impl Composer {
@@ -63,6 +68,7 @@ impl Composer {
             attachments: Signal::new_in_scope(Vec::new(), ScopeId::APP),
             review: Signal::new_in_scope(Vec::new(), ScopeId::APP),
             error: Signal::new_in_scope(None, ScopeId::APP),
+            dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::APP),
         }
     }
 
@@ -115,9 +121,13 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         return;
     };
     let mut transcript = Signal::new_in_scope(Transcript::default(), ScopeId::APP);
-    let (composer, unread) = sessions.peek().get(&pane).map_or_else(
-        || (Composer::new(), Signal::new_in_scope(false, ScopeId::APP)),
-        |session| (session.composer, session.unread),
+    let (composer, unread, dictation) = sessions.peek().get(&pane).map_or_else(
+        || {
+            let composer = Composer::new();
+            let owner = Rc::new(DictationOwner(composer.dictation));
+            (composer, Signal::new_in_scope(false, ScopeId::APP), owner)
+        },
+        |session| (session.composer, session.unread, session.dictation.clone()),
     );
     let restore = if resume { session } else { None };
     let source = match projects.peek().get(&project) {
@@ -161,6 +171,7 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
             transcript,
             composer,
             unread,
+            dictation,
         },
     );
 }
@@ -340,6 +351,14 @@ pub fn stop_turn(sessions: Sessions, pane: PaneId) {
     transcript.write().cancel();
 }
 
+/// Start or stop dictating into `pane`'s composer.
+pub fn toggle_dictation(sessions: Sessions, pane: PaneId, voice: &Voice) {
+    let Some(composer) = sessions.peek().get(&pane).map(|session| session.composer) else {
+        return;
+    };
+    voice::toggle(voice, composer.dictation, composer.draft, composer.error);
+}
+
 /// Header status of an agent pane: css class, label, and the agent's own name.
 pub fn agent_status(
     sessions: Sessions,
@@ -366,6 +385,7 @@ pub fn agent_status(
 pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let app = use_context::<AppSignals>();
     let shortcuts = use_context::<Shortcuts>();
+    let voice = use_context::<Voice>();
     let Some(session) = app.sessions.read().get(&pane).cloned() else {
         return rsx! {
             div { class: "pane-body placeholder",
@@ -407,6 +427,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         mut attachments,
         mut review,
         mut error,
+        dictation,
     } = composer;
     let status = transcript.read().status.clone();
     let mut dropping = use_signal(|| false);
@@ -502,6 +523,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     };
     let current = picked().min(commands.len().saturating_sub(1));
     let stop_title = shortcuts.title("Stop", Action::Stop);
+    let (mic_class, mic_label) = match &*dictation.read() {
+        Dictation::Idle => ("icon mic", "Dictate"),
+        Dictation::Recording(_) => ("icon mic recording", "Stop dictating"),
+        Dictation::Transcribing => ("icon mic transcribing", "Transcribing…"),
+    };
+    let mic_title = shortcuts.title(mic_label, Action::Dictate);
 
     rsx! {
         // `column-reverse` keeps the view pinned to the newest entry.
@@ -715,6 +742,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         title: "Attach files…",
                         onclick: move |_| pick_attachments(composer, transcript),
                         Svg { icon: Icon::Paperclip }
+                    }
+                    button {
+                        class: mic_class,
+                        title: "{mic_title}",
+                        onclick: move |_| voice::toggle(&voice, dictation, draft, error),
+                        Svg { icon: Icon::Mic }
                     }
                     if !config.is_empty() {
                         ConfigControls { pane, options: config, disabled: !writable }
