@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
-use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects};
+use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource};
 
 use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
@@ -75,8 +75,15 @@ pub fn launch_agent(app: AppSignals, project: &ProjectId, agent: &str) {
     }
 }
 
-/// Show the report at `path` (relative to the root of `project`) in `pane`.
-pub fn open_report(app: AppSignals, pane: PaneId, project: &ProjectId, path: PathBuf) {
+/// Show the report at `path` in `pane`: a file of `project` on this machine,
+/// or one of a gateway agent's workspace, depending on `source`.
+pub fn open_report(
+    app: AppSignals,
+    pane: PaneId,
+    project: &ProjectId,
+    path: PathBuf,
+    source: ReportSource,
+) {
     let AppSignals {
         mut layout,
         mut projects,
@@ -87,6 +94,7 @@ pub fn open_report(app: AppSignals, pane: PaneId, project: &ProjectId, path: Pat
         PaneContent::Report {
             project: project.clone(),
             path,
+            source,
         },
     );
     layout.write().focus(pane);
@@ -128,7 +136,7 @@ pub fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> (Option
         Some(PaneContent::Agent { project, agent, .. }) => {
             (Some(project_name(project)), agent.clone())
         }
-        Some(PaneContent::Report { project, path }) => {
+        Some(PaneContent::Report { project, path, .. }) => {
             let file = path.file_name().map_or_else(
                 || path.display().to_string(),
                 |name| name.to_string_lossy().into_owned(),
@@ -342,8 +350,13 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Agent { session, .. } => rsx! {
                     AgentView { pane, has_saved_session: session.is_some() }
                 },
-                PaneContent::Report { project, path } => rsx! {
-                    ReportView { pane, project, path }
+                PaneContent::Report { project, path, source } => rsx! {
+                    ReportView {
+                        pane,
+                        project,
+                        path,
+                        source,
+                    }
                 },
             }
         }

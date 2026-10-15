@@ -13,15 +13,21 @@ use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
-    Attachment, FileDiff, FsRoot, PaneWorkspace, Prompt, SessionEvent, SessionEvents,
-    SessionHandle, SessionOptions, ToolStatus,
+    Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot,
+    PaneWorkspace, Prompt, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
+    SlashCommand, ToolStatus,
 };
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
-use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
+use ukai_core::slash;
+use ukai_core::{
+    Alert, Entry, PaneContent, PaneId, ProjectId, Queued, ReportSource, Status, Transcript,
+    usage_label,
+};
 
 use crate::alert;
+use crate::clipboard;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::markdown::Markdown;
@@ -64,6 +70,24 @@ impl Composer {
             error: Signal::new_in_scope(None, ScopeId::APP),
             dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::APP),
         }
+    }
+
+    /// Put an unsent message back in front of what is being written.
+    fn restore(mut self, steer: Queued) {
+        let draft = self.draft.peek().clone();
+        let text = match (steer.text.is_empty(), draft.is_empty()) {
+            (_, true) => steer.text,
+            (true, false) => draft,
+            (false, false) => format!("{}\n\n{draft}", steer.text),
+        };
+        self.draft.set(text);
+        let mut attachments: Vec<Pending> = steer
+            .attachments
+            .into_iter()
+            .map(|(name, attachment)| Pending { name, attachment })
+            .collect();
+        attachments.extend(self.attachments.peek().iter().cloned());
+        self.attachments.set(attachments);
     }
 }
 
@@ -122,6 +146,9 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
                     }
                     let raised = Alert::of(&event);
                     transcript.write().apply(event);
+                    if transcript.peek().queued.is_some() {
+                        follow_queued(sessions, pane, transcript, composer);
+                    }
                     if let Some(raised) = raised {
                         alert::raise(&window, layout, pane, unread, &source, &raised);
                     }
@@ -171,6 +198,32 @@ fn start_session(
             restore,
         },
     ))
+}
+
+/// Send the message queued behind a turn that has stopped, or hand it back to
+/// the composer when the session cannot take it.
+fn follow_queued(
+    sessions: Sessions,
+    pane: PaneId,
+    mut transcript: Signal<Transcript>,
+    composer: Composer,
+) {
+    let Some(steer) = transcript.write().take_queued() else {
+        return;
+    };
+    // A reconnect replaces the pane's session; this transcript's handle is gone then.
+    let handle = sessions
+        .peek()
+        .get(&pane)
+        .filter(|session| session.transcript == transcript)
+        .and_then(|session| session.handle.clone());
+    let idle = transcript.peek().status == Status::Idle;
+    if idle && handle.is_some_and(|handle| handle.prompt(steer.prompt())) {
+        let names = steer.names();
+        transcript.write().push_prompt(steer.text, names);
+    } else {
+        composer.restore(steer);
+    }
 }
 
 /// Stop `pane`'s turn, if it is running one.
@@ -268,6 +321,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     } = composer;
     let status = transcript.read().status.clone();
     let mut dropping = use_signal(|| false);
+    // The highlighted slash command, and whether escape hid the list.
+    let mut picked = use_signal(|| 0_usize);
+    let mut dismissed = use_signal(|| false);
 
     let mut send = {
         let handle = handle.clone();
@@ -275,18 +331,43 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
             let text = draft.read().trim().to_owned();
             let comments = review.read().clone();
             let pending = attachments.read().clone();
+            let status = transcript.read().status.clone();
             if (text.is_empty() && comments.is_empty() && pending.is_empty())
-                || transcript.read().status != Status::Idle
+                || !matches!(status, Status::Idle | Status::Busy)
             {
                 return;
             }
             let text = review::review_prompt(&comments, &text);
+            let busy = status == Status::Busy;
+            // An agent that cannot take a message mid-turn is stopped first.
+            if busy && !transcript.read().prompt_caps.steering {
+                stop_turn(app.sessions, pane);
+                transcript.write().queue(Queued {
+                    text,
+                    attachments: pending
+                        .into_iter()
+                        .map(|p| (p.name, p.attachment))
+                        .collect(),
+                });
+                draft.set(String::new());
+                review.set(Vec::new());
+                attachments.set(Vec::new());
+                error.set(None);
+                return;
+            }
             let names = pending.iter().map(|p| p.name.clone()).collect();
             let prompt = Prompt {
                 text: text.clone(),
                 attachments: pending.into_iter().map(|p| p.attachment).collect(),
             };
-            if handle.as_ref().is_some_and(|h| h.prompt(prompt)) {
+            let sent = handle.as_ref().is_some_and(|h| {
+                if busy {
+                    h.steer(prompt)
+                } else {
+                    h.prompt(prompt)
+                }
+            });
+            if sent {
                 transcript.write().push_prompt(text, names);
                 draft.set(String::new());
                 review.set(Vec::new());
@@ -301,16 +382,36 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let busy = status == Status::Busy;
     let awaiting = transcript.read().awaiting_permission();
     let idle = status == Status::Idle;
-    // The next message can be written while a turn runs; it sends once idle.
+    // A message sent while a turn runs steers it: it joins the turn, or for
+    // an agent that cannot take that, the turn stops and the message follows.
     let writable = idle || busy;
+    let steering = transcript.read().prompt_caps.steering;
+    let steer = transcript.read().queued.clone();
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
+    let config = transcript.read().config.clone();
     let card_class = match (writable, dropping()) {
         (_, true) => "composer-card dropping",
         (true, false) => "composer-card",
         (false, false) => "composer-card disabled",
     };
     let send_hint = shortcuts.keymap.hint(Action::Send);
+    let usage = transcript.read().usage.as_ref().map(|usage| {
+        (
+            usage_label(usage),
+            format!("{} of {} context tokens in use", usage.used, usage.size),
+        )
+    });
+    let commands: Vec<SlashCommand> = if writable && !dismissed() {
+        slash::suggestions(&draft.read(), &transcript.read().commands)
+            .into_iter()
+            .take(MAX_SUGGESTIONS)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let current = picked().min(commands.len().saturating_sub(1));
     let stop_title = shortcuts.title("Stop", Action::Stop);
     let (mic_class, mic_label) = match &*dictation.read() {
         Dictation::Idle => ("icon mic", "Dictate"),
@@ -335,7 +436,44 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 if busy && !awaiting {
                     div { class: "working",
                         span { class: "dot busy" }
-                        "Working…"
+                        if steer.is_some() {
+                            "Stopping to take your message…"
+                        } else {
+                            "Working…"
+                        }
+                    }
+                }
+                if let Some(steer) = steer {
+                    div { class: "steer",
+                        div { class: "msg user queued",
+                            "{steer.text}"
+                            if !steer.attachments.is_empty() {
+                                div { class: "msg-attachments",
+                                    for (index, name) in steer.names().into_iter().enumerate() {
+                                        span { key: "{index}", class: "chip",
+                                            Svg {
+                                                icon: Icon::Paperclip,
+                                                size: 11,
+                                            }
+                                            span { class: "name", "{name}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "steer-note",
+                            span { "Sends once the turn stops" }
+                            button {
+                                class: "small outline",
+                                title: "Move back to the message box",
+                                onclick: move |_| {
+                                    if let Some(steer) = transcript.write().queued.take() {
+                                        composer.restore(steer);
+                                    }
+                                },
+                                "Edit"
+                            }
+                        }
                     }
                 }
             }
@@ -415,21 +553,72 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 if let Some(message) = error() {
                     div { class: "composer-error", "{message}" }
                 }
+                if !commands.is_empty() {
+                    div { class: "slash-list",
+                        for (index, command) in commands.iter().enumerate() {
+                            div {
+                                key: "{command.name}",
+                                class: if index == current { "slash-item selected" } else { "slash-item" },
+                                onmouseenter: move |_| picked.set(index),
+                                // Keep the focus in the textarea.
+                                onmousedown: move |event| event.prevent_default(),
+                                onclick: {
+                                    let command = command.clone();
+                                    move |_| {
+                                        draft.set(slash::completion(&command));
+                                        picked.set(0);
+                                    }
+                                },
+                                span { class: "name", "/{command.name}" }
+                                if let Some(hint) = &command.hint {
+                                    span { class: "hint", "{hint}" }
+                                }
+                                span { class: "description", "{command.description}" }
+                            }
+                        }
+                    }
+                }
                 textarea {
                     rows: "2",
                     placeholder: match status {
-                        Status::Idle => "Message the agent — drop files or images here",
-                        Status::Busy => "Waiting for the agent…",
+                        Status::Idle => "Message the agent — / for commands, drop files or images here",
+                        Status::Busy if steering => "Steer the agent — your message joins this turn",
+                        Status::Busy => {
+                            "Steer the agent — sending stops this turn and sends your message"
+                        }
                         Status::Connecting => "Connecting…",
                         Status::Closed { .. } => "Disconnected",
                     },
                     disabled: !writable,
                     value: "{draft}",
-                    oninput: move |event| draft.set(event.value()),
+                    oninput: move |event| {
+                        draft.set(event.value());
+                        picked.set(0);
+                        dismissed.set(false);
+                    },
                     onkeydown: {
                         let shortcuts = shortcuts.clone();
                         move |event: KeyboardEvent| {
-                            if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
+                            if !commands.is_empty() && !event.is_composing() {
+                                let len = commands.len() as isize;
+                                match event.key() {
+                                    Key::ArrowDown => {
+                                        picked.set((current as isize + 1).rem_euclid(len) as usize);
+                                    }
+                                    Key::ArrowUp => {
+                                        picked.set((current as isize - 1).rem_euclid(len) as usize);
+                                    }
+                                    Key::Tab | Key::Enter => {
+                                        draft.set(slash::completion(&commands[current]));
+                                        picked.set(0);
+                                    }
+                                    // Not the app's: escape here only hides the list.
+                                    Key::Escape => dismissed.set(true),
+                                    _ => return,
+                                }
+                                event.prevent_default();
+                                event.stop_propagation();
+                            } else if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
                                 event.prevent_default();
                                 event.stop_propagation();
                                 send();
@@ -450,11 +639,17 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         onclick: move |_| voice::toggle(&voice, dictation, draft, error),
                         Svg { icon: Icon::Mic }
                     }
+                    if !config.is_empty() {
+                        ConfigControls { pane, options: config, disabled: !writable }
+                    }
                     if let Some(hint) = send_hint {
                         span { class: "hint",
                             kbd { "{hint}" }
                             " send"
                         }
+                    }
+                    if let Some((label, title)) = usage {
+                        span { class: "usage", title: "{title}", "{label}" }
                     }
                     if busy {
                         button {
@@ -463,13 +658,186 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                             onclick: cancel,
                             Svg { icon: Icon::Stop, size: 12 }
                         }
-                    } else {
-                        button {
-                            class: "round primary",
-                            title: "Send",
-                            disabled: !idle || (draft.read().trim().is_empty() && !has_extras),
-                            onclick: move |_| send_on_click(),
-                            Svg { icon: Icon::Send }
+                    }
+                    button {
+                        class: "round primary",
+                        title: match (busy, steering) {
+                            (false, _) => "Send",
+                            (true, true) => "Steer: add to this turn",
+                            (true, false) => "Steer: stop this turn and send",
+                        },
+                        disabled: !writable || (draft.read().trim().is_empty() && !has_extras),
+                        onclick: move |_| send_on_click(),
+                        Svg { icon: Icon::Send }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The agent's settings, e.g. model and reasoning effort, changed through
+/// `session/set_config_option`. A change shows once the agent confirms it.
+#[component]
+fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> Element {
+    let sessions = use_context::<AppSignals>().sessions;
+    let set = move |id: String, value: ConfigInput| {
+        if let Some(handle) = sessions.read().get(&pane).and_then(|s| s.handle.clone()) {
+            handle.set_config(id, value);
+        }
+    };
+    rsx! {
+        div { class: "composer-config",
+            for option in options {
+                {
+                    let id = option.id.clone();
+                    let title = match &option.description {
+                        Some(description) => format!("{}: {description}", option.name),
+                        None => option.name.clone(),
+                    };
+                    match option.value {
+                        ConfigValue::Select { current, choices } => rsx! {
+                            ConfigSelect {
+                                key: "{option.id}",
+                                name: option.name.clone(),
+                                title,
+                                current,
+                                choices,
+                                disabled,
+                                onpick: move |value| set(id.clone(), ConfigInput::Select(value)),
+                            }
+                        },
+                        ConfigValue::Toggle(on) => rsx! {
+                            label { key: "{option.id}", class: "config-toggle", title: "{title}",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: on,
+                                    disabled,
+                                    onchange: move |event| set(id.clone(), ConfigInput::Toggle(event.checked())),
+                                }
+                                "{option.name}"
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One select setting as a button and a menu drawn like the app's other
+/// lists, instead of the native `select` whose popup the web view leaves to
+/// the platform.
+#[component]
+fn ConfigSelect(
+    name: String,
+    title: String,
+    current: String,
+    choices: Vec<ConfigChoice>,
+    disabled: bool,
+    onpick: EventHandler<String>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut highlighted = use_signal(|| 0usize);
+    let shown = open() && !disabled;
+    let len = choices.len();
+    let selected = choices.iter().position(|choice| choice.value == current);
+    let label = selected.map_or(current.clone(), |at| choices[at].name.clone());
+    let mut pick = move |value: String| {
+        open.set(false);
+        onpick.call(value);
+    };
+    let on_key = {
+        let choices = choices.clone();
+        move |event: KeyboardEvent| {
+            let step = |delta: isize| {
+                (highlighted() as isize + delta).rem_euclid(len.max(1) as isize) as usize
+            };
+            match event.key() {
+                Key::ArrowDown => highlighted.set(step(1)),
+                Key::ArrowUp => highlighted.set(step(-1)),
+                Key::Enter if !event.is_composing() => {
+                    if let Some(choice) = choices.get(highlighted()) {
+                        pick(choice.value.clone());
+                    }
+                }
+                // Not the app's: escape here only closes the menu.
+                Key::Escape | Key::Tab => open.set(false),
+                _ => return,
+            }
+            event.prevent_default();
+            event.stop_propagation();
+        }
+    };
+    // Each choice with its index in `choices` and, first in a group, the
+    // group's name to head it.
+    let rows: Vec<(usize, Option<String>, ConfigChoice)> =
+        ukai_core::config::choice_groups(&choices)
+            .into_iter()
+            .flat_map(|(group, run)| {
+                run.iter().enumerate().map(move |(i, choice)| {
+                    (group.filter(|_| i == 0).map(str::to_owned), choice.clone())
+                })
+            })
+            .enumerate()
+            .map(|(index, (group, choice))| (index, group, choice))
+            .collect();
+
+    rsx! {
+        div { class: "config-select",
+            button {
+                class: if shown { "config-trigger open" } else { "config-trigger" },
+                title: "{title}",
+                aria_label: "{name}",
+                aria_haspopup: "listbox",
+                aria_expanded: shown,
+                disabled,
+                onclick: move |_| {
+                    highlighted.set(selected.unwrap_or(0));
+                    open.toggle();
+                },
+                span { class: "name", "{label}" }
+                span { class: "caret",
+                    Svg { icon: Icon::Chevron, size: 10 }
+                }
+            }
+            if shown {
+                div {
+                    class: "config-backdrop",
+                    onclick: move |_| open.set(false),
+                }
+                div {
+                    class: "config-menu",
+                    role: "listbox",
+                    aria_label: "{name}",
+                    tabindex: "-1",
+                    onmounted: move |event| async move {
+                        let _ = event.set_focus(true).await;
+                    },
+                    onkeydown: on_key,
+                    for (at, group, choice) in rows {
+                        if let Some(group) = group {
+                            div { class: "config-group", "{group}" }
+                        }
+                        div {
+                            class: if at == highlighted() { "config-item highlighted" } else { "config-item" },
+                            role: "option",
+                            aria_selected: Some(at) == selected,
+                            title: choice.description.clone().unwrap_or_default(),
+                            onmouseenter: move |_| highlighted.set(at),
+                            onclick: {
+                                let value = choice.value.clone();
+                                move |_| pick(value.clone())
+                            },
+                            span { class: "check",
+                                if Some(at) == selected {
+                                    Svg { icon: Icon::Check, size: 12 }
+                                }
+                            }
+                            span { class: "label", "{choice.name}" }
+                            if let Some(description) = &choice.description {
+                                span { class: "description", "{description}" }
+                            }
                         }
                     }
                 }
@@ -477,6 +845,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         }
     }
 }
+
+/// Slash commands listed at once while completing.
+const MAX_SUGGESTIONS: usize = 8;
 
 /// Add the file at `path` to the next prompt, in the form the agent accepts.
 fn attach(composer: Composer, transcript: Signal<Transcript>, path: &Path, bytes: Vec<u8>) {
@@ -515,6 +886,42 @@ fn pick_attachments(composer: Composer, transcript: Signal<Transcript>) {
     });
 }
 
+/// An agent message, with a button that copies its text whole.
+#[component]
+fn AgentMessage(text: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let copy = {
+        let text = text.clone();
+        move |_| {
+            if clipboard::copy(&text) {
+                copied.set(true);
+                spawn(async move {
+                    tokio::time::sleep(COPIED_FOR).await;
+                    copied.set(false);
+                });
+            }
+        }
+    };
+    rsx! {
+        div { class: "agent-msg",
+            div { class: "msg agent",
+                Markdown { source: text.clone() }
+            }
+            div { class: "msg-actions",
+                button {
+                    class: if copied() { "icon copied" } else { "icon" },
+                    title: if copied() { "Copied" } else { "Copy" },
+                    onclick: copy,
+                    Svg { icon: if copied() { Icon::Check } else { Icon::Copy } }
+                }
+            }
+        }
+    }
+}
+
+/// How long the copy button shows that it copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[component]
 fn EntryView(pane: PaneId, entry: Entry) -> Element {
     let app = use_context::<AppSignals>();
@@ -536,9 +943,7 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
             }
         },
         Entry::Agent { text } => rsx! {
-            div { class: "msg agent",
-                Markdown { source: text }
-            }
+            AgentMessage { text }
         },
         Entry::Thought { text } => rsx! {
             details { class: "thought",
@@ -673,7 +1078,7 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                             title: "Show it in a pane",
                             onclick: move |_| {
                                 if let Some(target) = launch_target(app) {
-                                    open_report(app, target, &project, relative.clone());
+                                    open_report(app, target, &project, relative.clone(), ReportSource::Project);
                                 }
                             },
                             Svg { icon: Icon::External, size: 12 }

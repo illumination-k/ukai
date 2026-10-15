@@ -173,6 +173,57 @@ fn a_turn_finishes_without_a_client_and_replays_on_load() {
     );
 }
 
+fn steer(hub: &mut Hub, id: u64, text: &str) -> Vec<Output> {
+    hub.from_client(
+        A,
+        req(
+            id,
+            ukai_acp::STEER_METHOD,
+            json!({ "sessionId": SID, "prompt": [{ "type": "text", "text": text }] }),
+        ),
+    )
+}
+
+fn replayed_texts(hub: &mut Hub) -> Vec<String> {
+    hub.disconnect(A);
+    hub.connect(B);
+    let out = hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
+    client_messages(&out, B)
+        .iter()
+        .filter_map(|m| {
+            m.pointer("/params/update/content/text")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn a_steer_into_a_running_turn_is_replayed() {
+    let mut hub = with_session();
+    let turn = prompt(&mut hub, A, 3, "do it");
+    let steered = agent_id(&steer(&mut hub, 4, "left instead"));
+    hub.from_agent(result(json!(steered), json!({ "outcome": "injected" })));
+    hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
+    assert_eq!(replayed_texts(&mut hub), ["do it", "left instead"]);
+}
+
+#[test]
+fn a_steer_without_a_turn_is_not_recorded() {
+    // The agent hands it back, and the client sends it as a prompt.
+    let mut hub = with_session();
+    let steered = agent_id(&steer(&mut hub, 3, "hello"));
+    let out = hub.from_agent(result(
+        json!(steered),
+        json!({ "outcome": "promptRequired" }),
+    ));
+    assert_eq!(
+        client_messages(&out, A),
+        [result(json!(3), json!({ "outcome": "promptRequired" }))]
+    );
+    assert!(replayed_texts(&mut hub).is_empty());
+}
+
 #[test]
 fn a_client_attaching_mid_turn_hears_it_running_and_ending() {
     let mut hub = with_session();
@@ -345,4 +396,48 @@ fn agent_requests_outside_a_session_are_refused() {
         [Output::Agent(message)] => assert_eq!(message["error"]["code"], -32601),
         other => panic!("{other:?}"),
     }
+}
+
+fn model_option(current: &str) -> Value {
+    json!([{
+        "id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": current,
+        "options": [{ "value": "a", "name": "A" }, { "value": "b", "name": "B" }]
+    }])
+}
+
+#[test]
+fn a_load_answers_with_the_settings_changed_since_setup() {
+    let mut hub = with_session();
+    let sent = hub.from_client(
+        A,
+        req(
+            3,
+            "session/set_config_option",
+            json!({ "sessionId": SID, "configId": "model", "value": "b" }),
+        ),
+    );
+    hub.from_agent(result(
+        json!(agent_id(&sent)),
+        json!({ "configOptions": model_option("b") }),
+    ));
+    let load = |hub: &mut Hub, conn| {
+        hub.disconnect(A);
+        hub.connect(conn);
+        let out = hub.from_client(conn, req(1, "session/resume", json!({ "sessionId": SID })));
+        client_messages(&out, conn)
+            .last()
+            .and_then(|answer| answer.pointer("/result/configOptions").cloned())
+    };
+    assert_eq!(load(&mut hub, B), Some(model_option("b")));
+
+    // The agent may also change them on its own.
+    hub.from_agent(notification(
+        "session/update",
+        json!({
+            "sessionId": SID,
+            "update": { "sessionUpdate": "config_option_update", "configOptions": model_option("a") }
+        }),
+    ));
+    assert_eq!(load(&mut hub, A), Some(model_option("a")));
 }

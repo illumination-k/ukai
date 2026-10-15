@@ -13,6 +13,7 @@ name = "ukai"
 path = "src/main.rs"
 
 [dependencies]
+arboard = { workspace = true }
 dioxus = { workspace = true, features = ["desktop"] }
 notify-rust = { workspace = true }
 rfd = { workspace = true }

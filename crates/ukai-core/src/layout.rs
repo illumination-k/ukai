@@ -59,8 +59,54 @@ pub enum PaneContent {
     },
     Report {
         project: ProjectId,
+        /// Relative to the project root, or to the checkout of the workspace
+        /// in [`ReportSource::Agent`].
         path: PathBuf,
+        /// Where the file is read from; the project's own tree unless said
+        /// otherwise, which is also what files written before panes had a
+        /// source mean.
+        #[serde(default, skip_serializing_if = "ReportSource::is_project")]
+        source: ReportSource,
     },
+}
+
+/// Where a report pane reads its file from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReportSource {
+    /// The project root on this machine.
+    #[default]
+    Project,
+    /// The workspace of a gateway agent, served from its pod through the
+    /// gateway. The agent and workspace are named rather than the pane that
+    /// opened them, so the report survives a restart — and closing the agent
+    /// pane — as long as the workspace is still running.
+    Agent {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PaneWorkspace>,
+    },
+}
+
+impl ReportSource {
+    pub fn is_project(&self) -> bool {
+        matches!(self, Self::Project)
+    }
+
+    /// The gateway agent whose workspace this reads, if any.
+    pub fn agent(&self) -> Option<&str> {
+        match self {
+            Self::Project => None,
+            Self::Agent { agent, .. } => Some(agent),
+        }
+    }
+
+    pub fn workspace(&self) -> Option<&PaneWorkspace> {
+        match self {
+            Self::Project => None,
+            Self::Agent { workspace, .. } => workspace.as_ref(),
+        }
+    }
 }
 
 impl PaneContent {

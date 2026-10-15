@@ -17,6 +17,7 @@ use crate::projects::{
     AppSignals, OpenAgent, Paths, add_project, load_config, open_agents, pick_and_add_project,
     reload_project, remove_project,
 };
+use crate::remote_reports::Follow;
 use crate::report_pane::ReportList;
 use crate::shortcuts::{Shortcuts, on_keydown};
 use crate::voice::Voice;
@@ -44,6 +45,7 @@ pub fn App() -> Element {
             configs: Signal::new(configs),
             layout: Signal::new(state.layout),
             sessions: Signal::new(HashMap::new()),
+            reports: Signal::new(HashMap::new()),
             palette: Signal::new(false),
         }
     });
@@ -82,6 +84,7 @@ pub fn App() -> Element {
             onkeydown: move |event| on_keydown(app, &shortcuts, &event),
             Sidebar {}
             Workbench {}
+            Follow {}
             if palette() {
                 Palette {}
             }

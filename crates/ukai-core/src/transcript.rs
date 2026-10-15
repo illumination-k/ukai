@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome, SessionEvent,
-    ToolStatus,
+    Attachment, ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, Prompt,
+    PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,13 +58,47 @@ pub enum Entry {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Transcript {
     pub agent: Option<String>,
     pub status: Status,
     pub entries: Vec<Entry>,
     /// What the agent accepts in a prompt, known once it is ready.
     pub prompt_caps: PromptCaps,
+    /// The agent's latest report of context use and cost, if it sends any.
+    pub usage: Option<Usage>,
+    /// Settings the agent lets the user change, e.g. model or reasoning effort.
+    pub config: Vec<ConfigOption>,
+    /// The slash commands the agent last said it offers.
+    pub commands: Vec<SlashCommand>,
+    /// What the user sent while a turn ran, for an agent that cannot be
+    /// steered: the turn is being stopped, and this goes out once it has.
+    pub queued: Option<Queued>,
+}
+
+/// A message sent while a turn runs to an agent without
+/// [`PromptCaps::steering`]: the turn is stopped, and this is sent as the next one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Queued {
+    pub text: String,
+    /// Each attachment with the name it is shown under.
+    pub attachments: Vec<(String, Attachment)>,
+}
+
+impl Queued {
+    pub fn names(&self) -> Vec<String> {
+        self.attachments
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn prompt(&self) -> Prompt {
+        Prompt {
+            text: self.text.clone(),
+            attachments: self.attachments.iter().map(|(_, a)| a.clone()).collect(),
+        }
+    }
 }
 
 impl Default for Transcript {
@@ -74,6 +108,10 @@ impl Default for Transcript {
             status: Status::Connecting,
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
+            usage: None,
+            config: Vec::new(),
+            commands: Vec::new(),
+            queued: None,
         }
     }
 }
@@ -162,6 +200,32 @@ impl Transcript {
         }
     }
 
+    /// Queue `message` to follow the running turn, which the caller stops. A
+    /// second message before the turn has stopped joins the first.
+    pub fn queue(&mut self, message: Queued) {
+        self.cancel();
+        match &mut self.queued {
+            Some(queued) => {
+                if queued.text.is_empty() {
+                    queued.text = message.text;
+                } else if !message.text.is_empty() {
+                    queued.text = format!("{}\n\n{}", queued.text, message.text);
+                }
+                queued.attachments.extend(message.attachments);
+            }
+            None => self.queued = Some(message),
+        }
+    }
+
+    /// The queued [`Queued`], once the turn it waits on is over: send it when
+    /// the status is [`Status::Idle`], hand it back to the user otherwise.
+    pub fn take_queued(&mut self) -> Option<Queued> {
+        match self.status {
+            Status::Busy | Status::Connecting => None,
+            Status::Idle | Status::Closed { .. } => self.queued.take(),
+        }
+    }
+
     pub fn apply(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::Preparing { message } => self.entries.push(Entry::Notice {
@@ -173,10 +237,12 @@ impl Transcript {
                 agent,
                 restore,
                 prompt,
+                config,
                 ..
             } => {
                 self.agent = agent;
                 self.prompt_caps = prompt;
+                self.config = config;
                 self.status = Status::Idle;
                 let notice = match restore {
                     RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
@@ -194,6 +260,11 @@ impl Transcript {
                     });
                 }
             }
+            SessionEvent::ConfigChanged { options } => self.config = options,
+            SessionEvent::ConfigFailed { message } => self.entries.push(Entry::Notice {
+                text: format!("could not change the setting: {message}"),
+                error: true,
+            }),
             SessionEvent::UserMessage { text } => match self.entries.last_mut() {
                 Some(Entry::User { text: last, .. }) => last.push_str(&text),
                 _ => self.entries.push(Entry::User {
@@ -282,6 +353,7 @@ impl Transcript {
                     _ => self.entries.push(Entry::Plan { items }),
                 }
             }
+            SessionEvent::Commands { commands } => self.commands = commands,
             SessionEvent::PermissionRequested { id, title, options } => {
                 self.entries.push(Entry::Permission {
                     id,
@@ -291,6 +363,7 @@ impl Transcript {
                 });
             }
             SessionEvent::FileWritten { path } => self.entries.push(Entry::FileWritten { path }),
+            SessionEvent::Usage(usage) => self.usage = Some(usage),
             SessionEvent::TurnEnded { stop_reason } => {
                 if stop_reason != "end_turn" {
                     self.entries.push(Entry::Notice {
@@ -300,6 +373,10 @@ impl Transcript {
                 }
                 self.status = Status::Idle;
             }
+            SessionEvent::SteerFailed { message } => self.entries.push(Entry::Notice {
+                text: format!("could not steer the turn: {message}"),
+                error: true,
+            }),
             SessionEvent::PromptFailed { message } => {
                 self.entries.push(Entry::Notice {
                     text: message,
@@ -327,6 +404,39 @@ impl Transcript {
     }
 }
 
+/// Short text for a usage report, e.g. `53k / 200k (27%) · $0.05`.
+pub fn usage_label(usage: &Usage) -> String {
+    let mut label = format!("{} / {}", tokens(usage.used), tokens(usage.size));
+    if usage.size > 0 {
+        let percent = (usage.used as f64 / usage.size as f64 * 100.0).round();
+        label.push_str(&format!(" ({percent}%)"));
+    }
+    if let Some(cost) = &usage.cost {
+        let amount = format!("{:.2}", cost.amount);
+        match cost.currency.as_str() {
+            "USD" => label.push_str(&format!(" · ${amount}")),
+            currency => label.push_str(&format!(" · {amount} {currency}")),
+        }
+    }
+    label
+}
+
+/// A token count rounded for display: `950`, `1.2k`, `53k`, `1.5M`.
+fn tokens(count: u64) -> String {
+    let (value, unit) = match count {
+        0..1_000 => return count.to_string(),
+        // Below 999.5k so rounding never shows `1000k`.
+        1_000..999_500 => (count as f64 / 1_000.0, "k"),
+        _ => (count as f64 / 1_000_000.0, "M"),
+    };
+    if value < 10.0 {
+        let text = format!("{value:.1}");
+        format!("{}{unit}", text.trim_end_matches(".0"))
+    } else {
+        format!("{}{unit}", value.round())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -347,6 +457,7 @@ mod tests {
             session_id: "s".into(),
             restore,
             prompt: PromptCaps::default(),
+            config: Vec::new(),
         }
     }
 
@@ -407,6 +518,43 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn usage_keeps_the_latest_report() {
+        let report = |used| {
+            SessionEvent::Usage(Usage {
+                used,
+                size: 100,
+                cost: None,
+            })
+        };
+        let transcript = folded([report(10), msg("a"), report(20)]);
+        assert_eq!(transcript.usage.map(|u| u.used), Some(20));
+        assert_eq!(transcript.entries, vec![Entry::Agent { text: "a".into() }]);
+    }
+
+    #[rstest]
+    #[case::small(950, 1_000, None, "950 / 1k (95%)")]
+    #[case::thousands(53_000, 200_000, Some((0.045, "USD")), "53k / 200k (27%) · $0.04")]
+    #[case::fraction(1_234, 1_000_000, None, "1.2k / 1M (0%)")]
+    #[case::near_million(999_600, 2_000_000, None, "1M / 2M (50%)")]
+    #[case::other_currency(0, 0, Some((1.5, "EUR")), "0 / 0 · 1.50 EUR")]
+    fn usage_labels(
+        #[case] used: u64,
+        #[case] size: u64,
+        #[case] cost: Option<(f64, &str)>,
+        #[case] expected: &str,
+    ) {
+        let usage = Usage {
+            used,
+            size,
+            cost: cost.map(|(amount, currency)| ukai_acp::Cost {
+                amount,
+                currency: currency.into(),
+            }),
+        };
+        assert_eq!(usage_label(&usage), expected);
     }
 
     #[test]
@@ -511,14 +659,145 @@ mod tests {
         let caps = PromptCaps {
             image: true,
             embedded_context: false,
+            steering: false,
         };
         let transcript = folded([SessionEvent::Ready {
             agent: None,
             session_id: "s".into(),
             restore: RestoreOutcome::Fresh,
             prompt: caps,
+            config: Vec::new(),
         }]);
         assert_eq!(transcript.prompt_caps, caps);
+    }
+
+    fn effort(current: &str) -> ConfigOption {
+        ConfigOption {
+            id: "effort".into(),
+            name: "Effort".into(),
+            description: None,
+            category: Some("thought_level".into()),
+            value: ukai_acp::ConfigValue::Select {
+                current: current.into(),
+                choices: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn config_follows_ready_and_updates_and_failures_leave_it() {
+        let mut transcript = folded([SessionEvent::Ready {
+            agent: None,
+            session_id: "s".into(),
+            restore: RestoreOutcome::Fresh,
+            prompt: PromptCaps::default(),
+            config: vec![effort("low")],
+        }]);
+        assert_eq!(transcript.config, [effort("low")]);
+        transcript.apply(SessionEvent::ConfigChanged {
+            options: vec![effort("high")],
+        });
+        assert_eq!(transcript.config, [effort("high")]);
+        transcript.apply(SessionEvent::ConfigFailed {
+            message: "no".into(),
+        });
+        assert_eq!(transcript.config, [effort("high")]);
+        assert!(matches!(
+            transcript.entries.as_slice(),
+            [Entry::Notice { error: true, .. }]
+        ));
+        assert_eq!(transcript.status, Status::Idle);
+    }
+
+    fn queued(text: &str, files: &[&str]) -> Queued {
+        Queued {
+            text: text.into(),
+            attachments: files
+                .iter()
+                .map(|name| {
+                    let link = Attachment::Link {
+                        name: (*name).into(),
+                        uri: format!("file:///{name}"),
+                    };
+                    ((*name).to_owned(), link)
+                })
+                .collect(),
+        }
+    }
+
+    fn running() -> Transcript {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        transcript.push_prompt("first", Vec::new());
+        transcript
+    }
+
+    #[test]
+    fn queued_waits_for_the_turn_to_stop() {
+        let mut transcript = running();
+        transcript.apply(SessionEvent::PermissionRequested {
+            id: 1,
+            title: "write".into(),
+            options: Vec::new(),
+        });
+        transcript.queue(queued("instead", &[]));
+        assert!(!transcript.awaiting_permission());
+        assert_eq!(transcript.take_queued(), None);
+
+        transcript.apply(SessionEvent::TurnEnded {
+            stop_reason: "cancelled".into(),
+        });
+        assert_eq!(transcript.take_queued(), Some(queued("instead", &[])));
+        assert_eq!(transcript.take_queued(), None);
+    }
+
+    #[rstest]
+    #[case::both(queued("a", &["x"]), queued("b", &["y"]), queued("a\n\nb", &["x", "y"]))]
+    #[case::first_empty(queued("", &["x"]), queued("b", &[]), queued("b", &["x"]))]
+    #[case::second_empty(queued("a", &[]), queued("", &["y"]), queued("a", &["y"]))]
+    fn queued_before_the_stop_join(
+        #[case] first: Queued,
+        #[case] second: Queued,
+        #[case] joined: Queued,
+    ) {
+        let mut transcript = running();
+        transcript.queue(first);
+        transcript.queue(second);
+        transcript.apply(SessionEvent::PromptFailed {
+            message: "boom".into(),
+        });
+        assert_eq!(transcript.take_queued(), Some(joined));
+    }
+
+    #[test]
+    fn queued_is_handed_back_when_the_session_closes() {
+        let mut transcript = running();
+        transcript.queue(queued("instead", &["x"]));
+        transcript.apply(SessionEvent::Closed { error: None });
+        let queued = transcript.take_queued();
+        assert_eq!(
+            queued.as_ref().map(Queued::names),
+            Some(vec!["x".to_owned()])
+        );
+        assert_eq!(queued.map(|q| q.prompt().text).as_deref(), Some("instead"));
+    }
+
+    #[test]
+    fn commands_are_replaced_without_entries() {
+        let command = |name: &str| SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            hint: None,
+        };
+        let transcript = folded([
+            SessionEvent::Commands {
+                commands: vec![command("a"), command("b")],
+            },
+            SessionEvent::Commands {
+                commands: vec![command("c")],
+            },
+        ]);
+        assert_eq!(transcript.commands, vec![command("c")]);
+        assert!(transcript.entries.is_empty());
     }
 
     #[test]

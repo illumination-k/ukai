@@ -16,6 +16,8 @@ allow = [
   # cssparser / selectors / option-ext, via the dioxus desktop stack. File-level
   # copyleft: fine to link as long as those files are not modified.
   "MPL-2.0",
+  # clipboard-win / error-code, arboard's Windows backend.
+  "BSL-1.0",
   # whisper-rs / whisper-rs-sys (voice input). A public-domain dedication;
   # whisper.cpp itself is MIT.
   "Unlicense",

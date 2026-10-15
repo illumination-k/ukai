@@ -18,12 +18,15 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
+    AvailableCommandInput, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
+    ClientSessionCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
     EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus, PromptRequest,
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionId, SessionNotification, SessionUpdate, TextResourceContents, ToolCallContent,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, TextResourceContents, ToolCallContent,
     ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
@@ -41,7 +44,7 @@ pub type SessionEvents = mpsc::UnboundedReceiver<SessionEvent>;
 pub type PermissionId = u64;
 
 /// Something the agent did, translated for the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// Progress before the agent can be reached, e.g. while its pod starts.
     Preparing { message: String },
@@ -53,7 +56,13 @@ pub enum SessionEvent {
         restore: RestoreOutcome,
         /// What a prompt may carry besides text.
         prompt: PromptCaps,
+        /// Settings the user may change, e.g. model or reasoning effort.
+        config: Vec<ConfigOption>,
     },
+    /// The agent's settings changed, replacing every earlier [`ConfigOption`].
+    ConfigChanged { options: Vec<ConfigOption> },
+    /// The agent rejected a [`SessionHandle::set_config`]; nothing changed.
+    ConfigFailed { message: String },
     /// A chunk of a user message the agent replays while loading a session.
     UserMessage { text: String },
     /// A chunk of the agent's reply; consecutive chunks form one message.
@@ -77,6 +86,11 @@ pub enum SessionEvent {
     },
     /// The agent's current plan, replacing any earlier one.
     Plan { entries: Vec<PlanItem> },
+    /// Context window use and session cost, replacing any earlier report.
+    Usage(Usage),
+    /// The slash commands the agent offers, replacing any earlier list. Run
+    /// one by sending a prompt that starts with `/name`.
+    Commands { commands: Vec<SlashCommand> },
     /// Answer with [`SessionHandle::resolve_permission`].
     PermissionRequested {
         id: PermissionId,
@@ -85,13 +99,16 @@ pub enum SessionEvent {
     },
     /// The agent wrote a file through `fs/write_text_file`.
     FileWritten { path: PathBuf },
-    /// A turn this client did not start is running: it reattached to a
-    /// session whose turn went on while it was away.
+    /// A turn the UI did not start with [`SessionHandle::prompt`] is running:
+    /// the client reattached to a session whose turn went on while it was
+    /// away, or a [`SessionHandle::steer`] found the turn over and started one.
     TurnRunning,
     /// The prompt turn finished, e.g. with `end_turn` or `cancelled`.
     TurnEnded { stop_reason: String },
     /// The agent rejected the prompt; the session is still usable.
     PromptFailed { message: String },
+    /// The agent rejected a [`SessionHandle::steer`]; the turn goes on without it.
+    SteerFailed { message: String },
     /// The connection is gone; no more events follow.
     Closed { error: Option<String> },
 }
@@ -117,6 +134,24 @@ pub enum ToolStatus {
     Failed,
 }
 
+/// Context window use and cumulative cost an agent reports for its session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Usage {
+    /// Tokens currently in context.
+    pub used: u64,
+    /// The context window, in tokens.
+    pub size: u64,
+    pub cost: Option<Cost>,
+}
+
+/// Cumulative cost of a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cost {
+    pub amount: f64,
+    /// ISO 4217 code, e.g. `USD`.
+    pub currency: String,
+}
+
 /// A file change a tool call reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
@@ -127,12 +162,16 @@ pub struct FileDiff {
     pub new_text: String,
 }
 
-/// Content types an agent accepts in a prompt beyond text and resource links,
-/// from its `promptCapabilities`.
+/// How an agent takes prompts: content types it accepts beyond text and
+/// resource links (its `promptCapabilities`), and whether a running turn can
+/// be steered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PromptCaps {
     pub image: bool,
     pub embedded_context: bool,
+    /// The agent takes [`STEER_METHOD`]: a message sent while a turn runs
+    /// joins that turn instead of stopping it.
+    pub steering: bool,
 }
 
 /// A user turn: text and what was attached to it.
@@ -140,6 +179,16 @@ pub struct PromptCaps {
 pub struct Prompt {
     pub text: String,
     pub attachments: Vec<Attachment>,
+}
+
+impl Prompt {
+    fn into_blocks(self) -> Vec<ContentBlock> {
+        (!self.text.is_empty())
+            .then(|| ContentBlock::from(self.text))
+            .into_iter()
+            .chain(self.attachments.into_iter().map(Attachment::into_block))
+            .collect()
+    }
 }
 
 impl From<String> for Prompt {
@@ -185,11 +234,60 @@ impl Attachment {
     }
 }
 
+/// A session setting the agent lets the user change (ACP `configOptions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `mode`, `model`, `model_config`, `thought_level`, or the agent's own;
+    /// a hint for presentation only.
+    pub category: Option<String>,
+    pub value: ConfigValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValue {
+    Select {
+        current: String,
+        choices: Vec<ConfigChoice>,
+    },
+    Toggle(bool),
+}
+
+/// One value of a [`ConfigValue::Select`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChoice {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// Name of the group the agent listed it under, if any.
+    pub group: Option<String>,
+}
+
+/// A new value for a [`ConfigOption`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigInput {
+    /// One of a select's [`ConfigChoice::value`]s.
+    Select(String),
+    Toggle(bool),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanItem {
     pub content: String,
     pub done: bool,
     pub active: bool,
+}
+
+/// A command from the agent's `available_commands_update`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommand {
+    /// Without the leading `/`.
+    pub name: String,
+    pub description: String,
+    /// What to write after the name, when the command takes input.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,10 +301,15 @@ pub struct PermissionChoice {
 #[derive(Debug)]
 enum SessionCommand {
     Prompt(Prompt),
+    Steer(Prompt),
     Cancel,
     ResolvePermission {
         id: PermissionId,
         option: Option<String>,
+    },
+    SetConfig {
+        id: String,
+        value: ConfigInput,
     },
 }
 
@@ -222,6 +325,13 @@ impl SessionHandle {
         self.send(SessionCommand::Prompt(prompt.into()))
     }
 
+    /// Add `prompt` to the running turn; needs [`PromptCaps::steering`]. When
+    /// the turn has ended by the time the agent sees it, it is sent as a new
+    /// turn, announced with [`SessionEvent::TurnRunning`].
+    pub fn steer(&self, prompt: impl Into<Prompt>) -> bool {
+        self.send(SessionCommand::Steer(prompt.into()))
+    }
+
     /// Cancel the running turn; pending permission requests are answered as cancelled.
     pub fn cancel(&self) -> bool {
         self.send(SessionCommand::Cancel)
@@ -230,6 +340,15 @@ impl SessionHandle {
     /// Answer a [`SessionEvent::PermissionRequested`]; `None` declines without choosing.
     pub fn resolve_permission(&self, id: PermissionId, option: Option<String>) -> bool {
         self.send(SessionCommand::ResolvePermission { id, option })
+    }
+
+    /// Change one of the agent's [`ConfigOption`]s. The result arrives as
+    /// [`SessionEvent::ConfigChanged`] or [`SessionEvent::ConfigFailed`].
+    pub fn set_config(&self, id: impl Into<String>, value: ConfigInput) -> bool {
+        self.send(SessionCommand::SetConfig {
+            id: id.into(),
+            value,
+        })
     }
 
     fn send(&self, command: SessionCommand) -> bool {
@@ -295,6 +414,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Progress before the agent is reachable: `{ "message": string }`.
 pub const PROGRESS_METHOD: &str = "_ukai/progress";
+/// Adds a message to the running turn: `{ "sessionId", "prompt": ContentBlock[],
+/// "_meta"? }`, answered with `{ "outcome": "injected" | "promptRequired" }`.
+/// An agent that takes it says so with `_meta.steering.supported` in its
+/// `initialize` response. This is the steering extension `claude-agent-acp`
+/// implements, which Zed uses.
+pub const STEER_METHOD: &str = "_session/steering";
 /// A session's turn state, after ACP v2's `state_update`:
 /// `{ "sessionId", "state": "running" | "idle", "stopReason"? }`.
 pub const TURN_STATE_METHOD: &str = "_ukai/turn_state";
@@ -433,9 +558,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         )
         .connect_with(transport, async |cx: ConnectionTo<Agent>| {
             let offer_fs = fs_root.is_some();
-            let capabilities = ClientCapabilities::new().fs(FileSystemCapabilities::new()
-                .read_text_file(offer_fs)
-                .write_text_file(offer_fs));
+            let capabilities = ClientCapabilities::new()
+                .fs(FileSystemCapabilities::new()
+                    .read_text_file(offer_fs)
+                    .write_text_file(offer_fs))
+                .session(ClientSessionCapabilities::new().config_options(
+                    SessionConfigOptionsCapabilities::new()
+                        .boolean(BooleanConfigOptionCapabilities::new()),
+                ));
             let handshake = async {
                 let init = cx
                     .send_request(
@@ -451,7 +581,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     .session_capabilities
                     .resume
                     .is_some();
-                let (session_id, outcome) = match restore {
+                let (session_id, outcome, config) = match restore {
                     Some(id) if can_load => {
                         // History arrives as session/update notifications before
                         // the response; user turns are only forwarded meanwhile.
@@ -461,14 +591,15 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                             .block_task()
                             .await;
                         replaying.store(false, Ordering::SeqCst);
-                        loaded?;
-                        (SessionId::new(id), RestoreOutcome::Replayed)
+                        let loaded = loaded?;
+                        (SessionId::new(id), RestoreOutcome::Replayed, loaded.config_options)
                     }
                     Some(id) if can_resume => {
-                        cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
+                        let resumed = cx
+                            .send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
                             .block_task()
                             .await?;
-                        (SessionId::new(id), RestoreOutcome::Resumed)
+                        (SessionId::new(id), RestoreOutcome::Resumed, resumed.config_options)
                     }
                     restore => {
                         let session = cx
@@ -480,14 +611,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         } else {
                             RestoreOutcome::Fresh
                         };
-                        (session.session_id, outcome)
+                        (session.session_id, outcome, session.config_options)
                     }
                 };
-                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome))
+                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome, config))
             };
             // An agent that never answers (e.g. stuck on expired credentials)
             // would otherwise leave the pane connecting forever.
-            let (init, session_id, restore) = tokio::select! {
+            let (init, session_id, restore, config) = tokio::select! {
                 result = handshake => result?,
                 () = stalled(&last_progress) => {
                     return Err(agent_client_protocol::util::internal_error(format!(
@@ -504,7 +635,13 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                 prompt: PromptCaps {
                     image: prompt.image,
                     embedded_context: prompt.embedded_context,
+                    steering: init
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("steering")?.get("supported")?.as_bool())
+                        .unwrap_or(false),
                 },
+                config: config_options(config.unwrap_or_default()),
             });
             ready.store(true, Ordering::SeqCst);
             if running_before_ready.load(Ordering::SeqCst) {
@@ -513,8 +650,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
 
             let mut parked: HashMap<PermissionId, Responder<RequestPermissionResponse>> =
                 HashMap::new();
+            // Steers that reached the agent after their turn ended, to send as turns.
+            let (late_tx, mut late_rx) = mpsc::unbounded_channel::<Vec<ContentBlock>>();
             loop {
                 tokio::select! {
+                    Some(blocks) = late_rx.recv() => {
+                        let _ = events.send(SessionEvent::TurnRunning);
+                        send_prompt(&cx, &session_id, blocks, &events)?;
+                    }
                     Some((id, responder)) = park_rx.recv() => {
                         parked.insert(id, responder);
                     }
@@ -526,29 +669,35 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         }
                         match command {
                             None => break,
-                            Some(SessionCommand::Prompt(Prompt { text, attachments })) => {
+                            Some(SessionCommand::Prompt(prompt)) => {
+                                send_prompt(&cx, &session_id, prompt.into_blocks(), &events)?;
+                            }
+                            Some(SessionCommand::Steer(prompt)) => {
+                                let blocks = prompt.into_blocks();
+                                let params = serde_json::json!({
+                                    "sessionId": session_id,
+                                    "prompt": blocks,
+                                    // Hand the message back rather than have the
+                                    // agent start a turn this client would not see end.
+                                    "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+                                });
                                 let events = events.clone();
-                                let blocks = (!text.is_empty())
-                                    .then(|| ContentBlock::from(text))
-                                    .into_iter()
-                                    .chain(attachments.into_iter().map(Attachment::into_block))
-                                    .collect();
-                                // Prepared so the turn-end callback is ordered after
-                                // every update the agent sent before its response.
-                                cx.prepare_request(PromptRequest::new(session_id.clone(), blocks))
-                                .on_receiving_result(async move |result| {
-                                    let event = match result {
-                                        Ok(response) => SessionEvent::TurnEnded {
-                                            stop_reason: serde_label(&response.stop_reason),
-                                        },
-                                        Err(error) => SessionEvent::PromptFailed {
-                                            message: error.to_string(),
-                                        },
-                                    };
-                                    let _ = events.send(event);
-                                    // An error here would end the connection.
-                                    Ok(())
-                                })?;
+                                let late = late_tx.clone();
+                                cx.send_request(UntypedMessage::new(STEER_METHOD, params)?)
+                                    .on_receiving_result(async move |result| {
+                                        match result {
+                                            Ok(response) if response["outcome"] == "promptRequired" => {
+                                                let _ = late.send(blocks);
+                                            }
+                                            Ok(_) => {}
+                                            Err(error) => {
+                                                let _ = events.send(SessionEvent::SteerFailed {
+                                                    message: error.to_string(),
+                                                });
+                                            }
+                                        }
+                                        Ok(())
+                                    })?;
                             }
                             Some(SessionCommand::Cancel) => {
                                 cx.send_notification(CancelNotification::new(session_id.clone()))?;
@@ -557,6 +706,32 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                                         RequestPermissionOutcome::Cancelled,
                                     ))?;
                                 }
+                            }
+                            Some(SessionCommand::SetConfig { id, value }) => {
+                                let events = events.clone();
+                                let value = match value {
+                                    ConfigInput::Select(value) => {
+                                        SessionConfigOptionValue::value_id(value)
+                                    }
+                                    ConfigInput::Toggle(on) => SessionConfigOptionValue::boolean(on),
+                                };
+                                cx.send_request(SetSessionConfigOptionRequest::new(
+                                    session_id.clone(),
+                                    id,
+                                    value,
+                                ))
+                                .on_receiving_result(async move |result| {
+                                    let event = match result {
+                                        Ok(response) => SessionEvent::ConfigChanged {
+                                            options: config_options(response.config_options),
+                                        },
+                                        Err(error) => SessionEvent::ConfigFailed {
+                                            message: error.to_string(),
+                                        },
+                                    };
+                                    let _ = events.send(event);
+                                    Ok(())
+                                })?;
                             }
                             Some(SessionCommand::ResolvePermission { id, option }) => {
                                 if let Some(responder) = parked.remove(&id) {
@@ -577,6 +752,31 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
             Ok(())
         })
         .await
+}
+
+/// Start a turn. The request is prepared so the turn-end event is ordered
+/// after every update the agent sent before its response.
+fn send_prompt(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    blocks: Vec<ContentBlock>,
+    events: &Events,
+) -> Result<(), agent_client_protocol::Error> {
+    let events = events.clone();
+    cx.prepare_request(PromptRequest::new(session_id.clone(), blocks))
+        .on_receiving_result(async move |result| {
+            let event = match result {
+                Ok(response) => SessionEvent::TurnEnded {
+                    stop_reason: serde_label(&response.stop_reason),
+                },
+                Err(error) => SessionEvent::PromptFailed {
+                    message: error.to_string(),
+                },
+            };
+            let _ = events.send(event);
+            // An error here would end the connection.
+            Ok(())
+        })
 }
 
 /// `replaying`: a `session/load` is in progress, so user turns are history
@@ -658,10 +858,82 @@ fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEve
                 })
                 .collect(),
         },
-        // Echoes of our own prompt, mode/command lists, usage, and the rest
-        // are not shown yet.
+        SessionUpdate::UsageUpdate(usage) => SessionEvent::Usage(Usage {
+            used: usage.used,
+            size: usage.size,
+            cost: usage.cost.map(|cost| Cost {
+                amount: cost.amount,
+                currency: cost.currency,
+            }),
+        }),
+        SessionUpdate::ConfigOptionUpdate(update) => SessionEvent::ConfigChanged {
+            options: config_options(update.config_options),
+        },
+        SessionUpdate::AvailableCommandsUpdate(update) => SessionEvent::Commands {
+            commands: update
+                .available_commands
+                .into_iter()
+                .map(|command| SlashCommand {
+                    hint: match command.input {
+                        Some(AvailableCommandInput::Unstructured(input)) => Some(input.hint),
+                        _ => None,
+                    },
+                    name: command.name,
+                    description: command.description,
+                })
+                .collect(),
+        },
+        // Echoes of our own prompt, modes, and the rest are not shown yet.
         _ => return None,
     })
+}
+
+/// The options of kinds this client knows; others are left out.
+fn config_options(options: Vec<SessionConfigOption>) -> Vec<ConfigOption> {
+    options
+        .into_iter()
+        .filter_map(|option| {
+            let value = match option.kind {
+                SessionConfigKind::Select(select) => ConfigValue::Select {
+                    current: select.current_value.0.to_string(),
+                    choices: match select.options {
+                        SessionConfigSelectOptions::Ungrouped(options) => options
+                            .into_iter()
+                            .map(|choice| (None, choice))
+                            .collect::<Vec<_>>(),
+                        SessionConfigSelectOptions::Grouped(groups) => groups
+                            .into_iter()
+                            .flat_map(|group| {
+                                let name = group.name;
+                                group
+                                    .options
+                                    .into_iter()
+                                    .map(move |choice| (Some(name.clone()), choice))
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    }
+                    .into_iter()
+                    .map(|(group, choice)| ConfigChoice {
+                        value: choice.value.0.to_string(),
+                        name: choice.name,
+                        description: choice.description,
+                        group,
+                    })
+                    .collect(),
+                },
+                SessionConfigKind::Boolean(boolean) => ConfigValue::Toggle(boolean.current_value),
+                _ => return None,
+            };
+            Some(ConfigOption {
+                id: option.id.0.to_string(),
+                name: option.name,
+                description: option.description,
+                category: option.category.as_ref().map(serde_label),
+                value,
+            })
+        })
+        .collect()
 }
 
 /// Text to show for a content block; `None` for content not rendered yet.

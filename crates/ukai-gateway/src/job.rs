@@ -42,6 +42,9 @@ pub const REPO_DIR: &str = "/workspace/repo";
 
 /// Where the relay serves ACP in the pod: `ws://<pod ip>:RELAY_PORT/acp`.
 pub const RELAY_PORT: i32 = 7070;
+/// Where it serves the reports of the checkout, read-only, on the same port
+/// (`ukai_acp::reports`). The gateway proxies it per workspace.
+pub const REPORTS_PATH: &str = "/reports";
 /// The agent container's environment variable holding the relay's token.
 pub const RELAY_TOKEN_ENV: &str = "UKAI_RELAY_TOKEN";
 /// The relay binary's path in the image named by [`job`]'s `relay_image`.

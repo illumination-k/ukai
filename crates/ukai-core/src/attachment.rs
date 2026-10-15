@@ -101,10 +101,12 @@ mod tests {
     const ALL: PromptCaps = PromptCaps {
         image: true,
         embedded_context: true,
+        steering: false,
     };
     const NONE: PromptCaps = PromptCaps {
         image: false,
         embedded_context: false,
+        steering: false,
     };
 
     #[rstest]
