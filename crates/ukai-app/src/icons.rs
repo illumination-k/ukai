@@ -17,6 +17,8 @@ pub enum Icon {
     External,
     Paperclip,
     Search,
+    Copy,
+    Check,
 }
 
 impl Icon {
@@ -43,6 +45,8 @@ impl Icon {
                 "M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 1 0 0-9z",
                 "M10.3 10.3l3.2 3.2",
             ],
+            Self::Copy => &["M5.5 5.5h8v8h-8z", "M10.5 5.5v-3h-8v8h3"],
+            Self::Check => &["M3.5 8.5l3 3 6-7"],
         }
     }
 }

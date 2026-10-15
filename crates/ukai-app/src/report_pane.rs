@@ -34,6 +34,7 @@ use dioxus::desktop::wry::{
 use dioxus::prelude::*;
 use ukai_acp::ReportsEndpoint;
 use ukai_acp::reports::ReportsError;
+use ukai_core::markdown::LINK_SCHEMES;
 use ukai_core::report::{self, CONFINED_CSP, IMAGE_VIEW_QUERY, ReportFile, ReportKind};
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource};
 
@@ -476,13 +477,11 @@ fn allow_navigation(url: &str) -> bool {
     false
 }
 
-fn open_external(url: &str) {
-    if ["https://", "http://", "mailto:"]
-        .iter()
-        .any(|scheme| url.starts_with(scheme))
+pub fn open_external(url: &str) {
+    if LINK_SCHEMES.iter().any(|scheme| url.starts_with(scheme))
         && let Err(error) = webbrowser::open(url)
     {
-        tracing::warn!(%error, "cannot open a link from a report");
+        tracing::warn!(%error, "cannot open a link");
     }
 }
 

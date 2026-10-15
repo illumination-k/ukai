@@ -1,7 +1,7 @@
 # ukai-gateway in one namespace, with only namespaced RBAC: it creates a Job
 # per workspace for the agents in its gateway.toml and relays ACP to them.
 # Apply with `kubectl apply -k deploy/gateway` (see kustomization.yaml), then
-# reach it with `kubectl port-forward pod/ukai-gateway-0 8080` or a Service.
+# reach it with `kubectl port-forward deploy/ukai-gateway 8080` or a Service.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -40,17 +40,18 @@ subjects:
   - kind: ServiceAccount
     name: ukai-gateway
 ---
-# A StatefulSet of one: a stable pod name to port-forward to, and no
-# Deployment slot used.
+# One replica, replaced rather than rolled, so an update never needs quota for
+# a second gateway pod.
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: ukai-gateway
   labels:
     app.kubernetes.io/name: ukai-gateway
 spec:
   replicas: 1
-  serviceName: ukai-gateway
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: ukai-gateway

@@ -69,6 +69,15 @@ struct Session {
     loading: bool,
 }
 
+impl Session {
+    /// Keep the settings a later `session/load` answers with current.
+    fn set_config(&mut self, options: Value) {
+        if let Some(setup) = self.setup.as_object_mut() {
+            setup.insert("configOptions".to_owned(), options);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Pending {
     request: Value,
@@ -353,6 +362,15 @@ impl Hub {
         match state {
             Some(state) => {
                 if method == "session/update" {
+                    if let Some(options) = message
+                        .pointer("/params/update")
+                        .filter(|update| {
+                            update.get("sessionUpdate") == Some(&json!("config_option_update"))
+                        })
+                        .and_then(|update| update.get("configOptions"))
+                    {
+                        state.set_config(options.clone());
+                    }
                     state.history.push(message.clone());
                 }
                 state
@@ -388,6 +406,14 @@ impl Hub {
         match (method.as_str(), session) {
             ("session/new", _) => self.session_created(conn, &message),
             ("session/load" | "session/resume", Some(sid)) => self.session_restored(&sid, &message),
+            ("session/set_config_option", Some(sid)) => {
+                if let (Some(state), Some(options)) = (
+                    self.sessions.get_mut(&sid),
+                    message.pointer("/result/configOptions"),
+                ) {
+                    state.set_config(options.clone());
+                }
+            }
             ("session/prompt", Some(sid)) => {
                 outputs.push(Output::TurnEnded(sid.clone()));
                 if let Some(attached) = self.end_turn(&sid, conn) {
