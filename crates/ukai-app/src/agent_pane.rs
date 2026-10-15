@@ -19,7 +19,7 @@ use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
 use ukai_core::slash;
-use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript};
+use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript, usage_label};
 
 use crate::alert;
 use crate::clipboard;
@@ -296,6 +296,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         (false, false) => "composer-card disabled",
     };
     let send_hint = shortcuts.keymap.hint(Action::Send);
+    let usage = transcript.read().usage.as_ref().map(|usage| {
+        (
+            usage_label(usage),
+            format!("{} of {} context tokens in use", usage.used, usage.size),
+        )
+    });
     let commands: Vec<SlashCommand> = if writable && !dismissed() {
         slash::suggestions(&draft.read(), &transcript.read().commands)
             .into_iter()
@@ -489,6 +495,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                             kbd { "{hint}" }
                             " send"
                         }
+                    }
+                    if let Some((label, title)) = usage {
+                        span { class: "usage", title: "{title}", "{label}" }
                     }
                     if busy {
                         button {
