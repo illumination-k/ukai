@@ -1518,6 +1518,29 @@ button.config-trigger:disabled {
   outline: none;
 }
 
+/* The pane header's session menu opens downward from its right edge. */
+.history {
+  position: relative;
+}
+
+.history-menu {
+  top: calc(100% + 4px);
+  right: 0;
+  bottom: auto;
+  left: auto;
+}
+
+.history-note {
+  padding: 6px 8px;
+  color: var(--muted-fg);
+  font-size: 12px;
+  white-space: normal;
+}
+
+.history-note.error {
+  color: var(--destructive);
+}
+
 .config-group {
   padding: 6px 8px 2px;
   color: var(--muted-fg);

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    Attachment, ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, Prompt,
-    PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Usage,
+    Attachment, ConfigOption, FileDiff, PastSession, PermissionChoice, PermissionId, PlanItem,
+    Prompt, PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +74,24 @@ pub struct Transcript {
     /// What the user sent while a turn ran, for an agent that cannot be
     /// steered: the turn is being stopped, and this goes out once it has.
     pub queued: Option<Queued>,
+    /// The ACP session this transcript is of, known once it is ready.
+    pub session_id: Option<String>,
+    /// The agent's other sessions the pane could switch to.
+    pub history: History,
+}
+
+/// The agent's earlier sessions, as far as the pane has asked for them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum History {
+    /// The agent cannot list its sessions (or is not ready yet).
+    #[default]
+    Unsupported,
+    /// It can; nobody has asked yet.
+    Available,
+    Loading,
+    /// Newest first, without the pane's own session.
+    Loaded(Vec<PastSession>),
+    Failed(String),
 }
 
 /// A message sent while a turn runs to an agent without
@@ -108,6 +126,8 @@ impl Default for Transcript {
             status: Status::Connecting,
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
+            session_id: None,
+            history: History::Unsupported,
             usage: None,
             config: Vec::new(),
             commands: Vec::new(),
@@ -159,6 +179,15 @@ impl Alert {
 }
 
 impl Transcript {
+    /// Note that the session list was asked for; `false` if the agent cannot list.
+    pub fn history_requested(&mut self) -> bool {
+        if self.history == History::Unsupported {
+            return false;
+        }
+        self.history = History::Loading;
+        true
+    }
+
     /// Record a prompt the user sent, with the names of its attachments.
     pub fn push_prompt(&mut self, text: impl Into<String>, attachments: Vec<String>) {
         self.entries.push(Entry::User {
@@ -238,9 +267,17 @@ impl Transcript {
                 restore,
                 prompt,
                 config,
+                session_id,
+                list_sessions,
                 ..
             } => {
                 self.agent = agent;
+                self.session_id = Some(session_id);
+                self.history = if list_sessions {
+                    History::Available
+                } else {
+                    History::Unsupported
+                };
                 self.prompt_caps = prompt;
                 self.config = config;
                 self.status = Status::Idle;
@@ -261,6 +298,13 @@ impl Transcript {
                 }
             }
             SessionEvent::ConfigChanged { options } => self.config = options,
+            SessionEvent::Sessions { mut sessions } => {
+                sessions.retain(|past| self.session_id.as_ref() != Some(&past.id));
+                // ISO 8601 in one format sorts as text; undated sessions go last.
+                sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                self.history = History::Loaded(sessions);
+            }
+            SessionEvent::SessionsFailed { message } => self.history = History::Failed(message),
             SessionEvent::ConfigFailed { message } => self.entries.push(Entry::Notice {
                 text: format!("could not change the setting: {message}"),
                 error: true,
@@ -404,6 +448,29 @@ impl Transcript {
     }
 }
 
+/// A past session's name in a menu: its title, else its id.
+pub fn session_label(past: &PastSession) -> String {
+    match past.title.as_deref().map(str::trim) {
+        Some(title) if !title.is_empty() => title.to_owned(),
+        _ => past.id.clone(),
+    }
+}
+
+/// `2026-10-14T12:00:00Z` as `2026-10-14 12:00`; anything else as sent.
+pub fn updated_label(updated_at: &str) -> String {
+    let bytes = updated_at.as_bytes();
+    let shaped = bytes.len() >= 16
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':';
+    if shaped {
+        format!("{} {}", &updated_at[..10], &updated_at[11..16])
+    } else {
+        updated_at.to_owned()
+    }
+}
+
 /// Short text for a usage report, e.g. `53k / 200k (27%) · $0.05`.
 pub fn usage_label(usage: &Usage) -> String {
     let mut label = format!("{} / {}", tokens(usage.used), tokens(usage.size));
@@ -458,7 +525,72 @@ mod tests {
             restore,
             prompt: PromptCaps::default(),
             config: Vec::new(),
+            list_sessions: false,
         }
+    }
+
+    fn past(id: &str, title: Option<&str>, updated_at: Option<&str>) -> PastSession {
+        PastSession {
+            id: id.into(),
+            title: title.map(str::to_owned),
+            updated_at: updated_at.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn history_lists_other_sessions_newest_first() {
+        let mut transcript = folded([SessionEvent::Ready {
+            agent: None,
+            session_id: "now".into(),
+            restore: RestoreOutcome::Fresh,
+            prompt: PromptCaps::default(),
+            config: Vec::new(),
+            list_sessions: true,
+        }]);
+        assert_eq!(transcript.history, History::Available);
+        assert!(transcript.history_requested());
+        assert_eq!(transcript.history, History::Loading);
+        transcript.apply(SessionEvent::Sessions {
+            sessions: vec![
+                past("undated", None, None),
+                past("old", None, Some("2026-10-01T00:00:00Z")),
+                past("now", None, Some("2026-10-15T00:00:00Z")),
+                past("new", None, Some("2026-10-14T00:00:00Z")),
+            ],
+        });
+        let History::Loaded(sessions) = &transcript.history else {
+            panic!("{:?}", transcript.history);
+        };
+        let ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["new", "old", "undated"]);
+        transcript.apply(SessionEvent::SessionsFailed {
+            message: "boom".into(),
+        });
+        assert_eq!(transcript.history, History::Failed("boom".into()));
+    }
+
+    #[test]
+    fn history_needs_the_capability() {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        assert_eq!(transcript.history, History::Unsupported);
+        assert!(!transcript.history_requested());
+        assert_eq!(transcript.history, History::Unsupported);
+    }
+
+    #[rstest]
+    #[case::title(Some("Fix the build"), "Fix the build")]
+    #[case::blank_title(Some("  "), "abc")]
+    #[case::no_title(None, "abc")]
+    fn session_labels(#[case] title: Option<&str>, #[case] expected: &str) {
+        assert_eq!(session_label(&past("abc", title, None)), expected);
+    }
+
+    #[rstest]
+    #[case::iso("2026-10-14T12:34:56Z", "2026-10-14 12:34")]
+    #[case::offset("2026-10-14T12:34:56.789+09:00", "2026-10-14 12:34")]
+    #[case::other("yesterday", "yesterday")]
+    fn updated_labels(#[case] updated_at: &str, #[case] expected: &str) {
+        assert_eq!(updated_label(updated_at), expected);
     }
 
     #[test]
@@ -667,6 +799,7 @@ mod tests {
             restore: RestoreOutcome::Fresh,
             prompt: caps,
             config: Vec::new(),
+            list_sessions: false,
         }]);
         assert_eq!(transcript.prompt_caps, caps);
     }
@@ -692,6 +825,7 @@ mod tests {
             restore: RestoreOutcome::Fresh,
             prompt: PromptCaps::default(),
             config: vec![effort("low")],
+            list_sessions: false,
         }]);
         assert_eq!(transcript.config, [effort("low")]);
         transcript.apply(SessionEvent::ConfigChanged {

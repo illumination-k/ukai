@@ -5,12 +5,13 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, Diff, InitializeResponse,
-    LoadSessionResponse, NewSessionResponse, PermissionOption, PermissionOptionKind,
-    PromptCapabilities, PromptResponse, RequestPermissionOutcome, ResumeSessionResponse,
-    SessionCapabilities, SessionConfigOptionCategory, SessionConfigSelectGroup,
-    SessionConfigSelectOption, SessionResumeCapabilities, SetSessionConfigOptionResponse,
-    StopReason, ToolCall, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
-    UsageUpdate, WriteTextFileRequest,
+    ListSessionsResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PromptCapabilities, PromptResponse, RequestPermissionOutcome,
+    ResumeSessionResponse, SessionCapabilities, SessionConfigOptionCategory,
+    SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo, SessionListCapabilities,
+    SessionResumeCapabilities, SetSessionConfigOptionResponse, StopReason, ToolCall,
+    ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput, UsageUpdate,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
 use agent_client_protocol::{Channel, ConnectionTo};
@@ -26,6 +27,7 @@ struct Caps {
     load: bool,
     resume: bool,
     steering: bool,
+    list: bool,
 }
 
 /// Behaviour is chosen by the prompt text:
@@ -43,6 +45,7 @@ struct Caps {
 /// A steer outside a `wait` turn answers `promptRequired`.
 ///
 /// `session/load` replays one user and one agent message before answering.
+/// `session/list` answers two sessions in `cwd`, one page each.
 /// Every session starts with [`mock_config`]'s settings; setting one answers
 /// with it changed, and an unknown one fails.
 fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
@@ -64,7 +67,8 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                             format!("read={} write={}", fs.read_text_file, fs.write_text_file);
                     }
                     let session_caps = SessionCapabilities::new()
-                        .resume(caps.resume.then(SessionResumeCapabilities::new));
+                        .resume(caps.resume.then(SessionResumeCapabilities::new))
+                        .list(caps.list.then(SessionListCapabilities::new));
                     let mut meta = agent_client_protocol::schema::v1::Meta::new();
                     if caps.steering {
                         meta.insert("steering".into(), serde_json::json!({ "supported": true }));
@@ -100,6 +104,22 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                     ))?;
                 }
                 responder.respond(LoadSessionResponse::new().config_options(mock_config(None)))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |request: ListSessionsRequest, responder, _cx| {
+                let cwd = request.cwd.unwrap_or_default();
+                let response = match request.cursor.as_deref() {
+                    None => ListSessionsResponse::new(vec![
+                        SessionInfo::new("earlier", cwd)
+                            .title("Fix the build")
+                            .updated_at("2026-10-14T12:00:00Z"),
+                    ])
+                    .next_cursor("2"),
+                    Some(_) => ListSessionsResponse::new(vec![SessionInfo::new("oldest", cwd)]),
+                };
+                responder.respond(response)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -632,7 +652,42 @@ fn ready(session_id: &str, restore: RestoreOutcome) -> SessionEvent {
             steering: false,
         },
         config: config("sonnet", false),
+        list_sessions: false,
     }
+}
+
+#[tokio::test]
+async fn lists_sessions_across_pages() {
+    let caps = Caps {
+        list: true,
+        ..Caps::default()
+    };
+    let (mut harness, events) = Harness::connect(caps, None).await;
+    assert!(matches!(
+        events.last(),
+        Some(SessionEvent::Ready {
+            list_sessions: true,
+            ..
+        })
+    ));
+    assert!(harness.handle.list_sessions());
+    assert_eq!(
+        harness.next().await,
+        SessionEvent::Sessions {
+            sessions: vec![
+                PastSession {
+                    id: "earlier".into(),
+                    title: Some("Fix the build".into()),
+                    updated_at: Some("2026-10-14T12:00:00Z".into()),
+                },
+                PastSession {
+                    id: "oldest".into(),
+                    title: None,
+                    updated_at: None,
+                },
+            ],
+        }
+    );
 }
 
 #[tokio::test]

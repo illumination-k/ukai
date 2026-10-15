@@ -471,6 +471,11 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと 📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には
   添付のファイル名を出す。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
+- **過去のセッション（hermes に倣う）。** エージェントが `sessionCapabilities.list` を持つと、agent pane のヘッダに
+  時計のボタンを出す。開くと `session/list`（pane のプロジェクトの cwd で絞り、`nextCursor` を 10 ページまで追う）で
+  pane 以外のセッションを更新日時の新しい順に並べ、選ぶとその id を pane に記録して `session/load` / `session/resume`
+  でつなぎ直す（「New session」で新規）。ターン中は切り替えない（接続を落とすとターンが切れうるため）。
+  relay は `session/list` の cwd もワークスペースのものに書き換える。fork（`session/fork`）は ACP で unstable なので未対応。
 - **使用量。** エージェントが ACP の `usage_update` を送ると、入力欄の右下に最新のコンテキスト使用量と累計コスト
   （`53k / 200k (27%) · $0.05`、`ukai_core::usage_label`）を出す。送らないエージェントでは何も出さない。
 - **スラッシュコマンド。** 下書きが `/` と名前の途中だけのとき、エージェントが `Commands` で知らせたコマンドを
