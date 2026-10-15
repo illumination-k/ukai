@@ -10,6 +10,7 @@ mod markdown;
 mod palette;
 mod persist;
 mod projects;
+mod remote_reports;
 mod report_pane;
 mod shortcuts;
 

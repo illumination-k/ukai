@@ -25,7 +25,8 @@ use crate::hub::{ConnId, Hub, Output};
 #[derive(Debug, Clone)]
 pub struct Options {
     pub listen: SocketAddr,
-    /// Clients must send `Authorization: Bearer <token>` to `/acp`.
+    /// Clients must send `Authorization: Bearer <token>` to everything but
+    /// `/health`.
     pub token: Option<String>,
     /// Exit after this long with no client connected and no turn running.
     pub idle_timeout: Duration,
@@ -75,9 +76,15 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         });
         theirs
     });
+    // The agent's reports live in the directory it works in, and the relay
+    // is the only thing that can read them; see `crate::reports`.
+    let cwd = std::env::current_dir().ok();
     let token = options.token.clone().map(Arc::<str>::from);
     let router = server
         .into_router()
+        .merge(crate::reports::router(
+            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        ))
         .layer(middleware::from_fn(move |request, next| {
             authorize(token.clone(), request, next)
         }));
@@ -117,10 +124,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         }
     };
 
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|dir| dir.to_string_lossy().into_owned());
-    let (mut hub, init) = Hub::new(cwd);
+    let (mut hub, init) = Hub::new(cwd.map(|dir| dir.to_string_lossy().into_owned()));
     dispatch(init, &conns);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -175,8 +179,9 @@ async fn authorize(token: Option<Arc<str>>, request: Request, next: Next) -> Res
     let Some(token) = token else {
         return next.run(request).await;
     };
-    // `/health` stays open for the kubelet's probes.
-    if !request.uri().path().starts_with("/acp") {
+    // `/health` stays open for the kubelet's probes; `/acp` and the reports
+    // of the agent's checkout both want the token.
+    if request.uri().path().starts_with("/health") {
         return next.run(request).await;
     }
     let presented = request

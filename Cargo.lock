@@ -6789,6 +6789,8 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "percent-encoding",
+ "reqwest",
  "rstest",
  "serde",
  "serde_json",
@@ -6809,10 +6811,16 @@ dependencies = [
  "agent-client-protocol-http",
  "axum",
  "futures",
+ "rstest",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
+ "ukai-acp",
+ "ukai-config",
+ "ukai-core",
 ]
 
 [[package]]

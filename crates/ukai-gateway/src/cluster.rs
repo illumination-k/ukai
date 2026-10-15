@@ -13,7 +13,9 @@ use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use kube::config::InferConfigError;
 use kube::{Client, Config};
 
-use crate::job::{AGENT_CONTAINER, Plan, RELAY_PORT, RELAY_TOKEN_ENV, WORKSPACE_CONTAINER, job};
+use crate::job::{
+    AGENT_CONTAINER, Plan, RELAY_PORT, RELAY_TOKEN_ENV, REPORTS_PATH, WORKSPACE_CONTAINER, job,
+};
 
 /// Long enough for a cold node to pull a large image and clone the repository.
 const POD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -119,6 +121,23 @@ impl Cluster {
             .unwrap_or(Err(ClusterError::Timeout(POD_TIMEOUT)))
     }
 
+    /// The workspace's serving pod, if it is already there. Nothing is
+    /// created or replaced: a report request must not start a pod, it only
+    /// reads from one that is running.
+    pub async fn serving_pod(&self, plan: &Plan) -> Result<Option<Pod>> {
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
+        let name = plan.job_name();
+        let Some(job) = jobs.get_opt(&name).await? else {
+            return Ok(None);
+        };
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let found = pods
+            .list(&ListParams::default().labels(&format!("job-name={name}")))
+            .await?
+            .items;
+        Ok(serving(&job, found))
+    }
+
     /// Look at the workspace's Job once and move it along: create it, replace
     /// it if it has finished, or report what its pod is waiting for.
     async fn step(&self, plan: &Plan, relay_image: &str) -> Result<Step> {
@@ -193,10 +212,22 @@ impl Cluster {
     }
 }
 
+/// The pod of `job` that can be served from: ready, not on its way out, and
+/// not left over from a Job that has finished. Pure, so the gateway's
+/// routing can be tested without a cluster.
+fn serving(job: &Job, pods: Vec<Pod>) -> Option<Pod> {
+    if job.metadata.deletion_timestamp.is_some() || finished(job) {
+        return None;
+    }
+    pods.into_iter()
+        .find(|pod| pod.metadata.deletion_timestamp.is_none() && pod_state(pod) == PodState::Ready)
+}
+
 /// Where `pod`'s relay serves, and the token it wants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayEndpoint {
-    pub url: String,
+    /// `<pod ip>:<relay port>`.
+    pub address: String,
     pub token: String,
 }
 
@@ -217,9 +248,20 @@ impl RelayEndpoint {
             .value
             .clone()?;
         Some(Self {
-            url: format!("ws://{ip}:{RELAY_PORT}/acp"),
+            address: format!("{ip}:{RELAY_PORT}"),
             token,
         })
+    }
+
+    /// The ACP endpoint client frames are relayed to.
+    pub fn acp_url(&self) -> String {
+        format!("ws://{}/acp", self.address)
+    }
+
+    /// The reports endpoint, with `suffix` appended as it arrived: either
+    /// nothing (the listing) or `/files/<path>`, still percent-encoded.
+    pub fn reports_url(&self, suffix: &str) -> String {
+        format!("http://{}{REPORTS_PATH}{suffix}", self.address)
     }
 }
 
@@ -377,11 +419,55 @@ mod tests {
         assert_eq!(
             RelayEndpoint::of(&pod),
             Some(RelayEndpoint {
-                url: "ws://10.0.0.7:7070/acp".into(),
+                address: "10.0.0.7:7070".into(),
                 token: "t".into()
             })
         );
         assert_eq!(RelayEndpoint::of(&Pod::default()), None);
+        let endpoint = RelayEndpoint::of(&pod).unwrap_or_else(|| panic!("the pod has an address"));
+        assert_eq!(endpoint.acp_url(), "ws://10.0.0.7:7070/acp");
+        assert_eq!(endpoint.reports_url(""), "http://10.0.0.7:7070/reports");
+        assert_eq!(
+            endpoint.reports_url("/files/reports/run%201.html"),
+            "http://10.0.0.7:7070/reports/files/reports/run%201.html"
+        );
+    }
+
+    #[rstest]
+    #[case::ready(json!({}), json!([
+        { "metadata": { "name": "p" },
+          "status": { "phase": "Running", "conditions": [{ "type": "Ready", "status": "True" }] } }
+    ]), Some("p"))]
+    #[case::no_pods(json!({}), json!([]), None)]
+    #[case::starting(json!({}), json!([
+        { "metadata": { "name": "p" }, "status": { "phase": "Pending" } }
+    ]), None)]
+    #[case::terminating(json!({}), json!([
+        { "metadata": { "name": "p", "deletionTimestamp": "2026-01-01T00:00:00Z" },
+          "status": { "phase": "Running", "conditions": [{ "type": "Ready", "status": "True" }] } }
+    ]), None)]
+    #[case::finished_job(
+        json!({ "conditions": [{ "type": "Complete", "status": "True" }] }),
+        json!([
+            { "metadata": { "name": "p" },
+              "status": { "phase": "Running", "conditions": [{ "type": "Ready", "status": "True" }] } }
+        ]),
+        None
+    )]
+    fn serves_reports_only_from_a_running_pod(
+        #[case] job_status: serde_json::Value,
+        #[case] pods: serde_json::Value,
+        #[case] expected: Option<&str>,
+    ) {
+        let job: Job = serde_json::from_value(json!({ "status": job_status }))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let pods: Vec<Pod> = serde_json::from_value(pods).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            serving(&job, pods)
+                .and_then(|pod| pod.metadata.name)
+                .as_deref(),
+            expected
+        );
     }
 
     #[test]

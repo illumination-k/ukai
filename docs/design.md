@@ -104,8 +104,13 @@ ukai は ACP の "Client" なので、エージェントからの要求に応え
 
 - `session/request_permission` … UI にダイアログを出し、ユーザー判断を返す。設定で自動許可ルールを持てる（後述 `permissions`）。
 - `fs/read_text_file` / `fs/write_text_file` … **プロジェクトルート配下に限定して**提供。
-  クラウドエージェントがこれを使えば、レポートを手元に直接書かせられる（HTML レポートの主経路）。
+  これは手元で動くエージェント（stdio と、手元のツリーを見ているリモートエージェント）の経路。
 - `terminal/*` … 初期は capability を広告しない。
+
+`transport = "gateway"` のエージェントは別で、`fs/*` は**通らない**。間に立つ `ukai-relay` はエージェントに
+client capability を広告しない（クライアントがいない間に動くターンが応答者のいない `fs/*` で止まるし、
+エージェントの編集は Pod の checkout に入るべきで、手元のツリーに向けるものではない）。
+Pod の中で書かれたレポートは relay の読み取り専用 HTTP から読み戻す（後述「HTML レポートと画像」）。
 
 ### セッションのライフサイクル
 
@@ -194,6 +199,12 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 - エージェントからの要求（パーミッション）はクライアントが来るまで保留し、つないできたクライアントに出し直す。
 - クライアントの `cwd` はクライアントの手元のパスなので、`session/new` / `load` / `resume` の `cwd` は
   relay の作業ディレクトリに置き換える。エージェントには `fs/*` も terminal も広告しない。
+- `/acp` の隣に、作業ディレクトリのレポートを読み取り専用で出す（`reports`）。`GET /reports` が
+  checkout の `ukai.toml` の `[reports]` に合うファイルを新しい順に（更新時刻付きで）返し、
+  `GET /reports/files/<プロジェクト相対パス>` が 1 ファイルを `ETag` 付きで返す。配信範囲は
+  `ukai_core::report::ReportTree` が `reports.dirs` の中だけに限る（`..`・エンコードされた `..`・
+  外に出るシンボリックリンクは拒否）。設定はリクエストごとに読むので、Pod の中で `ukai.toml` を
+  直せばそのまま効く。`/health` 以外はトークンが必要。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
 - クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
 
@@ -204,6 +215,11 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 - 接続が来たらそのワークスペースの Job を確保して Pod の ready を待ち、Pod 内の relay に中継する。
   待つ間はクライアントに `_ukai/progress`（状況が変わるたび）と `_ukai/heartbeat`（20 秒ごと）を送り、
   クライアントからのメッセージは溜めておく。
+- レポートは `GET /agents/<id>/reports` と `/agents/<id>/reports/files/<path>` で中継する。ワークスペースの
+  決め方（`Ukai-Workspace-Scope` / `Ukai-Workspace`）とトークンは `/acp` と同じだが、**Pod は起こさない**:
+  すでにある仕事を読むだけなので、動いている Pod がなければ 410 を返してクライアントにそう言わせる
+  （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
+  1 回だけ行う。
 - 権限は namespace の Role だけ（jobs、pods と events の参照）。CRD も cluster-scoped な権限も要らない。
 - pane ごとのワークスペース: ukai は gateway のエージェントを開いた pane に鍵を作って `state.json` に残し、
   接続のたびにヘッダー `Ukai-Workspace-Scope`（`shared` / `pod`）と `Ukai-Workspace`（鍵）を送る。
@@ -340,20 +356,41 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 ## HTML レポートと画像
 
 「レポートは HTML で見たい」がこのアプリの主要ユースケースの1つ。エージェントが書いた画像（プロットなど）も
-同じ pane で見る。pane の中身は `report { project, path }`（`path` はプロジェクトルート相対）。
+同じ pane で見る。pane の中身は `report { project, path, source }`。`source` は `project`（既定。`path` は
+プロジェクトルート相対）か `agent { agent, workspace }`（gateway エージェントのワークスペース。`path` は
+その checkout のルート相対）で、`source` のない `state.json` は `project` として読む。
 
 ### 開き方
 
 1. **サイドバー** … 選択中プロジェクトの `reports.dirs` 配下で `reports.globs` に合うファイルを新しい順に一覧
    （`ukai_core::report::list`。隠しディレクトリは除外、最大 500 件）。表示中は 2 秒ごとに再走査する。
    クリックでフォーカス中の pane が空ならそこに、そうでなければ右に分割して開く（エージェントと同じ）。
-2. **エージェント pane** … `fs/write_text_file` で HTML / 画像が書かれたら、その行に「Open」ボタンを出す。
+   その下に、開いている gateway エージェント pane のワークスペースごとの一覧を足す。
+2. **エージェント pane** … `fs/write_text_file` で HTML / 画像が書かれたら、その行に「Open」ボタンを出す
+   （手元に書かれたものなので `source = project`）。
 3. **ファイル選択** … サイドバーの Reports の「+」と空 pane の「Open report or image…」。プロジェクト外の
    ファイルは開かず、pane にエラーを出す。
 4. （今後）ACP コンテンツ … `session/update` 内の embedded resource / resource link で `text/html` のもの。
 
-開いている pane はファイルの更新時刻を監視し、変わったら再読込する（`notify` ではなくポーリング。
-1 pane につき 1 ファイルの `stat` なので十分安い）。
+開いている pane はレポートの変化を監視し、変わったら再読込する（`notify` ではなくポーリング。手元のファイルは
+150 ms ごとに `stat`、Pod のレポートは 2 秒ごとに `ETag` を見るだけ）。
+
+### gateway エージェントのレポート
+
+gateway のエージェントは Pod の中に書くので、手元を走査しても見つからない。代わりに gateway に聞く
+（`ukai_acp::reports`。URL はエージェントの `/acp` を `/reports` に替えたもので、ヘッダーは接続と同じ）。
+
+- **単位は pane ではなくワークスペース。** `shared` の pane は一覧を共有し、`pod` の pane はそれぞれ持つ。
+  pane を閉じてもワークスペースが動いていればレポートは読めるので、`state.json` には pane ではなく
+  エージェント id とワークスペースを残す。
+- `ukai-app/src/remote_reports.rs` が、開いている gateway エージェント pane のワークスペースの一覧を
+  3 秒ごとに読み直して 1 つの signal に置く。サイドバーもパレットもそれを読むので、パレットは
+  ネットワークを待たずに開く。Pod が idle で落ちていれば「not running」と出す。
+- pane の描画は手元のレポートと同じ（IPC ハンドラのない子 WebView、`incognito`、同じ CSP）。違うのは
+  `ukai-report` プロトコルの応答がファイルの読み出しではなく gateway への fetch になるところだけで、
+  ネットワークを待つので非同期ハンドラ（`with_asynchronous_custom_protocol`）で答える。
+- URL のパス空間は Pod の checkout のルート。`../img/plot.png` のような相対参照はディスク上と同じに解決し、
+  レポートのディレクトリの外に出たものは relay が 403 で拒否する。
 
 ### 描画方式
 
@@ -369,7 +406,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   - 子 WebView はネイティブのビューなので DOM より手前に出る。pane に重なるポップアップは作らないこと。
     子 WebView にフォーカスがある間はアプリのショートカットが効かない。
 - 子 WebView は `ukai-report://localhost/…`（Windows では `http://ukai-report.localhost/…`）だけを読み、
-  `ukai_core::report::ReportFile::serve` が答える。
+  `ukai_core::report::ReportFile::serve`（手元）か gateway からの fetch（Pod の中）が答える。
   - 配信範囲はレポートの**ベース**: レポートを含む `reports.dirs` のディレクトリ、なければレポートのディレクトリ。
     `../img/plot.png` のような相対参照はベース内なら通り、`..`・エンコードされた `..`・ベース外へのシンボリック
     リンクは拒否（`fs/*` と同じく正規化後のパスで判定）。
@@ -384,7 +421,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 - 左: サイドバー（プロジェクトごとのエージェント一覧と接続状態、起動できるエージェント、レポート一覧）。
 - 中央: タブバーと pane 木。各 pane はヘッダ（タイトル・状態・分割/閉じるボタン）を持つ。
 - `mod+k`: パレット。開いている pane へ移動（フォーカス中のものを除く）、全プロジェクトのエージェントを開く、
-  全プロジェクトのレポートを開く、レイアウト操作（新規タブ・分割・閉じる・プロジェクトを開く）を 1 つの
+  全プロジェクトのレポートと gateway ワークスペースのレポートを開く、レイアウト操作（新規タブ・分割・閉じる・プロジェクトを開く）を 1 つの
   あいまい検索（`ukai_core::palette`。空白区切りの語ごとに部分列一致、語頭と連続一致を優先）で選ぶ。
   ↑↓ で選択、Enter で実行、Esc で閉じる。項目は開いた時点で集める。
   report pane の子 WebView は DOM より手前に出るので、パレットを開いている間は隠す。

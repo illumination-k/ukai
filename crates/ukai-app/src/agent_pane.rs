@@ -19,7 +19,9 @@ use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
 use ukai_core::slash;
-use ukai_core::{Alert, Entry, PaneContent, PaneId, ProjectId, Status, Transcript, usage_label};
+use ukai_core::{
+    Alert, Entry, PaneContent, PaneId, ProjectId, ReportSource, Status, Transcript, usage_label,
+};
 
 use crate::alert;
 use crate::clipboard;
@@ -827,7 +829,7 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
                             title: "Show it in a pane",
                             onclick: move |_| {
                                 if let Some(target) = launch_target(app) {
-                                    open_report(app, target, &project, relative.clone());
+                                    open_report(app, target, &project, relative.clone(), ReportSource::Project);
                                 }
                             },
                             Svg { icon: Icon::External, size: 12 }

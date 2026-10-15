@@ -467,6 +467,16 @@ button:focus-visible,
   color: var(--fg);
 }
 
+/* The reports of one gateway agent's workspace, under the project's own. */
+.sidebar-subsection .sidebar-header {
+  padding-left: 8px;
+}
+
+.sidebar-subsection .section-label {
+  color: color-mix(in srgb, var(--muted-fg) 85%, transparent);
+  font-size: 10.5px;
+}
+
 .hint {
   margin: 4px 8px;
   font-size: 12px;
