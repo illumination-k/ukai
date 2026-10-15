@@ -165,3 +165,41 @@ fn keybindings_are_user_level_only() {
         vec![Problem::KeybindingsInProject]
     );
 }
+
+#[test]
+fn voice_is_user_level_only() {
+    assert_eq!(
+        problems("[voice]\nmodel = \"ggml-base.bin\""),
+        vec![Problem::VoiceInProject]
+    );
+}
+
+#[rstest]
+#[case::detected("", vec![])]
+#[case::code("language = \"ja\"", vec![])]
+#[case::name("language = \"Japanese\"", vec![Problem::InvalidVoiceLanguage("Japanese".into())])]
+#[case::upper("language = \"JA\"", vec![Problem::InvalidVoiceLanguage("JA".into())])]
+fn voice_language_is_a_code(#[case] line: &str, #[case] expected: Vec<Problem>) {
+    let config = parse_unchecked(&format!("[voice]\nmodel = \"m.bin\"\n{line}"));
+    let problems = config.map(|config| validate::validate(&config));
+    assert_eq!(problems.ok(), Some(expected));
+}
+
+#[rstest]
+#[case::relative("models/ggml-base.bin", Some("/cfg"), "/cfg/models/ggml-base.bin")]
+#[case::absolute("/m/ggml-base.bin", Some("/cfg"), "/m/ggml-base.bin")]
+#[case::no_config_dir("ggml-base.bin", None, "ggml-base.bin")]
+fn voice_model_is_relative_to_the_config_dir(
+    #[case] model: &str,
+    #[case] dir: Option<&str>,
+    #[case] expected: &str,
+) {
+    let voice = Voice {
+        model: model.into(),
+        language: None,
+    };
+    assert_eq!(
+        voice.model_path(dir.map(std::path::Path::new)),
+        std::path::PathBuf::from(expected)
+    );
+}

@@ -11,7 +11,7 @@ use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource};
 
-use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
+use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
@@ -308,6 +308,7 @@ fn PaneView(pane: PaneId) -> Element {
         _ => None,
     };
     let unread = is_unread(app.sessions, pane);
+    let is_agent = status.is_some();
 
     rsx! {
         section {
@@ -338,6 +339,9 @@ fn PaneView(pane: PaneId) -> Element {
                 }
                 span { class: "spacer" }
                 span { class: "pane-tools",
+                    if is_agent {
+                        HistoryMenu { pane }
+                    }
                     button {
                         class: "icon",
                         title: shortcuts.title("Split right", Action::SplitRight),

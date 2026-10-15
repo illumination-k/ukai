@@ -79,6 +79,7 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 | `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                            |
 | `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                                                                                                                              |
 | `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`）。UI フレームワークに依存しない。 |
+| `ukai-voice`   | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                     |
 | `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                           |
 | `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                 |
 | `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                          |
@@ -287,12 +288,12 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 
 1. ユーザー全体: `~/.config/ukai/config.toml`（`$UKAI_CONFIG_DIR` / `$XDG_CONFIG_HOME/ukai` で変更可）
    … 共有のエージェント定義（どのプロジェクトでも使うクラウドエージェント）と、アプリ全体に効く
-   `[keybindings]`（後述「UI」。プロジェクトの `ukai.toml` に書くと検証エラー）
+   `[keybindings]` と `[voice]`（後述「UI」。プロジェクトの `ukai.toml` に書くと検証エラー）
 2. プロジェクト: プロジェクトルートの `ukai.toml`（任意）… プロジェクト固有のエージェント
 3. （今後）ローカル上書き: `ukai.local.toml`（gitignore 前提）… 個人の URL やトークン参照
 
 `ukai_config::load_layered` が後勝ちで合成する: `agents.<id>` は id 単位で置換、`permissions` は
-プロジェクトの規則を先に評価、`project` / `reports` はプロジェクトのもの、`keybindings` はユーザーのもの。検証は合成後に 1 回だけ行う
+プロジェクトの規則を先に評価、`project` / `reports` はプロジェクトのもの、`keybindings` / `voice` はユーザーのもの。検証は合成後に 1 回だけ行う
 （ユーザー側で定義したエージェントをプロジェクトの規則から参照できるように）。
 **秘密情報はファイルに書かせない**。`${env:NAME}` 展開のみ許し、未定義なら起動時にエラーではなく
 そのエージェントを「未構成」として表示する。
@@ -467,7 +468,7 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
   ユーザーが割り当てた chord は、それを既定で持っていたアクションから外す。未知のアクション・解釈できない chord・
   ユーザー設定同士の衝突は全部集めてサイドバー下部に警告として出し、残りの設定は効かせる。起動時に 1 回読む。
   アクション: `palette` `new-tab` `close-pane` `split-right` `split-down` `next-tab` `prev-tab` `next-pane`
-  `prev-pane` `tab-1`〜`tab-9` `stop`（以上アプリ全体）、`send`（入力欄）。
+  `prev-pane` `tab-1`〜`tab-9` `stop` `dictate`（以上アプリ全体）、`send`（入力欄）。
 
   ```toml
   [keybindings]
@@ -502,6 +503,29 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと 📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には
   添付のファイル名を出す。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
+- **過去のセッション（hermes に倣う）。** エージェントが `sessionCapabilities.list` を持つと、agent pane のヘッダに
+  時計のボタンを出す。開くと `session/list`（pane のプロジェクトの cwd で絞り、`nextCursor` を 10 ページまで追う）で
+  pane 以外のセッションを更新日時の新しい順に並べ、選ぶとその id を pane に記録して `session/load` / `session/resume`
+  でつなぎ直す（「New session」で新規）。ターン中は切り替えない（接続を落とすとターンが切れうるため）。
+  relay は `session/list` の cwd もワークスペースのものに書き換える。fork（`session/fork`）は ACP で unstable なので未対応。
+- **音声入力。** 入力欄の 🎤（既定 `mod+shift+m`、フォーカス中の pane の入力欄に効く）で録音を始め、もう一度押すと
+  止めて文字起こしし、下書きの末尾に足す（日本語・中国語の間は空白なしで、それ以外は空白で繋ぐ）。文字起こしは
+  **端末内で完結させる**: whisper.cpp（`ukai-voice`。macOS では Metal）で、外部の API には何も送らない。
+  モデル（ggml 形式。`ggml-base.bin` など）はユーザーが置き、ユーザーの `config.toml` で指す。
+  ```toml
+  [voice]
+  model = "models/ggml-base.bin" # 相対パスは config.toml のディレクトリから
+  language = "ja" # ISO 639-1。省略で自動判定
+  ```
+  - モデルは最初の録音の開始時に読み込む（話している間に UI スレッド外で）。文字起こしも `spawn_blocking`。
+  - 録音は既定の入力デバイスをモノラルにして持ち、16 kHz に線形リサンプルして渡す。最長 5 分で打ち切る。
+    無音（振幅が閾値以下）は送らない（whisper は無音から文章を作りがちなため）。`[BLANK_AUDIO]` などの
+    非音声の印は捨てる。
+  - 録音中は 🎤 が赤く点滅、文字起こし中は黄。問題（モデルがない、マイクがない、何も聞こえない）は入力欄の
+    エラー行に出す。pane を閉じると録音も止まる。
+  - macOS で `.app` に包むときは `Info.plist` に `NSMicrophoneUsageDescription` が要る（「配布」で対応）。
+  - macOS の SFSpeechRecognizer などの OS の認識器は使わない: Objective-C の `unsafe` 呼び出しが要り
+    （ワークスペースは `unsafe_code = "forbid"`）、OS ごとに別実装になり、Linux で試せないため。
 - **使用量。** エージェントが ACP の `usage_update` を送ると、入力欄の右下に最新のコンテキスト使用量と累計コスト
   （`53k / 200k (27%) · $0.05`、`ukai_core::usage_label`）を出す。送らないエージェントでは何も出さない。
 - **スラッシュコマンド。** 下書きが `/` と名前の途中だけのとき、エージェントが `Commands` で知らせたコマンドを
@@ -550,14 +574,14 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 
 ## Milestones
 
-| Phase | 内容                                                                                                                                                                                                              |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル                                                        |
-| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                                    |
-| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                              |
-| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、gateway のスケジュール（コマンドと prompt、済み）。リサイズ |
-| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                                                                       |
-| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                   |
+| Phase | 内容                                                                                                                                                                                                                        |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル                                                                  |
+| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                                              |
+| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                                        |
+| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、音声入力、gateway のスケジュール（コマンドと prompt、済み）。リサイズ |
+| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                                                                                 |
+| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                             |
 
 ## Open questions
 

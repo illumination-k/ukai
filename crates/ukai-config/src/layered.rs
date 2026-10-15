@@ -40,7 +40,7 @@ fn dir(
 
 /// Overlay `project` on `user`: agents are replaced by id, project
 /// permission rules are consulted before the user's, project and report
-/// settings come from the project, and keybindings from the user.
+/// settings come from the project, and keybindings and voice from the user.
 pub fn merge(user: Config, project: Config) -> Config {
     let mut agents = user.agents;
     agents.extend(project.agents);
@@ -52,6 +52,7 @@ pub fn merge(user: Config, project: Config) -> Config {
         permissions,
         reports: project.reports,
         keybindings: user.keybindings,
+        voice: user.voice,
     }
 }
 
@@ -71,7 +72,7 @@ pub fn load_layered(user_file: Option<&Path>, root: &Path) -> Result<Config, Con
 }
 
 /// The user file alone (empty if absent), for what applies to the whole app
-/// rather than to a project: `[keybindings]`. Agents it names are checked
+/// rather than to a project: `[keybindings]` and `[voice]`. Agents it names are checked
 /// once it is layered under a project, not here.
 pub fn load_user(user_file: Option<&Path>) -> Result<Config, ConfigError> {
     read_optional(user_file)

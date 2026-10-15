@@ -33,7 +33,8 @@ version = "0.7.10"
 depends = ["aqua:cargo-bins/cargo-binstall"]
 
 # System libraries the Dioxus desktop renderer (wry/tao) links against on
-# Linux. `mise install` never applies these; run
+# Linux, ALSA for the microphone (cpal), and cmake and libclang to build
+# whisper.cpp for voice input. `mise install` never applies these; run
 # `mise bootstrap packages apply`. Skipped where apt-get is absent.
 [bootstrap.packages]
 "apt:libwebkit2gtk-4.1-dev" = "latest"
@@ -42,6 +43,10 @@ depends = ["aqua:cargo-bins/cargo-binstall"]
 "apt:libxdo-dev" = "latest"
 "apt:librsvg2-dev" = "latest"
 "apt:libssl-dev" = "latest"
+"apt:libasound2-dev" = "latest"
+"apt:cmake" = "latest"
+"apt:clang" = "latest"
+"apt:libclang-dev" = "latest"
 
 [hooks]
 postinstall = "if [ -z \"${CI:-}\" ]; then prek install -f; fi"

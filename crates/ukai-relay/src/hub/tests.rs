@@ -364,7 +364,8 @@ fn session_setup_runs_in_the_relays_directory() {
     let (mut hub, init) = Hub::new(Some("/workspace/repo".into()));
     hub.from_agent(result(json!(agent_id(&init)), json!({})));
     hub.connect(A);
-    for method in ["session/new", "session/load"] {
+    // `session/list` too, so it lists the sessions in this workspace.
+    for method in ["session/new", "session/load", "session/list"] {
         match hub
             .from_client(
                 A,

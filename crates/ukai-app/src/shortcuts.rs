@@ -6,9 +6,10 @@ use dioxus::prelude::*;
 use ukai_core::Direction;
 use ukai_core::keymap::{Action, Keymap, Keystroke, Platform, Scope};
 
-use crate::agent_pane::stop_turn;
+use crate::agent_pane::{stop_turn, toggle_dictation};
 use crate::layout::close_pane;
 use crate::projects::{AppSignals, Paths};
+use crate::voice::Voice;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shortcuts {
@@ -95,6 +96,11 @@ fn perform(app: AppSignals, action: Action) {
         Action::Tab(n) => layout.write().select_tab(usize::from(n).saturating_sub(1)),
         // Escape also closes the palette; that one is not for the pane.
         Action::Stop if !palette() => stop_turn(app.sessions, focused),
+        Action::Dictate => {
+            if let Some(voice) = try_consume_context::<Voice>() {
+                toggle_dictation(app.sessions, focused, &voice);
+            }
+        }
         Action::Stop | Action::Send => {}
     }
 }

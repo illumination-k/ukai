@@ -212,7 +212,8 @@ impl Hub {
         mut message: Value,
     ) -> Vec<Output> {
         let session = session_id(&message);
-        if let (Some(cwd), "session/new" | "session/load" | "session/resume") = (&self.cwd, method)
+        if let (Some(cwd), "session/new" | "session/load" | "session/resume" | "session/list") =
+            (&self.cwd, method)
             && let Some(params) = message.get_mut("params").and_then(Value::as_object_mut)
         {
             params.insert("cwd".to_owned(), json!(cwd));

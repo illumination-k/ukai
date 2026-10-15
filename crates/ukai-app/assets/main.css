@@ -1439,6 +1439,30 @@ button.new-tab {
   font-size: 11px;
 }
 
+/* Dictation: red while the microphone records, amber while transcribing. */
+.composer-footer button.mic.recording {
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.composer-footer button.mic.transcribing {
+  color: var(--working);
+  cursor: progress;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-footer button.mic.recording {
+    animation: none;
+  }
+}
+
 /* Context use and cost the agent reports. */
 .composer-footer .usage {
   margin-left: auto;
@@ -1516,6 +1540,38 @@ button.config-trigger:disabled {
   background: var(--card);
   box-shadow: 0 12px 40px rgb(0 0 0 / 0.2);
   outline: none;
+}
+
+/* The pane header's session menu opens downward from its right edge. */
+.history {
+  position: relative;
+}
+
+.history button.open {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.history-menu .untitled {
+  color: var(--muted-fg);
+}
+
+.history-menu {
+  top: calc(100% + 4px);
+  right: 0;
+  bottom: auto;
+  left: auto;
+}
+
+.history-note {
+  padding: 6px 8px;
+  color: var(--muted-fg);
+  font-size: 12px;
+  white-space: normal;
+}
+
+.history-note.error {
+  color: var(--destructive);
 }
 
 .config-group {
