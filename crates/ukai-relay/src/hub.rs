@@ -9,7 +9,7 @@
 //! - It initializes the agent once and answers every client's `initialize`
 //!   from that response, advertising `loadSession`.
 //! - It records each session's `session/update` notifications, plus the user
-//!   turns it forwards, and answers `session/load` for a known session by
+//!   turns it forwards (and the messages steered into a running turn), and answers `session/load` for a known session by
 //!   replaying them, so the history includes what happened while no client
 //!   was connected.
 //! - A prompt turn keeps running without a client. Whoever is attached when
@@ -75,6 +75,29 @@ impl Session {
         if let Some(setup) = self.setup.as_object_mut() {
             setup.insert("configOptions".to_owned(), options);
         }
+    }
+
+    /// Record the user's message of a `session/prompt` or steer: the agent
+    /// does not echo it, but a replay should show it.
+    fn record_user_turn(&mut self, message: &Value) {
+        let sid = message
+            .pointer("/params/sessionId")
+            .cloned()
+            .unwrap_or_default();
+        let blocks = message
+            .pointer("/params/prompt")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.history.extend(blocks.into_iter().map(|content| {
+            notification(
+                "session/update",
+                json!({
+                    "sessionId": sid,
+                    "update": { "sessionUpdate": "user_message_chunk", "content": content }
+                }),
+            )
+        }));
     }
 }
 
@@ -216,24 +239,19 @@ impl Hub {
                 entry.attached = Some(conn);
                 self.forward(conn, id, method, Some(session), message)
             }
+            // Joins the running turn; with no turn the agent hands it back and
+            // the client sends it as `session/prompt`, recorded then.
+            ukai_acp::STEER_METHOD => {
+                if let Some(state) = session.as_ref().and_then(|s| self.sessions.get_mut(s))
+                    && state.turn.is_some()
+                {
+                    state.record_user_turn(&message);
+                }
+                self.forward(conn, id, method, session, message)
+            }
             "session/prompt" => {
                 if let Some(state) = session.as_ref().and_then(|s| self.sessions.get_mut(s)) {
-                    // The agent does not echo the user's turn, but a replay should show it.
-                    let blocks = message
-                        .pointer("/params/prompt")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    let sid = session.clone().unwrap_or_default();
-                    state.history.extend(blocks.into_iter().map(|content| {
-                        notification(
-                            "session/update",
-                            json!({
-                                "sessionId": sid,
-                                "update": { "sessionUpdate": "user_message_chunk", "content": content }
-                            }),
-                        )
-                    }));
+                    state.record_user_turn(&message);
                 }
                 let outputs = self.forward(conn, id, method, session.clone(), message.take());
                 if let (Some(session), Some(Output::Agent(sent))) = (session, outputs.first()) {

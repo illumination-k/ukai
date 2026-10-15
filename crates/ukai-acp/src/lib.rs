@@ -19,8 +19,8 @@ pub use reports::ReportsEndpoint;
 pub use session::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, Cost, FileDiff,
     PROGRESS_METHOD, PermissionChoice, PermissionId, PlanItem, Prompt, PromptCaps, RestoreOutcome,
-    SessionEvent, SessionEvents, SessionHandle, SessionOptions, SlashCommand, TURN_STATE_METHOD,
-    ToolStatus, Usage, spawn_session,
+    STEER_METHOD, SessionEvent, SessionEvents, SessionHandle, SessionOptions, SlashCommand,
+    TURN_STATE_METHOD, ToolStatus, Usage, spawn_session,
 };
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig};

@@ -20,7 +20,7 @@ use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
 use ukai_core::slash;
 use ukai_core::{
-    Alert, Entry, PaneContent, PaneId, ProjectId, ReportSource, Status, Steer, Transcript,
+    Alert, Entry, PaneContent, PaneId, ProjectId, Queued, ReportSource, Status, Transcript,
     usage_label,
 };
 
@@ -65,8 +65,8 @@ impl Composer {
         }
     }
 
-    /// Put an unsent steer back in front of what is being written.
-    fn restore(mut self, steer: Steer) {
+    /// Put an unsent message back in front of what is being written.
+    fn restore(mut self, steer: Queued) {
         let draft = self.draft.peek().clone();
         let text = match (steer.text.is_empty(), draft.is_empty()) {
             (_, true) => steer.text,
@@ -135,8 +135,8 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
                     }
                     let raised = Alert::of(&event);
                     transcript.write().apply(event);
-                    if transcript.peek().steer.is_some() {
-                        follow_steer(sessions, pane, transcript, composer);
+                    if transcript.peek().queued.is_some() {
+                        follow_queued(sessions, pane, transcript, composer);
                     }
                     if let Some(raised) = raised {
                         alert::raise(&window, layout, pane, unread, &source, &raised);
@@ -188,15 +188,15 @@ fn start_session(
     ))
 }
 
-/// Send the steer queued behind a turn that has stopped, or hand it back to
+/// Send the message queued behind a turn that has stopped, or hand it back to
 /// the composer when the session cannot take it.
-fn follow_steer(
+fn follow_queued(
     sessions: Sessions,
     pane: PaneId,
     mut transcript: Signal<Transcript>,
     composer: Composer,
 ) {
-    let Some(steer) = transcript.write().take_steer() else {
+    let Some(steer) = transcript.write().take_queued() else {
         return;
     };
     // A reconnect replaces the pane's session; this transcript's handle is gone then.
@@ -316,9 +316,11 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 return;
             }
             let text = review::review_prompt(&comments, &text);
-            if status == Status::Busy {
+            let busy = status == Status::Busy;
+            // An agent that cannot take a message mid-turn is stopped first.
+            if busy && !transcript.read().prompt_caps.steering {
                 stop_turn(app.sessions, pane);
-                transcript.write().steer(Steer {
+                transcript.write().queue(Queued {
                     text,
                     attachments: pending
                         .into_iter()
@@ -336,7 +338,14 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 text: text.clone(),
                 attachments: pending.into_iter().map(|p| p.attachment).collect(),
             };
-            if handle.as_ref().is_some_and(|h| h.prompt(prompt)) {
+            let sent = handle.as_ref().is_some_and(|h| {
+                if busy {
+                    h.steer(prompt)
+                } else {
+                    h.prompt(prompt)
+                }
+            });
+            if sent {
                 transcript.write().push_prompt(text, names);
                 draft.set(String::new());
                 review.set(Vec::new());
@@ -351,10 +360,11 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let busy = status == Status::Busy;
     let awaiting = transcript.read().awaiting_permission();
     let idle = status == Status::Idle;
-    // A message sent while a turn runs steers it: the turn stops and the
-    // message follows.
+    // A message sent while a turn runs steers it: it joins the turn, or for
+    // an agent that cannot take that, the turn stops and the message follows.
     let writable = idle || busy;
-    let steer = transcript.read().steer.clone();
+    let steering = transcript.read().prompt_caps.steering;
+    let steer = transcript.read().queued.clone();
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
     let config = transcript.read().config.clone();
@@ -429,7 +439,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                                 class: "small outline",
                                 title: "Move back to the message box",
                                 onclick: move |_| {
-                                    if let Some(steer) = transcript.write().steer.take() {
+                                    if let Some(steer) = transcript.write().queued.take() {
                                         composer.restore(steer);
                                     }
                                 },
@@ -544,6 +554,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     rows: "2",
                     placeholder: match status {
                         Status::Idle => "Message the agent — / for commands, drop files or images here",
+                        Status::Busy if steering => "Steer the agent — your message joins this turn",
                         Status::Busy => {
                             "Steer the agent — sending stops this turn and sends your message"
                         }
@@ -616,7 +627,11 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     }
                     button {
                         class: "round primary",
-                        title: if busy { "Steer: stop this turn and send" } else { "Send" },
+                        title: match (busy, steering) {
+                            (false, _) => "Send",
+                            (true, true) => "Steer: add to this turn",
+                            (true, false) => "Steer: stop this turn and send",
+                        },
                         disabled: !writable || (draft.read().trim().is_empty() && !has_extras),
                         onclick: move |_| send_on_click(),
                         Svg { icon: Icon::Send }
