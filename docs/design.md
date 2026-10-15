@@ -220,13 +220,44 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   すでにある仕事を読むだけなので、動いている Pod がなければ 410 を返してクライアントにそう言わせる
   （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
-- 権限は namespace の Role だけ（jobs、pods と events の参照）。CRD も cluster-scoped な権限も要らない。
+- スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
+- 権限は namespace の Role だけ（jobs、pods と events の参照、スケジュールのコマンド用の `pods/exec`、
+  スケジュールを置く configmaps）。CRD も cluster-scoped な権限も要らない。
 - pane ごとのワークスペース: ukai は gateway のエージェントを開いた pane に鍵を作って `state.json` に残し、
   接続のたびにヘッダー `Ukai-Workspace-Scope`（`shared` / `pod`）と `Ukai-Workspace`（鍵）を送る。
   `shared` はそのエージェントの全 pane で 1 つの Pod と作業ツリーを共有し、`pod` は pane ごとに Pod を分ける
   （鍵がワークスペースの識別子に入る）。既定は設定の `workspace` で、pane を開くときに選び直せる。
   同じ Pod の中で作業を分けたいときは、エージェント自身に git worktree を使わせる。
 - セッションの状態は relay が持つので、gateway を再起動してもエージェントは落ちない。
+
+### スケジュール
+
+gateway は、エージェントごとに cron で **コマンド**か **prompt** を回すスケジュールを持つ。gateway が発火する
+ので、ukai を閉じていても回る（Kubernetes の CronJob ではない。発火のたびに Pod を立てると clone と
+イメージの pull を毎回待つうえ、prompt の結果のセッションを後から開けない）。
+
+- API は `/agents/<id>/schedules`（`GET` 一覧・`POST` 追加）、`/<schedule>`（`GET`・`PUT`・`DELETE`）、
+  `/<schedule>/runs`（新しい順）、`/<schedule>/run` と `/<schedule>/stop`（`POST`）。トークンは `/acp` と同じ。
+  型は `ukai_acp::schedules`（クライアント `SchedulesEndpoint` も）、判定は `ukai_core::schedule`（純粋）で、
+  両端が同じものを使う。
+- 中身: 名前、cron（5 フィールドか `@daily` などの別名）、作った人の UTC オフセット（保存時のもの。
+  夏時間には追従しない）、タスク（`command`: エージェントのコンテナで checkout から `sh -c`、`prompt`: 専用の
+  セッションで 1 ターン）、有効かどうか。問題（名前なし・cron 不正・空のコマンド / prompt・オフセット範囲外）は
+  全部集めて 422 で返す。アプリも保存前に同じ判定を出す。
+- 発火: 15 秒ごとに `Schedules::tick`。`last_due` 以降の最初の一致が過ぎていれば 1 回だけ発火する（gateway が
+  止まっていた間に何回過ぎても 1 回。走っている間に来た回は飛ばす）。保存した時点から数え直すので、過去の
+  時刻では発火しない。
+- 実行: スケジュールごとに固定のワークスペース鍵（`schedule-<id>`、`pod` スコープ）で Pod を確保する。毎回
+  同じ Pod（idle で落ちていれば作り直し、作業ツリーは snapshot から戻る）に載るので、クライアントもその Pod
+  と run のセッションを開ける。
+  - コマンドは `pods/exec` で走らせ、その間 relay に WebSocket を 1 本張って Pod を idle で落とさない。
+    stdout と stderr を届いた順に残す。停止は pid ファイルで `kill`。
+  - prompt は relay に ACP で繋いでセッションを作り、1 ターン送る。**パーミッション要求には答えない**:
+    relay は答えのない要求を後から繋いだクライアントに送り直すので、ユーザーがそのセッションを開いて答える。
+    停止は `session/cancel`。
+- 保存: スケジュールごとに ConfigMap `ukai-schedule-<id>`（ラベル `ukai.dev/schedule`）にスケジュールと直近
+  20 件の run（出力は末尾 16 KiB）を JSON で置く。変更のたびと、走っている間は 10 秒ごとに書く。gateway の
+  再起動で走っていた run は「Interrupted」にする。
 
 ### ワークスペース Pod
 
@@ -476,21 +507,14 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - **スラッシュコマンド。** 下書きが `/` と名前の途中だけのとき、エージェントが `Commands` で知らせたコマンドを
   あいまい一致（`palette` と同じ照合）で入力欄の上に出す。↑↓ で選び、Tab / Enter で `/name` に置き換え、
   Escape で閉じる。送るのは普通の prompt で、relay は `session/update` として記録するので `session/load` で一覧も戻る。
-- **スケジュール（アプリが開いている間だけ）。** プロジェクトごとに、cron（5 フィールドか `@daily` などの別名、
-  ローカル時刻）で **コマンド**（プロジェクトルートで `sh -c`、Windows は `cmd /C`）か **prompt**（エージェントに
-  1 ターン、pane とは別の専用セッション）を回す。サイドバーの「Schedules」から作り、schedule pane（`PaneContent::Schedule`）で
-  名前・中身・cron（プリセットと次回時刻の表示）を下書きとして編集して保存、有効化、「Run now」、停止、削除する。
-  - 判定は `ukai_core::schedule`（純粋）。`Schedules::tick` を 15 秒ごとに呼び、`last_due` 以降の最初の一致が過ぎて
-    いれば 1 回だけ発火する（閉じていた間に何回過ぎても 1 回。走っている間に来た回は飛ばす）。編集・有効化した
-    時点から数え直すので、過去の時刻で発火しない。問題（名前なし・cron 不正・空のコマンド / prompt・未宣言の
-    agent）は全部集めて表示し、問題のあるスケジュールは有効化も発火もしない。
-  - run ごとに開始・終了・結果・出力の末尾 16 KiB を残し、スケジュールごとに直近 20 件を `state.json` に保存する。
-    アプリ終了で走っていた run は次の起動で「Interrupted」にする。失敗はウィンドウが背面ならデスクトップ通知。
-  - prompt の run は確認する人がいないので **パーミッション要求をすべて断る**（パーミッション規則ができるまで）。
-    終わった run のセッションは「Open session in a pane」で agent pane に開き、`session/load` で読んで続けられる。
-    gateway エージェントにはスケジュールごとに固定のワークスペース鍵を送り、毎回同じ Pod に載せる。
-  - プロジェクトを閉じるとそのスケジュールも消える。アプリを閉じている間に回したい定期実行は gateway 側の
-    CronJob として別途設計する。
+- **スケジュール。** 後述「スケジュール」の通り gateway が持って回し、アプリは編集と結果の表示だけをする。
+  サイドバーの「Schedules」に選択中のプロジェクトの gateway エージェントごとの一覧（15 秒ごとに読み直す）、
+  schedule pane（`PaneContent::Schedule { project, agent, schedule }`、未保存は `schedule: None`）で名前・中身・
+  cron（プリセットと次回時刻の表示）を下書きとして編集して保存、有効化、「Run now」、停止、削除する。
+  run の一覧と出力の末尾も pane に出す（開いている間は 4 秒ごとに読み直す）。失敗はウィンドウが背面なら
+  デスクトップ通知。prompt の run のセッションは「Open session in a pane」でそのスケジュールのワークスペース
+  （`pod` スコープ、鍵は `workspace_key`）の agent pane に開き、`session/load` で読んで続けたり、
+  待っているパーミッション要求に答えたりできる。
 - 会話は最大幅 46rem で中央寄せ。ユーザー発言は右寄せの淡いバブル、エージェント発言は地のまま、ツール呼び出しは
   1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。
 - **steer。** ターン中の送信はそのターンへの割り込みになる。ACP 本体には走っているターンに発言を足す手段がない。
@@ -526,14 +550,14 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 
 ## Milestones
 
-| Phase | 内容                                                                                                                                                                                           |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル                                     |
-| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                 |
-| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                           |
-| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、アプリ内のスケジュール（済み）。リサイズ |
-| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                                                    |
-| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                |
+| Phase | 内容                                                                                                                                                                                                              |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル                                                        |
+| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                                    |
+| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                              |
+| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、gateway のスケジュール（コマンドと prompt、済み）。リサイズ |
+| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                                                                       |
+| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                   |
 
 ## Open questions
 

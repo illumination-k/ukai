@@ -4,29 +4,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use ukai_core::schedule::Schedules;
 use ukai_core::state::{self, AppState};
 use ukai_core::{Layout, Projects};
 
 /// Coalesce bursts of changes (typing a split, resizing later) into one write.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Save `projects`, `layout`, and `schedules` to `path` shortly after any of
-/// them changes.
-pub fn use_autosave(
-    path: Option<PathBuf>,
-    projects: Signal<Projects>,
-    layout: Signal<Layout>,
-    schedules: Signal<Schedules>,
-) {
+/// Save `projects` and `layout` to `path` shortly after either changes.
+pub fn use_autosave(path: Option<PathBuf>, projects: Signal<Projects>, layout: Signal<Layout>) {
     let mut generation = use_signal(|| 0_u64);
     use_effect(move || {
-        // Reading them subscribes this effect to them.
-        let snapshot = AppState::new(
-            projects.read().clone(),
-            layout.read().clone(),
-            schedules.read().clone(),
-        );
+        // Reading both subscribes this effect to them.
+        let snapshot = AppState::new(projects.read().clone(), layout.read().clone());
         let Some(path) = path.clone() else {
             return;
         };

@@ -1,24 +1,17 @@
-//! Commands and prompts the app runs on a cron schedule while it is open.
+//! Schedules a gateway runs for its agents: when one is due, what is wrong
+//! with one, and the recent runs it keeps. Pure, so the gateway that fires
+//! them and the app that edits them agree, and so it is tested here.
 //!
-//! A schedule belongs to a project and runs one [`Task`]: a shell command in
-//! the project root, or one prompt turn of one of its agents. Each firing is a
-//! [`Run`], kept (with the tail of its output) so the user can see what
-//! happened while they were away. Nothing here runs anything: the app asks
-//! [`Schedules::tick`] what is due and reports back through
-//! [`Schedules::start`], [`Schedules::append_output`] and [`Schedules::finish`].
-//!
-//! Times are Unix seconds in storage and `chrono` date-times at the edges;
-//! cron patterns are read in whatever time zone the caller's date-time has
-//! (the app passes local time).
+//! The types are [`ukai_acp::schedules`]'s, since they cross the wire.
+//! Times are Unix seconds in storage; cron patterns are read at the offset
+//! from UTC the schedule's author saved them with.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
-use serde::{Deserialize, Serialize};
-
-use crate::ProjectId;
+pub use ukai_acp::schedules::{Outcome, Run, Schedule, ScheduleInfo, ScheduleSpec, Task, Trigger};
 
 /// Runs kept per schedule; older ones are dropped.
 pub const RUNS_KEPT: usize = 20;
@@ -26,59 +19,7 @@ pub const RUNS_KEPT: usize = 20;
 /// Bytes of output kept per run: the end, where errors and results are.
 pub const OUTPUT_KEPT: usize = 16 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ScheduleId(String);
-
-impl ScheduleId {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for ScheduleId {
-    fn from(id: &str) -> Self {
-        Self(id.to_owned())
-    }
-}
-
-impl std::fmt::Display for ScheduleId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// What a schedule runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Task {
-    /// A shell command (`sh -c`, `cmd /C` on Windows) in the project root.
-    Command { command: String },
-    /// One prompt turn of `[agents.<agent>]`, in a session of its own.
-    Prompt { agent: String, prompt: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Schedule {
-    pub id: ScheduleId,
-    pub project: ProjectId,
-    pub name: String,
-    /// Five fields (minute hour day-of-month month day-of-week), or an alias
-    /// such as `@daily`.
-    pub cron: String,
-    pub task: Task,
-    pub enabled: bool,
-    /// What a gateway agent's prompt runs ask for as their workspace key, so
-    /// every run of the schedule lands in the same pod. Made by the caller
-    /// (the app uses a random UUID) and unique across machines.
-    pub workspace_key: String,
-    /// When the schedule was last due, fired or not; the next firing is the
-    /// first match of `cron` after it. Editing or enabling the schedule moves
-    /// it to that moment, so a change never fires for a time already past.
-    pub last_due: i64,
-}
-
-/// What can be wrong with a schedule; [`Schedule::problems`] lists them all.
+/// What can be wrong with a schedule; [`problems`] lists them all.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Problem {
     #[error("give the schedule a name")]
@@ -89,307 +30,49 @@ pub enum Problem {
     EmptyCommand,
     #[error("the prompt is empty")]
     EmptyPrompt,
-    #[error("pick an agent")]
-    NoAgent,
-    #[error("agent `{0}` is not declared for this project")]
-    UnknownAgent(String),
+    #[error("UTC offset {0} minutes is out of range")]
+    InvalidOffset(i32),
 }
 
-impl Schedule {
-    /// Everything that keeps the schedule from running, given the agents its
-    /// project declares.
-    pub fn problems<'a>(&self, agents: impl IntoIterator<Item = &'a str>) -> Vec<Problem> {
-        let mut problems = Vec::new();
-        if self.name.trim().is_empty() {
-            problems.push(Problem::EmptyName);
-        }
-        if let Err(error) = parse_cron(&self.cron) {
-            problems.push(Problem::InvalidCron(error));
-        }
-        match &self.task {
-            Task::Command { command } => {
-                if command.trim().is_empty() {
-                    problems.push(Problem::EmptyCommand);
-                }
-            }
-            Task::Prompt { agent, prompt } => {
-                if agent.is_empty() {
-                    problems.push(Problem::NoAgent);
-                } else if !agents.into_iter().any(|known| known == agent) {
-                    problems.push(Problem::UnknownAgent(agent.clone()));
-                }
-                if prompt.trim().is_empty() {
-                    problems.push(Problem::EmptyPrompt);
-                }
-            }
-        }
-        problems
+/// Everything that keeps `spec` from being saved.
+pub fn problems(spec: &ScheduleSpec) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    if spec.name.trim().is_empty() {
+        problems.push(Problem::EmptyName);
     }
-
-    /// When the schedule fires next, as seen from `now`'s time zone; `None`
-    /// when it is disabled or its pattern is invalid or never matches.
-    pub fn next_due<Tz: TimeZone>(&self, now: &DateTime<Tz>) -> Option<DateTime<Tz>> {
-        if !self.enabled {
-            return None;
-        }
-        let after = now.timezone().timestamp_opt(self.last_due, 0).single()?;
-        next_after(&self.cron, &after).ok()
+    if let Err(error) = parse_cron(&spec.cron) {
+        problems.push(Problem::InvalidCron(error));
     }
+    match &spec.task {
+        Task::Command { command } if command.trim().is_empty() => {
+            problems.push(Problem::EmptyCommand);
+        }
+        Task::Prompt { prompt } if prompt.trim().is_empty() => {
+            problems.push(Problem::EmptyPrompt);
+        }
+        Task::Command { .. } | Task::Prompt { .. } => {}
+    }
+    if offset(spec.utc_offset_minutes).is_none() {
+        problems.push(Problem::InvalidOffset(spec.utc_offset_minutes));
+    }
+    problems
 }
 
-/// Why a run started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Trigger {
-    Schedule,
-    /// "Run now".
-    Manual,
+fn offset(minutes: i32) -> Option<FixedOffset> {
+    FixedOffset::east_opt(minutes.checked_mul(60)?)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Outcome {
-    Running,
-    Succeeded,
-    Failed {
-        message: String,
-    },
-    /// Stopped by the user.
-    Stopped,
-    /// The app quit while it ran.
-    Interrupted,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Run {
-    pub trigger: Trigger,
-    pub started: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished: Option<i64>,
-    pub outcome: Outcome,
-    /// The last [`OUTPUT_KEPT`] bytes: the command's stdout and stderr, or
-    /// the agent's messages.
-    #[serde(default)]
-    pub output: String,
-    /// Whether `output` lost its beginning to [`OUTPUT_KEPT`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
-    /// The ACP session of a prompt run, to open it in a pane afterwards.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Schedules {
-    list: Vec<Schedule>,
-    /// Oldest first.
-    #[serde(default)]
-    runs: BTreeMap<ScheduleId, Vec<Run>>,
-    /// Ids are never reused, so a stale reference cannot hit a new schedule.
-    next: u64,
-}
-
-impl Schedules {
-    pub fn iter(&self) -> impl Iterator<Item = &Schedule> {
-        self.list.iter()
+/// When `schedule` fires next after it was last due; `None` when it is
+/// disabled or its pattern does not parse or never matches.
+pub fn next_due(schedule: &Schedule) -> Option<DateTime<Utc>> {
+    if !schedule.spec.enabled {
+        return None;
     }
-
-    pub fn of_project<'a>(&'a self, project: &'a ProjectId) -> impl Iterator<Item = &'a Schedule> {
-        self.list.iter().filter(move |s| &s.project == project)
-    }
-
-    pub fn get(&self, id: &ScheduleId) -> Option<&Schedule> {
-        self.list.iter().find(|s| &s.id == id)
-    }
-
-    /// A new, disabled schedule for `project`: a daily command with nothing
-    /// to run yet, for the user to fill in.
-    pub fn add<Tz: TimeZone>(
-        &mut self,
-        project: &ProjectId,
-        workspace_key: String,
-        now: &DateTime<Tz>,
-    ) -> ScheduleId {
-        self.next += 1;
-        let id = ScheduleId(format!("s{}", self.next));
-        self.list.push(Schedule {
-            id: id.clone(),
-            project: project.clone(),
-            name: "New schedule".to_owned(),
-            cron: "0 9 * * *".to_owned(),
-            task: Task::Command {
-                command: String::new(),
-            },
-            enabled: false,
-            workspace_key,
-            last_due: now.timestamp(),
-        });
-        id
-    }
-
-    /// Change a schedule. Counting starts again from `now`, so an edit never
-    /// fires for a time already past.
-    pub fn update<Tz: TimeZone>(
-        &mut self,
-        id: &ScheduleId,
-        now: &DateTime<Tz>,
-        edit: impl FnOnce(&mut Schedule),
-    ) {
-        if let Some(schedule) = self.list.iter_mut().find(|s| &s.id == id) {
-            let (key, project) = (schedule.workspace_key.clone(), schedule.project.clone());
-            edit(schedule);
-            schedule.id = id.clone();
-            schedule.workspace_key = key;
-            schedule.project = project;
-            schedule.last_due = now.timestamp();
-        }
-    }
-
-    pub fn remove(&mut self, id: &ScheduleId) -> Option<Schedule> {
-        let index = self.list.iter().position(|s| &s.id == id)?;
-        self.runs.remove(id);
-        Some(self.list.remove(index))
-    }
-
-    /// Forget the schedules of a project that was closed.
-    pub fn remove_project(&mut self, project: &ProjectId) {
-        let ids: Vec<_> = self.of_project(project).map(|s| s.id.clone()).collect();
-        for id in ids {
-            self.remove(&id);
-        }
-    }
-
-    /// Drop schedules whose project is gone, and mark runs that were going
-    /// when the app last quit as interrupted.
-    pub fn after_load(&mut self, has_project: impl Fn(&ProjectId) -> bool, now: i64) {
-        let orphans: Vec<_> = self
-            .list
-            .iter()
-            .filter(|s| !has_project(&s.project))
-            .map(|s| s.id.clone())
-            .collect();
-        for id in orphans {
-            self.remove(&id);
-        }
-        for run in self.runs.values_mut().flatten() {
-            if run.outcome == Outcome::Running {
-                run.outcome = Outcome::Interrupted;
-                run.finished.get_or_insert(now);
-            }
-        }
-    }
-
-    /// Oldest first.
-    pub fn runs(&self, id: &ScheduleId) -> &[Run] {
-        self.runs.get(id).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn last_run(&self, id: &ScheduleId) -> Option<&Run> {
-        self.runs(id).last()
-    }
-
-    pub fn is_running(&self, id: &ScheduleId) -> bool {
-        self.last_run(id)
-            .is_some_and(|run| run.outcome == Outcome::Running)
-    }
-
-    /// The enabled schedules that are due at `now` and not already running.
-    /// Every schedule that came due counts as due once, even if several of its
-    /// times passed (the app was closed) or it was still running (that time is
-    /// skipped). `valid` says whether a schedule can run at all; one that
-    /// cannot is not due.
-    pub fn tick<Tz: TimeZone>(
-        &mut self,
-        now: &DateTime<Tz>,
-        valid: impl Fn(&Schedule) -> bool,
-    ) -> Vec<ScheduleId> {
-        let mut fire = Vec::new();
-        let running: Vec<bool> = self.list.iter().map(|s| self.is_running(&s.id)).collect();
-        for (schedule, running) in self.list.iter_mut().zip(running) {
-            let due = schedule.next_due(now).is_some_and(|next| next <= *now);
-            if !due || !valid(schedule) {
-                continue;
-            }
-            schedule.last_due = now.timestamp();
-            if !running {
-                fire.push(schedule.id.clone());
-            }
-        }
-        fire
-    }
-
-    /// Record that a run of `id` started; `false` (and nothing recorded) when
-    /// one is already running or the schedule is gone.
-    pub fn start(&mut self, id: &ScheduleId, trigger: Trigger, now: i64) -> bool {
-        if self.get(id).is_none() || self.is_running(id) {
-            return false;
-        }
-        let runs = self.runs.entry(id.clone()).or_default();
-        runs.push(Run {
-            trigger,
-            started: now,
-            finished: None,
-            outcome: Outcome::Running,
-            output: String::new(),
-            truncated: false,
-            session: None,
-        });
-        if runs.len() > RUNS_KEPT {
-            runs.drain(..runs.len() - RUNS_KEPT);
-        }
-        true
-    }
-
-    /// Add to the output of the running run of `id`, keeping its tail.
-    pub fn append_output(&mut self, id: &ScheduleId, text: &str) {
-        if let Some(run) = self.running_mut(id) {
-            run.output.push_str(text);
-            if run.output.len() > OUTPUT_KEPT {
-                let mut cut = run.output.len() - OUTPUT_KEPT;
-                while !run.output.is_char_boundary(cut) {
-                    cut += 1;
-                }
-                run.output.drain(..cut);
-                run.truncated = true;
-            }
-        }
-    }
-
-    pub fn record_session(&mut self, id: &ScheduleId, session: String) {
-        if let Some(run) = self.running_mut(id) {
-            run.session = Some(session);
-        }
-    }
-
-    /// End the running run of `id`.
-    pub fn finish(&mut self, id: &ScheduleId, outcome: Outcome, now: i64) {
-        if let Some(run) = self.running_mut(id) {
-            run.outcome = outcome;
-            run.finished = Some(now);
-        }
-    }
-
-    fn running_mut(&mut self, id: &ScheduleId) -> Option<&mut Run> {
-        self.runs
-            .get_mut(id)
-            .and_then(|runs| runs.last_mut())
-            .filter(|run| run.outcome == Outcome::Running)
-    }
-}
-
-fn parse_cron(pattern: &str) -> Result<Cron, String> {
-    let pattern = pattern.trim();
-    if pattern.is_empty() {
-        return Err("empty".to_owned());
-    }
-    // Minute granularity: the app checks for due schedules every few seconds,
-    // not every second.
-    CronParser::builder()
-        .seconds(Seconds::Disallowed)
-        .year(Year::Disallowed)
-        .build()
-        .parse(pattern)
-        .map_err(|error| error.to_string())
+    let zone = offset(schedule.spec.utc_offset_minutes)?;
+    let after = zone.timestamp_opt(schedule.last_due, 0).single()?;
+    next_after(&schedule.spec.cron, &after)
+        .ok()
+        .map(|next| next.with_timezone(&Utc))
 }
 
 /// The first time after `after` that `pattern` matches, in `after`'s zone.
@@ -407,14 +90,185 @@ pub fn describe(pattern: &str) -> Option<String> {
     parse_cron(pattern).ok().map(|cron| cron.describe())
 }
 
-/// Whether `pattern` parses; for checking input as it is typed.
-pub fn is_valid(pattern: &str) -> bool {
-    parse_cron(pattern).is_ok()
+fn parse_cron(pattern: &str) -> Result<Cron, String> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err("empty".to_owned());
+    }
+    // Minute granularity: due schedules are looked for every few seconds,
+    // not every second.
+    CronParser::builder()
+        .seconds(Seconds::Disallowed)
+        .year(Year::Disallowed)
+        .build()
+        .parse(pattern)
+        .map_err(|error| error.to_string())
 }
 
-/// A Unix time as UTC, for callers that convert it to their own zone.
-pub fn at(seconds: i64) -> Option<DateTime<Utc>> {
-    Utc.timestamp_opt(seconds, 0).single()
+/// The schedules of a gateway and their recent runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Schedules {
+    list: Vec<Schedule>,
+    /// Oldest first.
+    runs: BTreeMap<String, Vec<Run>>,
+}
+
+impl Schedules {
+    pub fn iter(&self) -> impl Iterator<Item = &Schedule> {
+        self.list.iter()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Schedule> {
+        self.list.iter().find(|s| s.id == id)
+    }
+
+    /// Put back a schedule and its runs as they were saved. Runs that were
+    /// going when they were saved are marked interrupted at `now`: whatever
+    /// ran them is gone.
+    pub fn restore(&mut self, schedule: Schedule, mut runs: Vec<Run>, now: i64) {
+        for run in &mut runs {
+            if run.outcome == Outcome::Running {
+                run.outcome = Outcome::Interrupted;
+                run.finished.get_or_insert(now);
+            }
+        }
+        let id = schedule.id.clone();
+        self.list.retain(|s| s.id != id);
+        self.list.push(schedule);
+        self.runs.insert(id, runs);
+    }
+
+    /// Add a schedule under `id` (made by the caller, unique), counting from `now`.
+    pub fn add(&mut self, id: String, agent: String, spec: ScheduleSpec, now: i64) -> &Schedule {
+        let index = self.list.len();
+        self.list.push(Schedule {
+            workspace_key: format!("schedule-{id}"),
+            id,
+            agent,
+            spec,
+            last_due: now,
+        });
+        &self.list[index]
+    }
+
+    /// Replace a schedule's spec. Counting starts again from `now`, so an
+    /// edit never fires for a time already past.
+    pub fn update(&mut self, id: &str, spec: ScheduleSpec, now: i64) -> Option<&Schedule> {
+        let schedule = self.list.iter_mut().find(|s| s.id == id)?;
+        schedule.spec = spec;
+        schedule.last_due = now;
+        Some(schedule)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<Schedule> {
+        let index = self.list.iter().position(|s| s.id == id)?;
+        self.runs.remove(id);
+        Some(self.list.remove(index))
+    }
+
+    /// Oldest first.
+    pub fn runs(&self, id: &str) -> &[Run] {
+        self.runs.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn last_run(&self, id: &str) -> Option<&Run> {
+        self.runs(id).last()
+    }
+
+    pub fn is_running(&self, id: &str) -> bool {
+        self.last_run(id)
+            .is_some_and(|run| run.outcome == Outcome::Running)
+    }
+
+    /// `id` as listed.
+    pub fn info(&self, id: &str) -> Option<ScheduleInfo> {
+        let schedule = self.get(id)?;
+        Some(ScheduleInfo {
+            schedule: schedule.clone(),
+            next_due: next_due(schedule).map(|next| next.timestamp()),
+            last_run: self.last_run(id).cloned(),
+        })
+    }
+
+    /// The enabled schedules due at `now` and not already running. Each
+    /// schedule that came due counts once, even if several of its times
+    /// passed (the gateway was down) or it was still running (that time is
+    /// skipped).
+    pub fn tick(&mut self, now: i64) -> Vec<String> {
+        let mut fire = Vec::new();
+        let running: Vec<bool> = self.list.iter().map(|s| self.is_running(&s.id)).collect();
+        for (schedule, running) in self.list.iter_mut().zip(running) {
+            let due = next_due(schedule).is_some_and(|next| next.timestamp() <= now);
+            if !due {
+                continue;
+            }
+            schedule.last_due = now;
+            if !running {
+                fire.push(schedule.id.clone());
+            }
+        }
+        fire
+    }
+
+    /// Record that a run of `id` started; `false` (and nothing recorded) when
+    /// one is already running or the schedule is gone.
+    pub fn start(&mut self, id: &str, trigger: Trigger, now: i64) -> bool {
+        if self.get(id).is_none() || self.is_running(id) {
+            return false;
+        }
+        let runs = self.runs.entry(id.to_owned()).or_default();
+        runs.push(Run {
+            trigger,
+            started: now,
+            finished: None,
+            outcome: Outcome::Running,
+            output: String::new(),
+            truncated: false,
+            session: None,
+        });
+        if runs.len() > RUNS_KEPT {
+            runs.drain(..runs.len() - RUNS_KEPT);
+        }
+        true
+    }
+
+    /// Add to the output of the running run of `id`, keeping its tail.
+    pub fn append_output(&mut self, id: &str, text: &str) {
+        if let Some(run) = self.running_mut(id) {
+            run.output.push_str(text);
+            if run.output.len() > OUTPUT_KEPT {
+                let mut cut = run.output.len() - OUTPUT_KEPT;
+                while !run.output.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                run.output.drain(..cut);
+                run.truncated = true;
+            }
+        }
+    }
+
+    pub fn record_session(&mut self, id: &str, session: String) {
+        if let Some(run) = self.running_mut(id) {
+            run.session = Some(session);
+        }
+    }
+
+    /// End the running run of `id`; `false` when none was running.
+    pub fn finish(&mut self, id: &str, outcome: Outcome, now: i64) -> bool {
+        let Some(run) = self.running_mut(id) else {
+            return false;
+        };
+        run.outcome = outcome;
+        run.finished = Some(now);
+        true
+    }
+
+    fn running_mut(&mut self, id: &str) -> Option<&mut Run> {
+        self.runs
+            .get_mut(id)
+            .and_then(|runs| runs.last_mut())
+            .filter(|run| run.outcome == Outcome::Running)
+    }
 }
 
 #[cfg(test)]

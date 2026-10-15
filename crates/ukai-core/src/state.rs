@@ -1,6 +1,5 @@
-//! What survives a restart: registered projects, the tab/pane layout
-//! (including each agent pane's ACP session id so it can be continued), and
-//! schedules with their recent runs.
+//! What survives a restart: registered projects and the tab/pane layout,
+//! including each agent pane's ACP session id so it can be continued.
 //!
 //! One versioned JSON document, written atomically. Transcripts are not
 //! stored: agents that support `session/load` replay them.
@@ -12,7 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::{Layout, PaneContent};
 use crate::project::Projects;
-use crate::schedule::Schedules;
 
 /// Bump on incompatible changes; older files are migrated on load, newer
 /// ones are refused rather than misread.
@@ -23,9 +21,6 @@ pub struct AppState {
     pub version: u32,
     pub projects: Projects,
     pub layout: Layout,
-    /// Files written before schedules existed have none.
-    #[serde(default)]
-    pub schedules: Schedules,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,32 +46,21 @@ pub enum StateError {
 }
 
 impl AppState {
-    pub fn new(projects: Projects, layout: Layout, schedules: Schedules) -> Self {
+    pub fn new(projects: Projects, layout: Layout) -> Self {
         Self {
             version: STATE_VERSION,
             projects,
             layout,
-            schedules,
         }
     }
 
-    /// Forget the schedules of projects no longer registered, and empty every
-    /// pane that refers to such a project or to a schedule that is gone.
+    /// Empty every pane that refers to a project no longer registered.
     pub fn drop_orphans(&mut self) {
-        let projects = &self.projects;
-        self.schedules
-            .after_load(|project| projects.get(project).is_some(), now());
         let orphans: Vec<_> = self
             .layout
             .contents()
             .filter(|(_, content)| {
-                let gone = match content {
-                    PaneContent::Schedule { schedule, .. } => {
-                        self.schedules.get(schedule).is_none()
-                    }
-                    _ => false,
-                };
-                gone || content
+                content
                     .project()
                     .is_some_and(|project| self.projects.get(project).is_none())
             })
@@ -86,12 +70,6 @@ impl AppState {
             self.layout.set_content(pane, PaneContent::Empty);
         }
     }
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs().try_into().unwrap_or(i64::MAX))
 }
 
 /// Read the state at `path`; `Ok(None)` when there is none yet.
@@ -208,7 +186,7 @@ mod tests {
         );
         layout.record_session(pane, "sess-1".into());
         layout.split(pane, Direction::Horizontal);
-        AppState::new(projects, layout, Schedules::default())
+        AppState::new(projects, layout)
     }
 
     #[test]
@@ -276,38 +254,6 @@ mod tests {
         assert!(save(&path, &state).is_ok());
         assert_eq!(load(&path).ok().flatten(), Some(state));
         assert!(!dir.path().join("state.json.tmp").exists());
-    }
-
-    #[rstest]
-    fn reads_files_saved_before_schedules(dir: TempDir) {
-        let path = dir.path().join("state.json");
-        let mut json = serde_json::to_value(sample()).unwrap_or_else(|e| panic!("{e}"));
-        if let Some(object) = json.as_object_mut() {
-            object.remove("schedules");
-        }
-        std::fs::write(&path, json.to_string()).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(load(&path).ok().flatten(), Some(sample()));
-    }
-
-    #[test]
-    fn panes_of_removed_schedules_are_emptied() {
-        let mut state = sample();
-        let project = state
-            .projects
-            .iter()
-            .next()
-            .map(|p| p.id.clone())
-            .unwrap_or_else(|| panic!("sample has a project"));
-        let pane = state.layout.focused();
-        state.layout.set_content(
-            pane,
-            PaneContent::Schedule {
-                project,
-                schedule: crate::schedule::ScheduleId::from("s9"),
-            },
-        );
-        state.drop_orphans();
-        assert_eq!(state.layout.content(pane), Some(&PaneContent::Empty));
     }
 
     #[rstest]

@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use ukai_acp::PaneWorkspace;
 
 use crate::project::ProjectId;
-use crate::schedule::ScheduleId;
 
 pub type PaneId = u64;
 
@@ -69,10 +68,13 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "ReportSource::is_project")]
         source: ReportSource,
     },
-    /// A schedule of `project`: its settings and recent runs.
+    /// A schedule the gateway behind `[agents.<agent>]` of `project` runs;
+    /// `None` while a new one is being written and not yet saved.
     Schedule {
         project: ProjectId,
-        schedule: ScheduleId,
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schedule: Option<String>,
     },
 }
 

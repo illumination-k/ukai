@@ -165,7 +165,7 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
     );
 }
 
-pub fn start_session(
+fn start_session(
     context: &ProjectContext,
     agent: &str,
     workspace: Option<&PaneWorkspace>,

@@ -6,12 +6,13 @@
 //! so the UI never sees transport details. [`spawn_session`] then runs one
 //! ACP session over it.
 //!
-//! [`reports`] is the one thing a gateway agent needs besides its session:
-//! the reports it writes stay in its pod, and are read back from the
-//! endpoint next to its `/acp`.
+//! [`reports`] and [`schedules`] are what a gateway agent offers besides its
+//! session, both from the endpoint next to its `/acp`: the reports it writes
+//! stay in its pod and are read back, and the gateway runs its schedules.
 
 mod fs;
 pub mod reports;
+pub mod schedules;
 mod session;
 
 pub use fs::{FsError, FsRoot};

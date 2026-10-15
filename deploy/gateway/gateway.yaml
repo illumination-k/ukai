@@ -22,6 +22,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # A schedule's command runs in its workspace's agent container.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  # Each schedule and its recent runs are kept in a ConfigMap.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list"]

@@ -6887,6 +6887,7 @@ name = "ukai-gateway"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "chrono",
  "futures",
  "k8s-openapi",
  "kube",
@@ -6902,6 +6903,9 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "ukai-acp",
+ "ukai-config",
+ "ukai-core",
 ]
 
 [[package]]

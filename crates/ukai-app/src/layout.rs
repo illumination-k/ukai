@@ -5,10 +5,10 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
+use std::collections::HashMap;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
-use ukai_core::schedule::Schedules;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource};
 
 use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
@@ -131,7 +131,7 @@ fn close_tab(app: AppSignals, index: usize) {
 pub fn pane_label(
     layout: &Layout,
     projects: &Projects,
-    schedules: &Schedules,
+    schedules: &HashMap<String, String>,
     pane: PaneId,
 ) -> (Option<String>, String) {
     let project_name = |id: &ProjectId| {
@@ -150,9 +150,11 @@ pub fn pane_label(
             );
             (Some(project_name(project)), file)
         }
-        Some(PaneContent::Schedule { project, schedule }) => (
+        Some(PaneContent::Schedule {
+            project, schedule, ..
+        }) => (
             Some(project_name(project)),
-            schedule_label(schedules, schedule),
+            schedule_label(schedules, schedule.as_ref()),
         ),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
     }
@@ -190,7 +192,7 @@ fn TabBar() -> Element {
     let (tabs, active) = {
         let current = layout.read();
         let projects = app.projects.read();
-        let schedules = app.schedules.read();
+        let schedules = app.schedule_names.read();
         let tabs: Vec<(usize, String, usize, Option<&'static str>, bool)> = current
             .tabs()
             .iter()
@@ -293,7 +295,12 @@ fn PaneView(pane: PaneId) -> Element {
         (
             current.content(pane).cloned().unwrap_or(PaneContent::Empty),
             current.focused() == pane,
-            pane_label(&current, &app.projects.read(), &app.schedules.read(), pane),
+            pane_label(
+                &current,
+                &app.projects.read(),
+                &app.schedule_names.read(),
+                pane,
+            ),
         )
     };
     let status = match &content {
@@ -362,8 +369,14 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Agent { session, .. } => rsx! {
                     AgentView { pane, has_saved_session: session.is_some() }
                 },
-                PaneContent::Schedule { project, schedule } => rsx! {
-                    ScheduleView { key: "{schedule}", project, schedule }
+                PaneContent::Schedule { project, agent, schedule } => rsx! {
+                    ScheduleView {
+                        key: "{agent}-{schedule:?}",
+                        pane,
+                        project,
+                        agent,
+                        schedule,
+                    }
                 },
                 PaneContent::Report { project, path, source } => rsx! {
                     ReportView {

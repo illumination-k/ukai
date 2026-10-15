@@ -2033,6 +2033,15 @@ button.config-trigger:disabled {
   margin: 0 4px;
 }
 
+.schedule-agent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  padding: 0 0 0 8px;
+  font-size: 12px;
+}
+
 .schedule {
   display: flex;
   flex-direction: column;
