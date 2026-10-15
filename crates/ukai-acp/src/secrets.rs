@@ -3,10 +3,6 @@
 
 use ukai_config::Source;
 
-/// The keychain service every `${keychain:NAME}` item is stored under; `NAME`
-/// is the account.
-pub const KEYCHAIN_SERVICE: &str = "ukai";
-
 /// Read a reference from the process environment or the OS keychain.
 ///
 /// Values are never logged. The keychain is only read on macOS; elsewhere a
@@ -20,9 +16,12 @@ pub fn system_lookup(source: Source, name: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn keychain(name: &str) -> Option<String> {
+    /// The service every `${keychain:NAME}` item is stored under; `NAME` is
+    /// the account.
+    const SERVICE: &str = "ukai";
     /// `errSecItemNotFound`: no such item, which needs no warning.
     const NOT_FOUND: i32 = -25300;
-    match security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, name) {
+    match security_framework::passwords::get_generic_password(SERVICE, name) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(value) => Some(value),
             Err(_) => {
