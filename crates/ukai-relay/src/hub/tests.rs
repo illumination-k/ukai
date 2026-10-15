@@ -173,6 +173,57 @@ fn a_turn_finishes_without_a_client_and_replays_on_load() {
     );
 }
 
+fn steer(hub: &mut Hub, id: u64, text: &str) -> Vec<Output> {
+    hub.from_client(
+        A,
+        req(
+            id,
+            ukai_acp::STEER_METHOD,
+            json!({ "sessionId": SID, "prompt": [{ "type": "text", "text": text }] }),
+        ),
+    )
+}
+
+fn replayed_texts(hub: &mut Hub) -> Vec<String> {
+    hub.disconnect(A);
+    hub.connect(B);
+    let out = hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
+    client_messages(&out, B)
+        .iter()
+        .filter_map(|m| {
+            m.pointer("/params/update/content/text")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn a_steer_into_a_running_turn_is_replayed() {
+    let mut hub = with_session();
+    let turn = prompt(&mut hub, A, 3, "do it");
+    let steered = agent_id(&steer(&mut hub, 4, "left instead"));
+    hub.from_agent(result(json!(steered), json!({ "outcome": "injected" })));
+    hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
+    assert_eq!(replayed_texts(&mut hub), ["do it", "left instead"]);
+}
+
+#[test]
+fn a_steer_without_a_turn_is_not_recorded() {
+    // The agent hands it back, and the client sends it as a prompt.
+    let mut hub = with_session();
+    let steered = agent_id(&steer(&mut hub, 3, "hello"));
+    let out = hub.from_agent(result(
+        json!(steered),
+        json!({ "outcome": "promptRequired" }),
+    ));
+    assert_eq!(
+        client_messages(&out, A),
+        [result(json!(3), json!({ "outcome": "promptRequired" }))]
+    );
+    assert!(replayed_texts(&mut hub).is_empty());
+}
+
 #[test]
 fn a_client_attaching_mid_turn_hears_it_running_and_ending() {
     let mut hub = with_session();

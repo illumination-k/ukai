@@ -25,6 +25,7 @@ const SESSION: &str = "mock-session";
 struct Caps {
     load: bool,
     resume: bool,
+    steering: bool,
 }
 
 /// Behaviour is chosen by the prompt text:
@@ -36,13 +37,20 @@ struct Caps {
 /// - `blocks`: describes every block of the prompt, then `end_turn`
 /// - `usage`: reports context use and cost, then `end_turn`
 /// - `commands`: lists two slash commands, then `end_turn`
+/// - `wait`: waits for a steer, says `steered: <text>`, then `end_turn`
 /// - anything else: the prompt fails
+///
+/// A steer outside a `wait` turn answers `promptRequired`.
 ///
 /// `session/load` replays one user and one agent message before answering.
 /// Every session starts with [`mock_config`]'s settings; setting one answers
 /// with it changed, and an unknown one fails.
 fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
     let offered_fs = Arc::new(std::sync::Mutex::new(String::new()));
+    // Where a running `wait` turn takes its steer.
+    let waiting = Arc::new(std::sync::Mutex::new(
+        None::<tokio::sync::oneshot::Sender<String>>,
+    ));
     Agent
         .builder()
         .name("mock")
@@ -57,8 +65,13 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                     }
                     let session_caps = SessionCapabilities::new()
                         .resume(caps.resume.then(SessionResumeCapabilities::new));
+                    let mut meta = agent_client_protocol::schema::v1::Meta::new();
+                    if caps.steering {
+                        meta.insert("steering".into(), serde_json::json!({ "supported": true }));
+                    }
                     responder.respond(
                         InitializeResponse::new(request.protocol_version)
+                            .meta(meta)
                             .agent_capabilities(
                                 AgentCapabilities::new()
                                     .load_session(caps.load)
@@ -116,117 +129,156 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: PromptRequest, responder, cx: ConnectionTo<Client>| {
-                let offered_fs = offered_fs.lock().map(|o| o.clone()).unwrap_or_default();
-                let text = match request.prompt.first() {
-                    Some(ContentBlock::Text(text)) => text.text.clone(),
-                    _ => String::new(),
-                };
-                let blocks = describe_blocks(&request.prompt);
-                // Waiting on the client from inside a handler would hold the
-                // dispatch loop, so the turn runs in its own task.
-                cx.spawn({
-                    let cx = cx.clone();
-                    async move {
-                        let session = SessionId::new(SESSION);
-                        let say = |text: &str| {
-                            cx.send_notification(SessionNotification::new(
-                                session.clone(),
-                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                    ContentBlock::from(text.to_owned()),
-                                )),
-                            ))
-                        };
-                        if text == "hello" {
-                            say("Hel")?;
-                            say("lo")?;
-                        } else if text == "fs" {
-                            say(&offered_fs)?;
-                        } else if text == "blocks" {
-                            say(&blocks)?;
-                        } else if text == "usage" {
-                            cx.send_notification(SessionNotification::new(
-                                session.clone(),
-                                SessionUpdate::UsageUpdate(UsageUpdate::new(53_000, 200_000).cost(
-                                    agent_client_protocol::schema::v1::Cost::new(0.045, "USD"),
-                                )),
-                            ))?;
-                        } else if text == "commands" {
-                            cx.send_notification(SessionNotification::new(
-                                session.clone(),
-                                SessionUpdate::AvailableCommandsUpdate(
-                                    AvailableCommandsUpdate::new(vec![
-                                        AvailableCommand::new("compact", "Compact the context"),
-                                        AvailableCommand::new("review", "Review a change").input(
-                                            AvailableCommandInput::Unstructured(
-                                                UnstructuredCommandInput::new("pr number"),
-                                            ),
-                                        ),
-                                    ]),
-                                ),
-                            ))?;
-                        } else if text == "edit" {
-                            let update = |update| {
+            {
+                let waiting = waiting.clone();
+                async move |request: PromptRequest, responder, cx: ConnectionTo<Client>| {
+                    let offered_fs = offered_fs.lock().map(|o| o.clone()).unwrap_or_default();
+                    let steered = if let Some(ContentBlock::Text(text)) = request.prompt.first()
+                        && text.text == "wait"
+                    {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        if let Ok(mut waiting) = waiting.lock() {
+                            *waiting = Some(tx);
+                        }
+                        Some(rx)
+                    } else {
+                        None
+                    };
+                    let text = match request.prompt.first() {
+                        Some(ContentBlock::Text(text)) => text.text.clone(),
+                        _ => String::new(),
+                    };
+                    let blocks = describe_blocks(&request.prompt);
+                    // Waiting on the client from inside a handler would hold the
+                    // dispatch loop, so the turn runs in its own task.
+                    cx.spawn({
+                        let cx = cx.clone();
+                        async move {
+                            let session = SessionId::new(SESSION);
+                            let say = |text: &str| {
                                 cx.send_notification(SessionNotification::new(
                                     session.clone(),
-                                    update,
+                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                        ContentBlock::from(text.to_owned()),
+                                    )),
                                 ))
                             };
-                            update(SessionUpdate::ToolCall(
-                                ToolCall::new("edit-1", "Edit a.txt").content(vec![
-                                    Diff::new("/p/a.txt", "new").old_text("old").into(),
-                                ]),
-                            ))?;
-                            update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                                "edit-1",
-                                ToolCallUpdateFields::new()
-                                    .content(vec![Diff::new("/p/b.txt", "created").into()]),
-                            )))?;
-                        } else if let Some(path) = text.strip_prefix("write ") {
-                            cx.send_request(WriteTextFileRequest::new(
-                                session.clone(),
-                                path,
-                                "<h1>report</h1>",
-                            ))
-                            .block_task()
-                            .await?;
-                        } else if text == "ask" {
-                            let response = cx
-                                .send_request(RequestPermissionRequest::new(
+                            if let Some(steered) = steered {
+                                let text = steered.await.unwrap_or_default();
+                                say(&format!("steered: {text}"))?;
+                            } else if text == "hello" {
+                                say("Hel")?;
+                                say("lo")?;
+                            } else if text == "fs" {
+                                say(&offered_fs)?;
+                            } else if text == "blocks" {
+                                say(&blocks)?;
+                            } else if text == "usage" {
+                                cx.send_notification(SessionNotification::new(
                                     session.clone(),
-                                    ToolCallUpdate::new(
-                                        "call-1",
-                                        ToolCallUpdateFields::new().title("rm -rf build"),
+                                    SessionUpdate::UsageUpdate(
+                                        UsageUpdate::new(53_000, 200_000).cost(
+                                            agent_client_protocol::schema::v1::Cost::new(
+                                                0.045, "USD",
+                                            ),
+                                        ),
                                     ),
-                                    vec![
-                                        PermissionOption::new(
-                                            "allow",
-                                            "Allow",
-                                            PermissionOptionKind::AllowOnce,
-                                        ),
-                                        PermissionOption::new(
-                                            "reject",
-                                            "Reject",
-                                            PermissionOptionKind::RejectOnce,
-                                        ),
-                                    ],
+                                ))?;
+                            } else if text == "commands" {
+                                cx.send_notification(SessionNotification::new(
+                                    session.clone(),
+                                    SessionUpdate::AvailableCommandsUpdate(
+                                        AvailableCommandsUpdate::new(vec![
+                                            AvailableCommand::new("compact", "Compact the context"),
+                                            AvailableCommand::new("review", "Review a change")
+                                                .input(AvailableCommandInput::Unstructured(
+                                                    UnstructuredCommandInput::new("pr number"),
+                                                )),
+                                        ]),
+                                    ),
+                                ))?;
+                            } else if text == "edit" {
+                                let update = |update| {
+                                    cx.send_notification(SessionNotification::new(
+                                        session.clone(),
+                                        update,
+                                    ))
+                                };
+                                update(SessionUpdate::ToolCall(
+                                    ToolCall::new("edit-1", "Edit a.txt").content(vec![
+                                        Diff::new("/p/a.txt", "new").old_text("old").into(),
+                                    ]),
+                                ))?;
+                                update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                                    "edit-1",
+                                    ToolCallUpdateFields::new()
+                                        .content(vec![Diff::new("/p/b.txt", "created").into()]),
+                                )))?;
+                            } else if let Some(path) = text.strip_prefix("write ") {
+                                cx.send_request(WriteTextFileRequest::new(
+                                    session.clone(),
+                                    path,
+                                    "<h1>report</h1>",
                                 ))
                                 .block_task()
                                 .await?;
-                            match response.outcome {
-                                RequestPermissionOutcome::Selected(selected) => {
-                                    say(&selected.option_id.0)?;
+                            } else if text == "ask" {
+                                let response = cx
+                                    .send_request(RequestPermissionRequest::new(
+                                        session.clone(),
+                                        ToolCallUpdate::new(
+                                            "call-1",
+                                            ToolCallUpdateFields::new().title("rm -rf build"),
+                                        ),
+                                        vec![
+                                            PermissionOption::new(
+                                                "allow",
+                                                "Allow",
+                                                PermissionOptionKind::AllowOnce,
+                                            ),
+                                            PermissionOption::new(
+                                                "reject",
+                                                "Reject",
+                                                PermissionOptionKind::RejectOnce,
+                                            ),
+                                        ],
+                                    ))
+                                    .block_task()
+                                    .await?;
+                                match response.outcome {
+                                    RequestPermissionOutcome::Selected(selected) => {
+                                        say(&selected.option_id.0)?;
+                                    }
+                                    _ => say("cancelled")?,
                                 }
-                                _ => say("cancelled")?,
+                            } else {
+                                return responder.respond_with_error(
+                                    agent_client_protocol::Error::invalid_params(),
+                                );
                             }
-                        } else {
-                            return responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params(),
-                            );
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))
                         }
-                        responder.respond(PromptResponse::new(StopReason::EndTurn))
-                    }
-                })
+                    })
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: UntypedMessage, responder, _cx| {
+                if !caps.steering || request.method() != STEER_METHOD {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::method_not_found());
+                }
+                let turn = waiting.lock().ok().and_then(|mut w| w.take());
+                let Some(turn) = turn else {
+                    return responder.respond(serde_json::json!({ "outcome": "promptRequired" }));
+                };
+                let text = request.params()["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let _ = turn.send(text);
+                responder.respond(serde_json::json!({ "outcome": "injected" }))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -577,6 +629,7 @@ fn ready(session_id: &str, restore: RestoreOutcome) -> SessionEvent {
         prompt: PromptCaps {
             image: true,
             embedded_context: true,
+            steering: false,
         },
         config: config("sonnet", false),
     }
@@ -673,6 +726,7 @@ async fn load_replays_history_before_ready() {
     let caps = Caps {
         load: true,
         resume: true,
+        ..Caps::default()
     };
     let (_harness, events) = Harness::connect(caps, Some("earlier")).await;
     assert_eq!(
@@ -690,7 +744,7 @@ async fn load_replays_history_before_ready() {
 }
 
 #[rstest::rstest]
-#[case::resume_without_load(Caps { load: false, resume: true }, "earlier", RestoreOutcome::Resumed)]
+#[case::resume_without_load(Caps { resume: true, ..Caps::default() }, "earlier", RestoreOutcome::Resumed)]
 #[case::neither(Caps::default(), SESSION, RestoreOutcome::Unsupported)]
 #[tokio::test]
 async fn falls_back_when_load_is_unavailable(
@@ -731,4 +785,63 @@ async fn set_config_reports_the_agents_new_settings() {
     ));
     // The session goes on.
     assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
+}
+
+async fn steering_harness() -> Harness {
+    let caps = Caps {
+        steering: true,
+        ..Caps::default()
+    };
+    let (harness, before_ready) = Harness::connect(caps, None).await;
+    assert!(matches!(
+        before_ready.last(),
+        Some(SessionEvent::Ready {
+            prompt: PromptCaps { steering: true, .. },
+            ..
+        })
+    ));
+    harness
+}
+
+#[tokio::test]
+async fn steering_joins_the_running_turn() {
+    let mut harness = steering_harness().await;
+    assert!(harness.handle.prompt("wait"));
+    // Let the turn start before steering it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(harness.handle.steer("left instead"));
+    assert_eq!(
+        harness.until_turn_end().await,
+        vec![
+            SessionEvent::AgentMessage {
+                text: "steered: left instead".into()
+            },
+            end_turn()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_steer_after_the_turn_starts_one() {
+    let mut harness = steering_harness().await;
+    assert!(harness.handle.steer("hello"));
+    assert_eq!(harness.next().await, SessionEvent::TurnRunning);
+    assert_eq!(
+        harness.until_turn_end().await,
+        vec![
+            SessionEvent::AgentMessage { text: "Hel".into() },
+            SessionEvent::AgentMessage { text: "lo".into() },
+            end_turn()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_steer_is_reported() {
+    let mut harness = Harness::start().await;
+    assert!(harness.handle.steer("hello"));
+    assert!(matches!(
+        harness.next().await,
+        SessionEvent::SteerFailed { .. }
+    ));
 }

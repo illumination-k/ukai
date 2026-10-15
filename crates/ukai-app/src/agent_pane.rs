@@ -21,7 +21,8 @@ use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
 use ukai_core::slash;
 use ukai_core::{
-    Alert, Entry, PaneContent, PaneId, ProjectId, ReportSource, Status, Transcript, usage_label,
+    Alert, Entry, PaneContent, PaneId, ProjectId, Queued, ReportSource, Status, Transcript,
+    usage_label,
 };
 
 use crate::alert;
@@ -63,6 +64,24 @@ impl Composer {
             review: Signal::new_in_scope(Vec::new(), ScopeId::APP),
             error: Signal::new_in_scope(None, ScopeId::APP),
         }
+    }
+
+    /// Put an unsent message back in front of what is being written.
+    fn restore(mut self, steer: Queued) {
+        let draft = self.draft.peek().clone();
+        let text = match (steer.text.is_empty(), draft.is_empty()) {
+            (_, true) => steer.text,
+            (true, false) => draft,
+            (false, false) => format!("{}\n\n{draft}", steer.text),
+        };
+        self.draft.set(text);
+        let mut attachments: Vec<Pending> = steer
+            .attachments
+            .into_iter()
+            .map(|(name, attachment)| Pending { name, attachment })
+            .collect();
+        attachments.extend(self.attachments.peek().iter().cloned());
+        self.attachments.set(attachments);
     }
 }
 
@@ -117,6 +136,9 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
                     }
                     let raised = Alert::of(&event);
                     transcript.write().apply(event);
+                    if transcript.peek().queued.is_some() {
+                        follow_queued(sessions, pane, transcript, composer);
+                    }
                     if let Some(raised) = raised {
                         alert::raise(&window, layout, pane, unread, &source, &raised);
                     }
@@ -165,6 +187,32 @@ fn start_session(
             restore,
         },
     ))
+}
+
+/// Send the message queued behind a turn that has stopped, or hand it back to
+/// the composer when the session cannot take it.
+fn follow_queued(
+    sessions: Sessions,
+    pane: PaneId,
+    mut transcript: Signal<Transcript>,
+    composer: Composer,
+) {
+    let Some(steer) = transcript.write().take_queued() else {
+        return;
+    };
+    // A reconnect replaces the pane's session; this transcript's handle is gone then.
+    let handle = sessions
+        .peek()
+        .get(&pane)
+        .filter(|session| session.transcript == transcript)
+        .and_then(|session| session.handle.clone());
+    let idle = transcript.peek().status == Status::Idle;
+    if idle && handle.is_some_and(|handle| handle.prompt(steer.prompt())) {
+        let names = steer.names();
+        transcript.write().push_prompt(steer.text, names);
+    } else {
+        composer.restore(steer);
+    }
 }
 
 /// Stop `pane`'s turn, if it is running one.
@@ -262,18 +310,43 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
             let text = draft.read().trim().to_owned();
             let comments = review.read().clone();
             let pending = attachments.read().clone();
+            let status = transcript.read().status.clone();
             if (text.is_empty() && comments.is_empty() && pending.is_empty())
-                || transcript.read().status != Status::Idle
+                || !matches!(status, Status::Idle | Status::Busy)
             {
                 return;
             }
             let text = review::review_prompt(&comments, &text);
+            let busy = status == Status::Busy;
+            // An agent that cannot take a message mid-turn is stopped first.
+            if busy && !transcript.read().prompt_caps.steering {
+                stop_turn(app.sessions, pane);
+                transcript.write().queue(Queued {
+                    text,
+                    attachments: pending
+                        .into_iter()
+                        .map(|p| (p.name, p.attachment))
+                        .collect(),
+                });
+                draft.set(String::new());
+                review.set(Vec::new());
+                attachments.set(Vec::new());
+                error.set(None);
+                return;
+            }
             let names = pending.iter().map(|p| p.name.clone()).collect();
             let prompt = Prompt {
                 text: text.clone(),
                 attachments: pending.into_iter().map(|p| p.attachment).collect(),
             };
-            if handle.as_ref().is_some_and(|h| h.prompt(prompt)) {
+            let sent = handle.as_ref().is_some_and(|h| {
+                if busy {
+                    h.steer(prompt)
+                } else {
+                    h.prompt(prompt)
+                }
+            });
+            if sent {
                 transcript.write().push_prompt(text, names);
                 draft.set(String::new());
                 review.set(Vec::new());
@@ -288,8 +361,11 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let busy = status == Status::Busy;
     let awaiting = transcript.read().awaiting_permission();
     let idle = status == Status::Idle;
-    // The next message can be written while a turn runs; it sends once idle.
+    // A message sent while a turn runs steers it: it joins the turn, or for
+    // an agent that cannot take that, the turn stops and the message follows.
     let writable = idle || busy;
+    let steering = transcript.read().prompt_caps.steering;
+    let steer = transcript.read().queued.clone();
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
     let config = transcript.read().config.clone();
@@ -333,7 +409,44 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 if busy && !awaiting {
                     div { class: "working",
                         span { class: "dot busy" }
-                        "Working…"
+                        if steer.is_some() {
+                            "Stopping to take your message…"
+                        } else {
+                            "Working…"
+                        }
+                    }
+                }
+                if let Some(steer) = steer {
+                    div { class: "steer",
+                        div { class: "msg user queued",
+                            "{steer.text}"
+                            if !steer.attachments.is_empty() {
+                                div { class: "msg-attachments",
+                                    for (index, name) in steer.names().into_iter().enumerate() {
+                                        span { key: "{index}", class: "chip",
+                                            Svg {
+                                                icon: Icon::Paperclip,
+                                                size: 11,
+                                            }
+                                            span { class: "name", "{name}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "steer-note",
+                            span { "Sends once the turn stops" }
+                            button {
+                                class: "small outline",
+                                title: "Move back to the message box",
+                                onclick: move |_| {
+                                    if let Some(steer) = transcript.write().queued.take() {
+                                        composer.restore(steer);
+                                    }
+                                },
+                                "Edit"
+                            }
+                        }
                     }
                 }
             }
@@ -442,7 +555,10 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     rows: "2",
                     placeholder: match status {
                         Status::Idle => "Message the agent — / for commands, drop files or images here",
-                        Status::Busy => "Waiting for the agent…",
+                        Status::Busy if steering => "Steer the agent — your message joins this turn",
+                        Status::Busy => {
+                            "Steer the agent — sending stops this turn and sends your message"
+                        }
                         Status::Connecting => "Connecting…",
                         Status::Closed { .. } => "Disconnected",
                     },
@@ -509,14 +625,17 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                             onclick: cancel,
                             Svg { icon: Icon::Stop, size: 12 }
                         }
-                    } else {
-                        button {
-                            class: "round primary",
-                            title: "Send",
-                            disabled: !idle || (draft.read().trim().is_empty() && !has_extras),
-                            onclick: move |_| send_on_click(),
-                            Svg { icon: Icon::Send }
-                        }
+                    }
+                    button {
+                        class: "round primary",
+                        title: match (busy, steering) {
+                            (false, _) => "Send",
+                            (true, true) => "Steer: add to this turn",
+                            (true, false) => "Steer: stop this turn and send",
+                        },
+                        disabled: !writable || (draft.read().trim().is_empty() && !has_extras),
+                        onclick: move |_| send_on_click(),
+                        Svg { icon: Icon::Send }
                     }
                 }
             }

@@ -126,9 +126,9 @@ Pod の中で書かれたレポートは relay の読み取り専用 HTTP から
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
 `Preparing` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
-`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `Closed`。
+`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
-UI からは `SessionHandle`（`prompt` / `cancel` / `resolve_permission` / `set_config`）で操作する。
+UI からは `SessionHandle`（`prompt` / `steer` / `cancel` / `resolve_permission` / `set_config`）で操作する。
 
 - `Ready` はエージェントの `promptCapabilities`（`image` / `embeddedContext`）を `PromptCaps` として運ぶ。
 - モデル・推論レベル（reasoning effort）・モードなどの切り替えは ACP の Session Config Options で扱う。
@@ -477,8 +477,18 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
   あいまい一致（`palette` と同じ照合）で入力欄の上に出す。↑↓ で選び、Tab / Enter で `/name` に置き換え、
   Escape で閉じる。送るのは普通の prompt で、relay は `session/update` として記録するので `session/load` で一覧も戻る。
 - 会話は最大幅 46rem で中央寄せ。ユーザー発言は右寄せの淡いバブル、エージェント発言は地のまま、ツール呼び出しは
-  1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。ターン中も次の発言を書いておけて、
-  送信はターンが終わってから。
+  1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。
+- **steer。** ターン中の送信はそのターンへの割り込みになる。ACP 本体には走っているターンに発言を足す手段がない。
+  - `initialize` 応答の `_meta.steering.supported` を広告するエージェント（`claude-agent-acp`。Zed もこれを使う）には
+    拡張リクエスト `_session/steering`（`ukai_acp::STEER_METHOD`）で発言をターンに注入する（`SessionHandle::steer`、
+    広告は `PromptCaps::steering`）。`_meta.steering.idleBehavior = "promptRequired"` を付け、ターンがもう終わって
+    いて `promptRequired` が返ったら同じ内容を `session/prompt` で送り直し `TurnRunning` を出す。拒否されたら
+    `SteerFailed`。relay はターン中の steer の発言を履歴に記録する（`promptRequired` になったものは続く
+    `session/prompt` で記録される）。
+  - 広告しないエージェントには `session/cancel` でターンを止め（未回答のパーミッション要求も cancelled で答える）、
+    発言は `Transcript::queue` に積んで、ターンの終わり（`TurnEnded` / `PromptFailed`）を待って次の prompt として
+    送る。止まるまでに重ねた発言は 1 つにまとめる。待っている発言は会話の末尾に破線のバブルで出し、「Edit」で
+    入力欄へ戻せる。送れないまま切断したときも入力欄へ戻す。
 - **エージェント発言と思考は Markdown で描く。** `ukai_core::markdown` が `pulldown-cmark`（CommonMark + 表・
   打ち消し線・タスクリスト）で木に変え、地の文の `http(s)://` もリンクにする。アプリはその木を rsx! の要素に写すだけで HTML 文字列は作らない。会話は
   IPC を持つアプリの web view 内にあるため、生の HTML は文字のまま出し、画像は読み込まず alt テキストだけ、

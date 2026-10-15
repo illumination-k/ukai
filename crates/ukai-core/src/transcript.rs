@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome,
-    SessionEvent, SlashCommand, ToolStatus, Usage,
+    Attachment, ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, Prompt,
+    PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +71,34 @@ pub struct Transcript {
     pub config: Vec<ConfigOption>,
     /// The slash commands the agent last said it offers.
     pub commands: Vec<SlashCommand>,
+    /// What the user sent while a turn ran, for an agent that cannot be
+    /// steered: the turn is being stopped, and this goes out once it has.
+    pub queued: Option<Queued>,
+}
+
+/// A message sent while a turn runs to an agent without
+/// [`PromptCaps::steering`]: the turn is stopped, and this is sent as the next one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Queued {
+    pub text: String,
+    /// Each attachment with the name it is shown under.
+    pub attachments: Vec<(String, Attachment)>,
+}
+
+impl Queued {
+    pub fn names(&self) -> Vec<String> {
+        self.attachments
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn prompt(&self) -> Prompt {
+        Prompt {
+            text: self.text.clone(),
+            attachments: self.attachments.iter().map(|(_, a)| a.clone()).collect(),
+        }
+    }
 }
 
 impl Default for Transcript {
@@ -83,6 +111,7 @@ impl Default for Transcript {
             usage: None,
             config: Vec::new(),
             commands: Vec::new(),
+            queued: None,
         }
     }
 }
@@ -168,6 +197,32 @@ impl Transcript {
             {
                 *answer = Some("cancelled".to_owned());
             }
+        }
+    }
+
+    /// Queue `message` to follow the running turn, which the caller stops. A
+    /// second message before the turn has stopped joins the first.
+    pub fn queue(&mut self, message: Queued) {
+        self.cancel();
+        match &mut self.queued {
+            Some(queued) => {
+                if queued.text.is_empty() {
+                    queued.text = message.text;
+                } else if !message.text.is_empty() {
+                    queued.text = format!("{}\n\n{}", queued.text, message.text);
+                }
+                queued.attachments.extend(message.attachments);
+            }
+            None => self.queued = Some(message),
+        }
+    }
+
+    /// The queued [`Queued`], once the turn it waits on is over: send it when
+    /// the status is [`Status::Idle`], hand it back to the user otherwise.
+    pub fn take_queued(&mut self) -> Option<Queued> {
+        match self.status {
+            Status::Busy | Status::Connecting => None,
+            Status::Idle | Status::Closed { .. } => self.queued.take(),
         }
     }
 
@@ -318,6 +373,10 @@ impl Transcript {
                 }
                 self.status = Status::Idle;
             }
+            SessionEvent::SteerFailed { message } => self.entries.push(Entry::Notice {
+                text: format!("could not steer the turn: {message}"),
+                error: true,
+            }),
             SessionEvent::PromptFailed { message } => {
                 self.entries.push(Entry::Notice {
                     text: message,
@@ -600,6 +659,7 @@ mod tests {
         let caps = PromptCaps {
             image: true,
             embedded_context: false,
+            steering: false,
         };
         let transcript = folded([SessionEvent::Ready {
             agent: None,
@@ -647,6 +707,78 @@ mod tests {
             [Entry::Notice { error: true, .. }]
         ));
         assert_eq!(transcript.status, Status::Idle);
+    }
+
+    fn queued(text: &str, files: &[&str]) -> Queued {
+        Queued {
+            text: text.into(),
+            attachments: files
+                .iter()
+                .map(|name| {
+                    let link = Attachment::Link {
+                        name: (*name).into(),
+                        uri: format!("file:///{name}"),
+                    };
+                    ((*name).to_owned(), link)
+                })
+                .collect(),
+        }
+    }
+
+    fn running() -> Transcript {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        transcript.push_prompt("first", Vec::new());
+        transcript
+    }
+
+    #[test]
+    fn queued_waits_for_the_turn_to_stop() {
+        let mut transcript = running();
+        transcript.apply(SessionEvent::PermissionRequested {
+            id: 1,
+            title: "write".into(),
+            options: Vec::new(),
+        });
+        transcript.queue(queued("instead", &[]));
+        assert!(!transcript.awaiting_permission());
+        assert_eq!(transcript.take_queued(), None);
+
+        transcript.apply(SessionEvent::TurnEnded {
+            stop_reason: "cancelled".into(),
+        });
+        assert_eq!(transcript.take_queued(), Some(queued("instead", &[])));
+        assert_eq!(transcript.take_queued(), None);
+    }
+
+    #[rstest]
+    #[case::both(queued("a", &["x"]), queued("b", &["y"]), queued("a\n\nb", &["x", "y"]))]
+    #[case::first_empty(queued("", &["x"]), queued("b", &[]), queued("b", &["x"]))]
+    #[case::second_empty(queued("a", &[]), queued("", &["y"]), queued("a", &["y"]))]
+    fn queued_before_the_stop_join(
+        #[case] first: Queued,
+        #[case] second: Queued,
+        #[case] joined: Queued,
+    ) {
+        let mut transcript = running();
+        transcript.queue(first);
+        transcript.queue(second);
+        transcript.apply(SessionEvent::PromptFailed {
+            message: "boom".into(),
+        });
+        assert_eq!(transcript.take_queued(), Some(joined));
+    }
+
+    #[test]
+    fn queued_is_handed_back_when_the_session_closes() {
+        let mut transcript = running();
+        transcript.queue(queued("instead", &["x"]));
+        transcript.apply(SessionEvent::Closed { error: None });
+        let queued = transcript.take_queued();
+        assert_eq!(
+            queued.as_ref().map(Queued::names),
+            Some(vec!["x".to_owned()])
+        );
+        assert_eq!(queued.map(|q| q.prompt().text).as_deref(), Some("instead"));
     }
 
     #[test]

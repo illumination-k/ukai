@@ -99,13 +99,16 @@ pub enum SessionEvent {
     },
     /// The agent wrote a file through `fs/write_text_file`.
     FileWritten { path: PathBuf },
-    /// A turn this client did not start is running: it reattached to a
-    /// session whose turn went on while it was away.
+    /// A turn the UI did not start with [`SessionHandle::prompt`] is running:
+    /// the client reattached to a session whose turn went on while it was
+    /// away, or a [`SessionHandle::steer`] found the turn over and started one.
     TurnRunning,
     /// The prompt turn finished, e.g. with `end_turn` or `cancelled`.
     TurnEnded { stop_reason: String },
     /// The agent rejected the prompt; the session is still usable.
     PromptFailed { message: String },
+    /// The agent rejected a [`SessionHandle::steer`]; the turn goes on without it.
+    SteerFailed { message: String },
     /// The connection is gone; no more events follow.
     Closed { error: Option<String> },
 }
@@ -159,12 +162,16 @@ pub struct FileDiff {
     pub new_text: String,
 }
 
-/// Content types an agent accepts in a prompt beyond text and resource links,
-/// from its `promptCapabilities`.
+/// How an agent takes prompts: content types it accepts beyond text and
+/// resource links (its `promptCapabilities`), and whether a running turn can
+/// be steered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PromptCaps {
     pub image: bool,
     pub embedded_context: bool,
+    /// The agent takes [`STEER_METHOD`]: a message sent while a turn runs
+    /// joins that turn instead of stopping it.
+    pub steering: bool,
 }
 
 /// A user turn: text and what was attached to it.
@@ -172,6 +179,16 @@ pub struct PromptCaps {
 pub struct Prompt {
     pub text: String,
     pub attachments: Vec<Attachment>,
+}
+
+impl Prompt {
+    fn into_blocks(self) -> Vec<ContentBlock> {
+        (!self.text.is_empty())
+            .then(|| ContentBlock::from(self.text))
+            .into_iter()
+            .chain(self.attachments.into_iter().map(Attachment::into_block))
+            .collect()
+    }
 }
 
 impl From<String> for Prompt {
@@ -284,6 +301,7 @@ pub struct PermissionChoice {
 #[derive(Debug)]
 enum SessionCommand {
     Prompt(Prompt),
+    Steer(Prompt),
     Cancel,
     ResolvePermission {
         id: PermissionId,
@@ -305,6 +323,13 @@ impl SessionHandle {
     /// Returns `false` when the session has already ended.
     pub fn prompt(&self, prompt: impl Into<Prompt>) -> bool {
         self.send(SessionCommand::Prompt(prompt.into()))
+    }
+
+    /// Add `prompt` to the running turn; needs [`PromptCaps::steering`]. When
+    /// the turn has ended by the time the agent sees it, it is sent as a new
+    /// turn, announced with [`SessionEvent::TurnRunning`].
+    pub fn steer(&self, prompt: impl Into<Prompt>) -> bool {
+        self.send(SessionCommand::Steer(prompt.into()))
     }
 
     /// Cancel the running turn; pending permission requests are answered as cancelled.
@@ -389,6 +414,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Progress before the agent is reachable: `{ "message": string }`.
 pub const PROGRESS_METHOD: &str = "_ukai/progress";
+/// Adds a message to the running turn: `{ "sessionId", "prompt": ContentBlock[],
+/// "_meta"? }`, answered with `{ "outcome": "injected" | "promptRequired" }`.
+/// An agent that takes it says so with `_meta.steering.supported` in its
+/// `initialize` response. This is the steering extension `claude-agent-acp`
+/// implements, which Zed uses.
+pub const STEER_METHOD: &str = "_session/steering";
 /// A session's turn state, after ACP v2's `state_update`:
 /// `{ "sessionId", "state": "running" | "idle", "stopReason"? }`.
 pub const TURN_STATE_METHOD: &str = "_ukai/turn_state";
@@ -604,6 +635,11 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                 prompt: PromptCaps {
                     image: prompt.image,
                     embedded_context: prompt.embedded_context,
+                    steering: init
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("steering")?.get("supported")?.as_bool())
+                        .unwrap_or(false),
                 },
                 config: config_options(config.unwrap_or_default()),
             });
@@ -614,8 +650,14 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
 
             let mut parked: HashMap<PermissionId, Responder<RequestPermissionResponse>> =
                 HashMap::new();
+            // Steers that reached the agent after their turn ended, to send as turns.
+            let (late_tx, mut late_rx) = mpsc::unbounded_channel::<Vec<ContentBlock>>();
             loop {
                 tokio::select! {
+                    Some(blocks) = late_rx.recv() => {
+                        let _ = events.send(SessionEvent::TurnRunning);
+                        send_prompt(&cx, &session_id, blocks, &events)?;
+                    }
                     Some((id, responder)) = park_rx.recv() => {
                         parked.insert(id, responder);
                     }
@@ -627,29 +669,35 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         }
                         match command {
                             None => break,
-                            Some(SessionCommand::Prompt(Prompt { text, attachments })) => {
+                            Some(SessionCommand::Prompt(prompt)) => {
+                                send_prompt(&cx, &session_id, prompt.into_blocks(), &events)?;
+                            }
+                            Some(SessionCommand::Steer(prompt)) => {
+                                let blocks = prompt.into_blocks();
+                                let params = serde_json::json!({
+                                    "sessionId": session_id,
+                                    "prompt": blocks,
+                                    // Hand the message back rather than have the
+                                    // agent start a turn this client would not see end.
+                                    "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+                                });
                                 let events = events.clone();
-                                let blocks = (!text.is_empty())
-                                    .then(|| ContentBlock::from(text))
-                                    .into_iter()
-                                    .chain(attachments.into_iter().map(Attachment::into_block))
-                                    .collect();
-                                // Prepared so the turn-end callback is ordered after
-                                // every update the agent sent before its response.
-                                cx.prepare_request(PromptRequest::new(session_id.clone(), blocks))
-                                .on_receiving_result(async move |result| {
-                                    let event = match result {
-                                        Ok(response) => SessionEvent::TurnEnded {
-                                            stop_reason: serde_label(&response.stop_reason),
-                                        },
-                                        Err(error) => SessionEvent::PromptFailed {
-                                            message: error.to_string(),
-                                        },
-                                    };
-                                    let _ = events.send(event);
-                                    // An error here would end the connection.
-                                    Ok(())
-                                })?;
+                                let late = late_tx.clone();
+                                cx.send_request(UntypedMessage::new(STEER_METHOD, params)?)
+                                    .on_receiving_result(async move |result| {
+                                        match result {
+                                            Ok(response) if response["outcome"] == "promptRequired" => {
+                                                let _ = late.send(blocks);
+                                            }
+                                            Ok(_) => {}
+                                            Err(error) => {
+                                                let _ = events.send(SessionEvent::SteerFailed {
+                                                    message: error.to_string(),
+                                                });
+                                            }
+                                        }
+                                        Ok(())
+                                    })?;
                             }
                             Some(SessionCommand::Cancel) => {
                                 cx.send_notification(CancelNotification::new(session_id.clone()))?;
@@ -704,6 +752,31 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
             Ok(())
         })
         .await
+}
+
+/// Start a turn. The request is prepared so the turn-end event is ordered
+/// after every update the agent sent before its response.
+fn send_prompt(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    blocks: Vec<ContentBlock>,
+    events: &Events,
+) -> Result<(), agent_client_protocol::Error> {
+    let events = events.clone();
+    cx.prepare_request(PromptRequest::new(session_id.clone(), blocks))
+        .on_receiving_result(async move |result| {
+            let event = match result {
+                Ok(response) => SessionEvent::TurnEnded {
+                    stop_reason: serde_label(&response.stop_reason),
+                },
+                Err(error) => SessionEvent::PromptFailed {
+                    message: error.to_string(),
+                },
+            };
+            let _ = events.send(event);
+            // An error here would end the connection.
+            Ok(())
+        })
 }
 
 /// `replaying`: a `session/load` is in progress, so user turns are history
