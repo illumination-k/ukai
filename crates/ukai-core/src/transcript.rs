@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ukai_acp::{
-    ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, PromptCaps, RestoreOutcome,
-    SessionEvent, SlashCommand, ToolStatus, Usage,
+    Attachment, ConfigOption, FileDiff, PermissionChoice, PermissionId, PlanItem, Prompt,
+    PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +71,34 @@ pub struct Transcript {
     pub config: Vec<ConfigOption>,
     /// The slash commands the agent last said it offers.
     pub commands: Vec<SlashCommand>,
+    /// What the user sent to redirect a running turn; it goes out once the
+    /// turn has stopped.
+    pub steer: Option<Steer>,
+}
+
+/// A message sent while a turn runs. ACP has no way to add to a running
+/// turn, so steering stops the turn and sends this as the next one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Steer {
+    pub text: String,
+    /// Each attachment with the name it is shown under.
+    pub attachments: Vec<(String, Attachment)>,
+}
+
+impl Steer {
+    pub fn names(&self) -> Vec<String> {
+        self.attachments
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn prompt(&self) -> Prompt {
+        Prompt {
+            text: self.text.clone(),
+            attachments: self.attachments.iter().map(|(_, a)| a.clone()).collect(),
+        }
+    }
 }
 
 impl Default for Transcript {
@@ -83,6 +111,7 @@ impl Default for Transcript {
             usage: None,
             config: Vec::new(),
             commands: Vec::new(),
+            steer: None,
         }
     }
 }
@@ -168,6 +197,32 @@ impl Transcript {
             {
                 *answer = Some("cancelled".to_owned());
             }
+        }
+    }
+
+    /// Queue `steer` to follow the running turn, which the caller stops. A
+    /// second message before the turn has stopped joins the first.
+    pub fn steer(&mut self, steer: Steer) {
+        self.cancel();
+        match &mut self.steer {
+            Some(queued) => {
+                if queued.text.is_empty() {
+                    queued.text = steer.text;
+                } else if !steer.text.is_empty() {
+                    queued.text = format!("{}\n\n{}", queued.text, steer.text);
+                }
+                queued.attachments.extend(steer.attachments);
+            }
+            None => self.steer = Some(steer),
+        }
+    }
+
+    /// The queued [`Steer`], once the turn it waits on is over: send it when
+    /// the status is [`Status::Idle`], hand it back to the user otherwise.
+    pub fn take_steer(&mut self) -> Option<Steer> {
+        match self.status {
+            Status::Busy | Status::Connecting => None,
+            Status::Idle | Status::Closed { .. } => self.steer.take(),
         }
     }
 
@@ -647,6 +702,75 @@ mod tests {
             [Entry::Notice { error: true, .. }]
         ));
         assert_eq!(transcript.status, Status::Idle);
+    }
+
+    fn steer(text: &str, files: &[&str]) -> Steer {
+        Steer {
+            text: text.into(),
+            attachments: files
+                .iter()
+                .map(|name| {
+                    let link = Attachment::Link {
+                        name: (*name).into(),
+                        uri: format!("file:///{name}"),
+                    };
+                    ((*name).to_owned(), link)
+                })
+                .collect(),
+        }
+    }
+
+    fn running() -> Transcript {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        transcript.push_prompt("first", Vec::new());
+        transcript
+    }
+
+    #[test]
+    fn steer_waits_for_the_turn_to_stop() {
+        let mut transcript = running();
+        transcript.apply(SessionEvent::PermissionRequested {
+            id: 1,
+            title: "write".into(),
+            options: Vec::new(),
+        });
+        transcript.steer(steer("instead", &[]));
+        assert!(!transcript.awaiting_permission());
+        assert_eq!(transcript.take_steer(), None);
+
+        transcript.apply(SessionEvent::TurnEnded {
+            stop_reason: "cancelled".into(),
+        });
+        assert_eq!(transcript.take_steer(), Some(steer("instead", &[])));
+        assert_eq!(transcript.take_steer(), None);
+    }
+
+    #[rstest]
+    #[case::both(steer("a", &["x"]), steer("b", &["y"]), steer("a\n\nb", &["x", "y"]))]
+    #[case::first_empty(steer("", &["x"]), steer("b", &[]), steer("b", &["x"]))]
+    #[case::second_empty(steer("a", &[]), steer("", &["y"]), steer("a", &["y"]))]
+    fn steers_before_the_stop_join(
+        #[case] first: Steer,
+        #[case] second: Steer,
+        #[case] joined: Steer,
+    ) {
+        let mut transcript = running();
+        transcript.steer(first);
+        transcript.steer(second);
+        transcript.apply(SessionEvent::PromptFailed {
+            message: "boom".into(),
+        });
+        assert_eq!(transcript.take_steer(), Some(joined));
+    }
+
+    #[test]
+    fn steer_is_handed_back_when_the_session_closes() {
+        let mut transcript = running();
+        transcript.steer(steer("instead", &["x"]));
+        transcript.apply(SessionEvent::Closed { error: None });
+        let steer = transcript.take_steer();
+        assert_eq!(steer.as_ref().map(Steer::names), Some(vec!["x".to_owned()]));
+        assert_eq!(steer.map(|s| s.prompt().text).as_deref(), Some("instead"));
     }
 
     #[test]
