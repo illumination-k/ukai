@@ -19,6 +19,7 @@ use crate::projects::{
 };
 use crate::remote_reports::Follow;
 use crate::report_pane::ReportList;
+use crate::schedules::{ScheduleList, Scheduler};
 use crate::shortcuts::{Shortcuts, on_keydown};
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -46,6 +47,8 @@ pub fn App() -> Element {
             sessions: Signal::new(HashMap::new()),
             reports: Signal::new(HashMap::new()),
             palette: Signal::new(false),
+            schedules: Signal::new(state.schedules),
+            running: Signal::new(HashMap::new()),
         }
     });
     use_hook(|| {
@@ -53,7 +56,12 @@ pub fn App() -> Element {
             add_project(&paths, app, root);
         }
     });
-    use_autosave(paths.state_file.clone(), app.projects, app.layout);
+    use_autosave(
+        paths.state_file.clone(),
+        app.projects,
+        app.layout,
+        app.schedules,
+    );
 
     // Whatever pane the user is looking at has nothing unread: the focused
     // one, once focus moves to it or the window comes back to the front.
@@ -83,6 +91,7 @@ pub fn App() -> Element {
             Sidebar {}
             Workbench {}
             Follow {}
+            Scheduler {}
             if palette() {
                 Palette {}
             }
@@ -125,6 +134,8 @@ fn Sidebar() -> Element {
     let selected_name = projects.selected().map(|p| p.name());
     let report_project = selected.clone();
     let report_project_name = selected_name.clone();
+    let schedule_project = selected.clone();
+    let schedule_project_name = selected_name.clone();
     drop(projects);
     let agents: Result<Vec<(String, &'static str)>, String> = match &selected {
         None => Ok(Vec::new()),
@@ -199,7 +210,7 @@ fn Sidebar() -> Element {
                                 }
                                 button {
                                     class: "icon",
-                                    title: "Close project (ends its sessions)",
+                                    title: "Close project (ends its sessions and drops its schedules)",
                                     onclick: {
                                         let id = id.clone();
                                         move |event: MouseEvent| {
@@ -272,6 +283,9 @@ fn Sidebar() -> Element {
                         },
                     }
                 }
+            }
+            if let (Some(project), Some(name)) = (schedule_project, schedule_project_name) {
+                ScheduleList { key: "schedules-{project}", project, name }
             }
             if let (Some(project), Some(name)) = (report_project, report_project_name) {
                 ReportList { key: "{project}", project, name }

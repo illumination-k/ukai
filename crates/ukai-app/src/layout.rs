@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
+use ukai_core::schedule::Schedules;
 use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource};
 
 use crate::agent_pane::{AgentView, Sessions, agent_status, connect};
@@ -15,6 +16,7 @@ use crate::alert::{is_unread, mark_read};
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, pick_report};
+use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
 
 /// Open `agent` of `project` in `pane` and start its session. A gateway
@@ -126,7 +128,12 @@ fn close_tab(app: AppSignals, index: usize) {
 }
 
 /// A pane's title: its project's name and what it shows.
-pub fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> (Option<String>, String) {
+pub fn pane_label(
+    layout: &Layout,
+    projects: &Projects,
+    schedules: &Schedules,
+    pane: PaneId,
+) -> (Option<String>, String) {
     let project_name = |id: &ProjectId| {
         projects
             .get(id)
@@ -143,6 +150,10 @@ pub fn pane_label(layout: &Layout, projects: &Projects, pane: PaneId) -> (Option
             );
             (Some(project_name(project)), file)
         }
+        Some(PaneContent::Schedule { project, schedule }) => (
+            Some(project_name(project)),
+            schedule_label(schedules, schedule),
+        ),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
     }
 }
@@ -179,6 +190,7 @@ fn TabBar() -> Element {
     let (tabs, active) = {
         let current = layout.read();
         let projects = app.projects.read();
+        let schedules = app.schedules.read();
         let tabs: Vec<(usize, String, usize, Option<&'static str>, bool)> = current
             .tabs()
             .iter()
@@ -187,7 +199,7 @@ fn TabBar() -> Element {
                 let panes = tab.root.panes();
                 let label = panes.first().map_or_else(
                     || "New tab".to_owned(),
-                    |pane| pane_label(&current, &projects, *pane).1,
+                    |pane| pane_label(&current, &projects, &schedules, *pane).1,
                 );
                 let unread = panes.iter().any(|pane| is_unread(app.sessions, *pane));
                 (
@@ -281,7 +293,7 @@ fn PaneView(pane: PaneId) -> Element {
         (
             current.content(pane).cloned().unwrap_or(PaneContent::Empty),
             current.focused() == pane,
-            pane_label(&current, &app.projects.read(), pane),
+            pane_label(&current, &app.projects.read(), &app.schedules.read(), pane),
         )
     };
     let status = match &content {
@@ -349,6 +361,9 @@ fn PaneView(pane: PaneId) -> Element {
                 },
                 PaneContent::Agent { session, .. } => rsx! {
                     AgentView { pane, has_saved_session: session.is_some() }
+                },
+                PaneContent::Schedule { project, schedule } => rsx! {
+                    ScheduleView { key: "{schedule}", project, schedule }
                 },
                 PaneContent::Report { project, path, source } => rsx! {
                     ReportView {

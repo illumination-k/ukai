@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use ukai_acp::PaneWorkspace;
 
 use crate::project::ProjectId;
+use crate::schedule::ScheduleId;
 
 pub type PaneId = u64;
 
@@ -68,6 +69,11 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "ReportSource::is_project")]
         source: ReportSource,
     },
+    /// A schedule of `project`: its settings and recent runs.
+    Schedule {
+        project: ProjectId,
+        schedule: ScheduleId,
+    },
 }
 
 /// Where a report pane reads its file from.
@@ -113,9 +119,9 @@ impl PaneContent {
     pub fn project(&self) -> Option<&ProjectId> {
         match self {
             PaneContent::Empty => None,
-            PaneContent::Agent { project, .. } | PaneContent::Report { project, .. } => {
-                Some(project)
-            }
+            PaneContent::Agent { project, .. }
+            | PaneContent::Report { project, .. }
+            | PaneContent::Schedule { project, .. } => Some(project),
         }
     }
 }

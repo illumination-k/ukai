@@ -12,6 +12,7 @@ mod persist;
 mod projects;
 mod remote_reports;
 mod report_pane;
+mod schedules;
 mod shortcuts;
 
 use std::path::{Path, PathBuf};

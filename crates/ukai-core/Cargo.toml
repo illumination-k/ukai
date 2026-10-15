@@ -9,6 +9,8 @@ rust-version.workspace = true
 description = "UI-independent application state for ukai"
 
 [dependencies]
+chrono = { workspace = true }
+croner = { workspace = true }
 globset = { workspace = true }
 percent-encoding = { workspace = true }
 pulldown-cmark = { workspace = true }

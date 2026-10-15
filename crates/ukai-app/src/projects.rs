@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 use ukai_config::Config;
+use ukai_core::schedule::Schedules;
 use ukai_core::{Layout, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
 use crate::remote_reports::Listings;
+use crate::schedules::Running;
 
 /// Locations resolved at startup.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +39,9 @@ pub struct AppSignals {
     pub reports: Listings,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
+    pub schedules: Signal<Schedules>,
+    /// The runs of [`Self::schedules`] going now.
+    pub running: Running,
 }
 
 /// What a session needs from its project.
@@ -95,8 +100,10 @@ pub fn reload_project(paths: &Paths, app: AppSignals, id: &ProjectId) {
         .insert(id.clone(), load_config(paths, &root));
 }
 
-/// Forget a project, closing its panes and ending their sessions.
+/// Forget a project, closing its panes, ending their sessions, and dropping
+/// its schedules.
 pub fn remove_project(app: AppSignals, id: &ProjectId) {
+    crate::schedules::remove_project(app, id);
     let AppSignals {
         mut projects,
         mut configs,
