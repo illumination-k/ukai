@@ -295,8 +295,12 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 `ukai_config::load_layered` が後勝ちで合成する: `agents.<id>` は id 単位で置換、`permissions` は
 プロジェクトの規則を先に評価、`project` / `reports` はプロジェクトのもの、`keybindings` / `voice` はユーザーのもの。検証は合成後に 1 回だけ行う
 （ユーザー側で定義したエージェントをプロジェクトの規則から参照できるように）。
-**秘密情報はファイルに書かせない**。`${env:NAME}` 展開のみ許し、未定義なら起動時にエラーではなく
-そのエージェントを「未構成」として表示する。
+**秘密情報はファイルに書かせない**。`${env:NAME}`（環境変数）と `${keychain:NAME}`（OS のキーチェーン、
+サービス `ukai`・アカウント `NAME` の項目）の展開のみ許し、未定義なら起動時にエラーではなく
+そのエージェントを「未構成」として表示する。dock や Finder から起動したアプリはシェルの環境変数を
+受け継がないので、`dx bundle` した app ではキーチェーンを使う。読むのは macOS のみ（`security-framework`）で、
+ほかの OS では `${keychain:...}` は未定義として扱う。項目は
+`security add-generic-password -U -s ukai -a <NAME> -w`（値はプロンプトで入力）で入れる。
 
 ### スキーマ
 
@@ -321,7 +325,7 @@ headers = { Authorization = "Bearer ${env:GOOSE_TOKEN}" }
 [agents.cluster-claude] # ukai-gateway のエージェント（「クラウド実行」）
 transport = "gateway"
 url = "wss://ukai.example.com/agents/claude/acp"
-headers = { Authorization = "Bearer ${env:UKAI_GATEWAY_TOKEN}" }
+headers = { Authorization = "Bearer ${keychain:ukai-gateway}" }
 workspace = "pod" # 新しい pane の既定: shared | pod
 
 # ---- パーミッション自動応答（未実装） -------------------------------------
@@ -568,7 +572,7 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 ## Security
 
 - `fs/*` はプロジェクトルート配下に正規化後のパスで制限。シンボリックリンク経由の脱出も拒否。
-- 認証情報は環境変数参照のみ。設定ファイル・state ファイル・ログに値を書かない（ヘッダ値はログでマスク）。
+- 認証情報は環境変数かキーチェーンの参照のみ。設定ファイル・state ファイル・ログに値を書かない（ヘッダ値はログでマスク）。
 - HTTP エージェントは `https://` / `wss://` を既定とし、平文は `localhost` 以外で警告。
 - HTML レポートは前述の IPC を持たない子 WebView + 配信範囲の制限 + CSP。
 
@@ -593,4 +597,7 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - `_ukai/turn_state` / `_ukai/progress` を、ACP v2 の `state_update` やリモートトランスポートの仕様が
   固まったらそちらに置き換える。
 - snapshot の `refs/ukai/wip/*` を各ホスティングが受けるか。ブランチにすると CI の push トリガーに乗る。
-- gateway の外部公開と認証（今は bearer token か port-forward）。
+- gateway の外部公開と認証。port-forward のほか、認証するリバースプロキシ（Ingress の前の IAP など、
+  bearer token を検証するもの）越しに `wss://` で使えることを確認済み。その場合 `Authorization` は
+  プロキシのトークンに使うので、gateway 自身の `UKAI_GATEWAY_TOKEN` は設定しない。トークンには期限があり、
+  期限切れは接続エラーとして出るだけで、自動更新はまだない。

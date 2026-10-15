@@ -297,8 +297,8 @@ fn start_session(
         .agents
         .get(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared for this project"))?;
-    let transport = ukai_acp::resolve(spec, |name| std::env::var(name).ok(), workspace)
-        .map_err(|e| e.to_string())?;
+    let transport =
+        ukai_acp::resolve(spec, ukai_acp::system_lookup, workspace).map_err(|e| e.to_string())?;
     let fs_root = FsRoot::new(&context.root).map_err(|e| e.to_string())?;
     Ok(ukai_acp::spawn_session(
         transport,

@@ -51,7 +51,7 @@ fn endpoint(config: &Config, agent: &str) -> Result<SchedulesEndpoint, String> {
         .agents
         .get(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    SchedulesEndpoint::resolve(spec, |name| std::env::var(name).ok())
+    SchedulesEndpoint::resolve(spec, ukai_acp::system_lookup)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("agent `{agent}` is not a gateway agent, so it keeps no schedules"))
 }

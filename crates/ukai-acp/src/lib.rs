@@ -13,10 +13,12 @@
 mod fs;
 pub mod reports;
 pub mod schedules;
+mod secrets;
 mod session;
 
 pub use fs::{FsError, FsRoot};
 pub use reports::ReportsEndpoint;
+pub use secrets::system_lookup;
 pub use session::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, Cost, FileDiff,
     PROGRESS_METHOD, PastSession, PermissionChoice, PermissionId, PlanItem, Prompt, PromptCaps,
@@ -29,7 +31,7 @@ use agent_client_protocol_http::{HttpClient, HttpClientError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 pub use ukai_config::WorkspaceScope;
-use ukai_config::{AgentSpec, InterpolateError, interpolate};
+use ukai_config::{AgentSpec, InterpolateError, Source, interpolate};
 
 /// The workspace a pane asks a gateway agent for, sent with the connection:
 /// a [`WorkspaceScope::Pod`] pane gets a pod of its own, found again by `key`
@@ -72,11 +74,12 @@ pub enum ResolveError {
     Client(String),
 }
 
-/// Resolve `spec`, reading `${env:NAME}` references through `lookup`.
+/// Resolve `spec`, reading `${env:NAME}` and `${keychain:NAME}` references
+/// through `lookup` ([`system_lookup`] outside tests).
 /// `workspace` is the pane's, for a gateway agent; other agents ignore it.
 pub fn resolve(
     spec: &AgentSpec,
-    lookup: impl Fn(&str) -> Option<String> + Copy,
+    lookup: impl Fn(Source, &str) -> Option<String> + Copy,
     workspace: Option<&PaneWorkspace>,
 ) -> Result<Transport, ResolveError> {
     match spec {
@@ -133,7 +136,7 @@ fn remote(
     url: &str,
     headers: &std::collections::BTreeMap<String, String>,
     extra: &[(&'static str, String)],
-    lookup: impl Fn(&str) -> Option<String> + Copy,
+    lookup: impl Fn(Source, &str) -> Option<String> + Copy,
 ) -> Result<Transport, ResolveError> {
     let url = interpolate(url, lookup)?;
     // `HttpClient` picks HTTP/SSE or WebSocket from the scheme alone, so a
@@ -157,14 +160,14 @@ fn remote(
     Ok(Transport::Remote(client))
 }
 
-/// The declared `headers` with their `${env:NAME}` references expanded, plus
+/// The declared `headers` with their `${...}` references expanded, plus
 /// `extra` the app adds itself. Every declared value is marked sensitive:
 /// they are typically credentials and must stay out of `Debug` output and
 /// logs.
 fn header_map(
     headers: &std::collections::BTreeMap<String, String>,
     extra: &[(&'static str, String)],
-    lookup: impl Fn(&str) -> Option<String> + Copy,
+    lookup: impl Fn(Source, &str) -> Option<String> + Copy,
 ) -> Result<HeaderMap, ResolveError> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
@@ -191,8 +194,8 @@ mod tests {
 
     use super::*;
 
-    fn lookup(name: &str) -> Option<String> {
-        (name == "TOKEN").then(|| "s3cret".to_owned())
+    fn lookup(source: Source, name: &str) -> Option<String> {
+        (source == Source::Env && name == "TOKEN").then(|| "s3cret".to_owned())
     }
 
     fn http(url: &str, headers: &[(&str, &str)]) -> AgentSpec {

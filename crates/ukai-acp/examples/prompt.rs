@@ -50,7 +50,7 @@ async fn run(agent: &str, prompt: &str) -> Result<(), Box<dyn std::error::Error>
             key,
             scope: ukai_acp::WorkspaceScope::Pod,
         });
-    let transport = ukai_acp::resolve(spec, |name| std::env::var(name).ok(), workspace.as_ref())?;
+    let transport = ukai_acp::resolve(spec, ukai_acp::system_lookup, workspace.as_ref())?;
     let restore = std::env::var("UKAI_RESTORE").ok();
     let detach_after = std::env::var("UKAI_DETACH_AFTER")
         .ok()

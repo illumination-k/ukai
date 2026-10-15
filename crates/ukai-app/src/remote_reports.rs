@@ -108,13 +108,9 @@ fn declaration(
 }
 
 fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<ReportsEndpoint, String> {
-    ReportsEndpoint::resolve(
-        spec,
-        |name| std::env::var(name).ok(),
-        workspace.workspace.as_ref(),
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| format!("agent `{}` serves no reports", workspace.agent))
+    ReportsEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.workspace.as_ref())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("agent `{}` serves no reports", workspace.agent))
 }
 
 /// The endpoints [`Follow`] polls through, kept between rounds so a listing

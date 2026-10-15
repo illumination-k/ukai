@@ -20,7 +20,7 @@ update it in the same change when the design moves.
 
 ## Layout
 
-- `crates/ukai-config` — `ukai.toml` schema (serde), the user-level `config.toml` it is layered over (`load_layered`; `[keybindings]` and `[voice]` are user-only), config/state directory resolution, `${env:NAME}` interpolation, and cross-reference validation.
+- `crates/ukai-config` — `ukai.toml` schema (serde), the user-level `config.toml` it is layered over (`load_layered`; `[keybindings]` and `[voice]` are user-only), config/state directory resolution, `${env:NAME}` / `${keychain:NAME}` interpolation, and cross-reference validation.
 - `crates/ukai-acp` — resolves an agent spec into an ACP transport (`agent-client-protocol` for stdio, `agent-client-protocol-http` for HTTP/SSE and WebSocket) and runs a session over it: `spawn_session` returns a `SessionHandle` for commands and a channel of `SessionEvent`s. Also the client side of `fs/*`, confined to the project root, `reports`, which reads a gateway agent's reports back from its pod over HTTP, and `schedules`, the wire types and client of a gateway agent's schedules. No UI types.
 - `crates/ukai-core` — UI-independent state: `Projects` (opened project roots under opaque ids), `Layout` (tabs and pane trees the user arranges at runtime; each pane names its project; invariants are property-tested and re-checked on load), `Transcript` (the fold of `SessionEvent`s an agent pane renders), and `state` (the versioned `state.json`, written atomically), `report` (listing reports and images, serving one to its web view confined to its base directory, and `ReportTree` for serving a whole checkout's reports, which `ukai-relay` answers from), `markdown` (agent messages parsed into a tree the app renders as elements, never as HTML), `review` (line diffs of the changes tool calls report, and the prompt that sends comments on them), `attachment` (how a file attached to a prompt is sent, given the agent's prompt capabilities), `config` (presenting the settings — model, reasoning effort, mode — an agent lets the user change), `palette` (fuzzy matching for the command palette), `slash` (completing the slash commands an agent offers), and `schedule` (commands and prompts a gateway runs on a cron pattern: when they are due, what is wrong with them, and their recent runs; shared by the gateway and the app).
 - `crates/ukai-voice` — voice input: microphone capture (`cpal`) and on-device transcription with whisper.cpp (`whisper-rs`). Nothing leaves the machine; do not add a cloud speech API. `audio` holds the pure conversions (downmix, resample, how the transcript joins the draft) and is where tests go; `cargo run -p ukai-voice --example transcribe -- <model> [file.wav]` checks a model without the app.
@@ -61,7 +61,7 @@ interpolation code collects every problem rather than stopping at the first;
 keep it that way and test each problem variant.
 
 Logs go through `tracing` to stderr. Never log header values or anything read
-through `${env:...}`: those are credentials.
+through `${env:...}` or `${keychain:...}`: those are credentials.
 
 When running the app for a manual check, point it at throwaway directories so
 it does not touch your real projects and layout:
@@ -76,5 +76,6 @@ using.
   bridge every frame can reach (see "HTML レポートと画像" in `docs/design.md`).
 - ACP `fs/*` requests are confined to the project root after path
   normalization, including symlinks.
-- Secrets are only ever referenced as `${env:NAME}`; do not add a config key
-  that stores one inline.
+- Secrets are only ever referenced as `${env:NAME}` or `${keychain:NAME}`
+  (service `ukai`, account `NAME`); do not add a config key that stores one
+  inline.

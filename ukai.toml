@@ -6,7 +6,7 @@
 # arranged in the app, not here.
 #
 # Personal endpoints and tokens go in `ukai.local.toml` (gitignored); secrets
-# are referenced as `${env:NAME}` and never written here.
+# are referenced as `${env:NAME}` or `${keychain:NAME}` and never written here.
 
 [project]
 name = "ukai"

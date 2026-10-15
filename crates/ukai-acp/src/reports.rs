@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use reqwest::header::{CONTENT_TYPE, ETAG};
 use serde::{Deserialize, Serialize};
-use ukai_config::AgentSpec;
+use ukai_config::{AgentSpec, Source};
 
 use crate::{PaneWorkspace, ResolveError, header_map, workspace_headers};
 
@@ -93,7 +93,7 @@ impl ReportsEndpoint {
     /// not a gateway agent: no other transport serves reports.
     pub fn resolve(
         spec: &AgentSpec,
-        lookup: impl Fn(&str) -> Option<String> + Copy,
+        lookup: impl Fn(Source, &str) -> Option<String> + Copy,
         workspace: Option<&PaneWorkspace>,
     ) -> Result<Option<Self>, ResolveError> {
         let AgentSpec::Gateway {
@@ -271,7 +271,7 @@ mod tests {
         };
         let endpoint = ReportsEndpoint::resolve(
             &gateway("ws://localhost:8080/agents/a/acp"),
-            |_| None,
+            |_, _| None,
             Some(&workspace),
         )
         .unwrap_or_else(|e| panic!("resolve: {e}"))
@@ -289,7 +289,7 @@ mod tests {
     #[case::websocket(AgentSpec::Websocket { url: "wss://example.com/acp".into(), headers: BTreeMap::new() })]
     fn other_transports_serve_no_reports(#[case] spec: AgentSpec) {
         assert!(matches!(
-            ReportsEndpoint::resolve(&spec, |_| None, None),
+            ReportsEndpoint::resolve(&spec, |_, _| None, None),
             Ok(None)
         ));
     }
@@ -301,7 +301,7 @@ mod tests {
             headers: BTreeMap::from([("Authorization".into(), "Bearer ${env:NOPE}".into())]),
             workspace: WorkspaceScope::Shared,
         };
-        assert!(ReportsEndpoint::resolve(&spec, |_| None, None).is_err());
+        assert!(ReportsEndpoint::resolve(&spec, |_, _| None, None).is_err());
     }
 
     #[test]
