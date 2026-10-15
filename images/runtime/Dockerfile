@@ -3,6 +3,10 @@
 #
 # docker build --platform linux/amd64 -f images/runtime/Dockerfile -t <registry>/ukai-runtime .
 #
+# Every change on main that reaches either binary is published as
+# ghcr.io/illumination-k/ukai-runtime:{latest,<commit>}
+# (.github/workflows/image_runtime.yml).
+#
 # The gateway runs this image with `UKAI_RELAY_IMAGE` set to it.
 FROM rust:1.97.1-trixie AS build
 

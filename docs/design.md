@@ -245,7 +245,8 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   次の Pod は clone 時にそれを、記録したブランチの上の未コミットの変更として戻す。
 - Pod は Pod Security の restricted に合わせる（非 root、capabilities なし、seccomp RuntimeDefault）。
 
-`deploy/gateway` が kustomize の base、`images/runtime` が gateway と relay のイメージ、`images/dev` が
+`deploy/gateway` が kustomize の base、`images/runtime` が gateway と relay のイメージ（main の変更ごとに
+`ghcr.io/illumination-k/ukai-runtime` の `latest` とコミットのタグで公開し、base はそれを使う）、`images/dev` が
 このリポジトリを開発するエージェント用のイメージ（`mise.toml` のツール群、desktop のビルド依存、
 仮想ディスプレイ入り）。
 
