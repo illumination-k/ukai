@@ -199,7 +199,7 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 
 ### `ukai-gateway`
 
-- namespace に 1 つ（StatefulSet）。`gateway.toml` の `[agents.<id>]`（イメージ、コマンド、リポジトリ、
+- namespace に 1 つ（`Recreate` の Deployment）。`gateway.toml` の `[agents.<id>]`（イメージ、コマンド、リポジトリ、
   Secret 参照、既存 PVC の mount、リソース、`idle_timeout`）を `GET /agents/<id>/acp` の WebSocket で出す。
 - 接続が来たらそのワークスペースの Job を確保して Pod の ready を待ち、Pod 内の relay に中継する。
   待つ間はクライアントに `_ukai/progress`（状況が変わるたび）と `_ukai/heartbeat`（20 秒ごと）を送り、
