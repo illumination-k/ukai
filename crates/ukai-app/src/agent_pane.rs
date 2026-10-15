@@ -12,8 +12,9 @@ use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
-    Attachment, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot, PaneWorkspace, Prompt,
-    SessionEvent, SessionEvents, SessionHandle, SessionOptions, SlashCommand, ToolStatus,
+    Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot,
+    PaneWorkspace, Prompt, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
+    SlashCommand, ToolStatus,
 };
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
@@ -544,39 +545,14 @@ fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> E
                     };
                     match option.value {
                         ConfigValue::Select { current, choices } => rsx! {
-                            select {
+                            ConfigSelect {
                                 key: "{option.id}",
-                                class: "config-select",
-                                title: "{title}",
-                                aria_label: "{option.name}",
+                                name: option.name.clone(),
+                                title,
+                                current,
+                                choices,
                                 disabled,
-                                onchange: move |event| set(id.clone(), ConfigInput::Select(event.value())),
-                                for (group, run) in ukai_core::config::choice_groups(&choices) {
-                                    match group {
-                                        Some(group) => rsx! {
-                                            optgroup { label: "{group}",
-                                                for choice in run {
-                                                    option {
-                                                        value: "{choice.value}",
-                                                        selected: choice.value == current,
-                                                        title: choice.description.clone().unwrap_or_default(),
-                                                        "{choice.name}"
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        None => rsx! {
-                                            for choice in run {
-                                                option {
-                                                    value: "{choice.value}",
-                                                    selected: choice.value == current,
-                                                    title: choice.description.clone().unwrap_or_default(),
-                                                    "{choice.name}"
-                                                }
-                                            }
-                                        },
-                                    }
-                                }
+                                onpick: move |value| set(id.clone(), ConfigInput::Select(value)),
                             }
                         },
                         ConfigValue::Toggle(on) => rsx! {
@@ -590,6 +566,127 @@ fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> E
                                 "{option.name}"
                             }
                         },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One select setting as a button and a menu drawn like the app's other
+/// lists, instead of the native `select` whose popup the web view leaves to
+/// the platform.
+#[component]
+fn ConfigSelect(
+    name: String,
+    title: String,
+    current: String,
+    choices: Vec<ConfigChoice>,
+    disabled: bool,
+    onpick: EventHandler<String>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut highlighted = use_signal(|| 0usize);
+    let shown = open() && !disabled;
+    let len = choices.len();
+    let selected = choices.iter().position(|choice| choice.value == current);
+    let label = selected.map_or(current.clone(), |at| choices[at].name.clone());
+    let mut pick = move |value: String| {
+        open.set(false);
+        onpick.call(value);
+    };
+    let on_key = {
+        let choices = choices.clone();
+        move |event: KeyboardEvent| {
+            let step = |delta: isize| {
+                (highlighted() as isize + delta).rem_euclid(len.max(1) as isize) as usize
+            };
+            match event.key() {
+                Key::ArrowDown => highlighted.set(step(1)),
+                Key::ArrowUp => highlighted.set(step(-1)),
+                Key::Enter if !event.is_composing() => {
+                    if let Some(choice) = choices.get(highlighted()) {
+                        pick(choice.value.clone());
+                    }
+                }
+                // Not the app's: escape here only closes the menu.
+                Key::Escape | Key::Tab => open.set(false),
+                _ => return,
+            }
+            event.prevent_default();
+            event.stop_propagation();
+        }
+    };
+    // Each choice with its index in `choices` and, first in a group, the
+    // group's name to head it.
+    let rows: Vec<(usize, Option<String>, ConfigChoice)> =
+        ukai_core::config::choice_groups(&choices)
+            .into_iter()
+            .flat_map(|(group, run)| {
+                run.iter().enumerate().map(move |(i, choice)| {
+                    (group.filter(|_| i == 0).map(str::to_owned), choice.clone())
+                })
+            })
+            .enumerate()
+            .map(|(index, (group, choice))| (index, group, choice))
+            .collect();
+
+    rsx! {
+        div { class: "config-select",
+            button {
+                class: if shown { "config-trigger open" } else { "config-trigger" },
+                title: "{title}",
+                aria_label: "{name}",
+                aria_haspopup: "listbox",
+                aria_expanded: shown,
+                disabled,
+                onclick: move |_| {
+                    highlighted.set(selected.unwrap_or(0));
+                    open.toggle();
+                },
+                span { class: "name", "{label}" }
+                span { class: "caret",
+                    Svg { icon: Icon::Chevron, size: 10 }
+                }
+            }
+            if shown {
+                div {
+                    class: "config-backdrop",
+                    onclick: move |_| open.set(false),
+                }
+                div {
+                    class: "config-menu",
+                    role: "listbox",
+                    aria_label: "{name}",
+                    tabindex: "-1",
+                    onmounted: move |event| async move {
+                        let _ = event.set_focus(true).await;
+                    },
+                    onkeydown: on_key,
+                    for (at, group, choice) in rows {
+                        if let Some(group) = group {
+                            div { class: "config-group", "{group}" }
+                        }
+                        div {
+                            class: if at == highlighted() { "config-item highlighted" } else { "config-item" },
+                            role: "option",
+                            aria_selected: Some(at) == selected,
+                            title: choice.description.clone().unwrap_or_default(),
+                            onmouseenter: move |_| highlighted.set(at),
+                            onclick: {
+                                let value = choice.value.clone();
+                                move |_| pick(value.clone())
+                            },
+                            span { class: "check",
+                                if Some(at) == selected {
+                                    Svg { icon: Icon::Check, size: 12 }
+                                }
+                            }
+                            span { class: "label", "{choice.name}" }
+                            if let Some(description) = &choice.description {
+                                span { class: "description", "{description}" }
+                            }
+                        }
                     }
                 }
             }
