@@ -1,6 +1,6 @@
 //! Checks that serde cannot express: every agent a permission rule names has
-//! to be declared, the report settings have to make sense, and a project file
-//! holds nothing that only the user file may set.
+//! to be declared, the report and voice settings have to make sense, and a
+//! project file holds nothing that only the user file may set.
 
 use std::path::{Component, PathBuf};
 
@@ -18,15 +18,17 @@ pub enum Problem {
     InvalidGlob { glob: String, message: String },
     #[error("keybindings: set them in the user config.toml, not in a project's ukai.toml")]
     KeybindingsInProject,
+    #[error("voice: set it in the user config.toml, not in a project's ukai.toml")]
+    VoiceInProject,
+    #[error("voice.language: `{0}` is not an ISO 639-1 code such as `ja` or `en`")]
+    InvalidVoiceLanguage(String),
 }
 
 /// What a project's `ukai.toml` may not hold, whatever the user file says.
 pub(crate) fn project_only(project: &Config) -> Vec<Problem> {
-    if project.keybindings.is_empty() {
-        Vec::new()
-    } else {
-        vec![Problem::KeybindingsInProject]
-    }
+    let keybindings = (!project.keybindings.is_empty()).then_some(Problem::KeybindingsInProject);
+    let voice = project.voice.is_some().then_some(Problem::VoiceInProject);
+    keybindings.into_iter().chain(voice).collect()
 }
 
 pub(crate) fn validate(config: &Config) -> Vec<Problem> {
@@ -58,8 +60,17 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
                 message: error.kind().to_string(),
             })
     });
+    let bad_language = config
+        .voice
+        .as_ref()
+        .and_then(|voice| voice.language.as_ref())
+        .filter(|language| {
+            !(language.len() == 2 && language.chars().all(|c| c.is_ascii_lowercase()))
+        })
+        .map(|language| Problem::InvalidVoiceLanguage(language.clone()));
     unknown_agents
         .chain(outside_dirs)
         .chain(bad_globs)
+        .chain(bad_language)
         .collect()
 }

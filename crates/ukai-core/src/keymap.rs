@@ -33,6 +33,8 @@ pub enum Action {
     Tab(u8),
     /// Stop the focused pane's turn.
     Stop,
+    /// Start or stop dictating into the focused pane's composer.
+    Dictate,
     /// Send the composer's message (or the diff comment being written).
     Send,
 }
@@ -62,7 +64,7 @@ impl Action {
         ]
         .into_iter()
         .chain((1..=9).map(Action::Tab))
-        .chain([Action::Stop, Action::Send])
+        .chain([Action::Stop, Action::Dictate, Action::Send])
     }
 
     pub fn scope(self) -> Scope {
@@ -86,6 +88,7 @@ impl Action {
             Action::PrevPane => "prev-pane".to_owned(),
             Action::Tab(n) => format!("tab-{n}"),
             Action::Stop => "stop".to_owned(),
+            Action::Dictate => "dictate".to_owned(),
             Action::Send => "send".to_owned(),
         }
     }
@@ -106,6 +109,7 @@ impl Action {
             Action::NextPane => &["mod+]"],
             Action::PrevPane => &["mod+["],
             Action::Stop => &["escape"],
+            Action::Dictate => &["mod+shift+m"],
             Action::Send => &["enter"],
             Action::Tab(n) => return vec![format!("mod+{n}")],
         };

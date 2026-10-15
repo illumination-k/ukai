@@ -4,7 +4,7 @@
 //! arranged by the user at runtime.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,9 @@ pub struct Config {
     /// user-level `config.toml` may set them: they apply to the whole app.
     #[serde(default)]
     pub keybindings: BTreeMap<String, Keys>,
+    /// Voice input. Only the user-level `config.toml` may set it: the model
+    /// is a file on this machine, not part of a project.
+    pub voice: Option<Voice>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -93,6 +96,28 @@ impl Keys {
         match self {
             Keys::One(chord) => std::slice::from_ref(chord),
             Keys::Many(chords) => chords,
+        }
+    }
+}
+
+/// Dictation into the composer, transcribed on this machine by whisper.cpp.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Voice {
+    /// A whisper.cpp ggml model file (`ggml-base.bin`, ...). A relative
+    /// path is relative to the directory of `config.toml`.
+    pub model: PathBuf,
+    /// Spoken language as an ISO 639-1 code (`ja`, `en`); detected when
+    /// absent.
+    pub language: Option<String>,
+}
+
+impl Voice {
+    /// The model's path, with a relative one taken from `config_dir`.
+    pub fn model_path(&self, config_dir: Option<&Path>) -> PathBuf {
+        match config_dir {
+            Some(dir) if self.model.is_relative() => dir.join(&self.model),
+            _ => self.model.clone(),
         }
     }
 }
