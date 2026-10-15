@@ -1,5 +1,7 @@
 # ukai
 
+<img src="crates/ukai-app/icons/icon.png" alt="ukai icon" width="128">
+
 A desktop client for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com)
 that drives many agents side by side — cloud agents over HTTP/WebSocket and
 local agents over stdio — with per-project pane layouts, commands, and

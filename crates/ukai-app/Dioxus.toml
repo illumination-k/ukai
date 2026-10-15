@@ -8,3 +8,10 @@ identifier = "dev.illumination-k.ukai"
 publisher = "illumination-k"
 category = "DeveloperTool"
 short_description = "Drive many ACP agents side by side"
+icon = [
+  "icons/32x32.png",
+  "icons/128x128.png",
+  "icons/128x128@2x.png",
+  "icons/icon.icns",
+  "icons/icon.ico",
+]
