@@ -206,6 +206,14 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   `ukai_core::report::ReportTree` が `reports.dirs` の中だけに限る（`..`・エンコードされた `..`・
   外に出るシンボリックリンクは拒否）。設定はリクエストごとに読むので、Pod の中で `ukai.toml` を
   直せばそのまま効く。`/health` 以外はトークンが必要。
+- エージェントは ukai に見られていることも、`reports.dirs` に書いた HTML がユーザーのサイドバーに出ることも
+  知らない。そこで `session/new` / `load` / `resume` の `mcpServers` に relay 自身の MCP サーバー
+  （`ukai-relay mcp --root <作業ディレクトリ>`、名前は `ukai`。`mcp`）を足す（同名のクライアントの指定は置き換える）。
+  ACP のエージェントが必ずクライアントから受け取る経路なのでエージェントの種類を問わず、checkout の
+  `CLAUDE.md` / `AGENTS.md` も汚さない。MCP の `initialize` 応答の `instructions` で、レポートとは何か、この
+  checkout の `[reports]`（`dirs` / `globs`、`allow_network` による制限、相対参照の範囲）を伝え、`dirs` が
+  空なら `ukai.toml` への足し方を教える。ツールは `list_reports`（ユーザーが今開けるレポート）だけ。
+  ukai の機能をエージェントに知らせるときはここを育てる。手元の stdio エージェントにはまだ渡していない。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
 - クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
 

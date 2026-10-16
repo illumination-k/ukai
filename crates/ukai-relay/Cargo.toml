@@ -12,6 +12,7 @@ description = "Keeps a stdio ACP agent and its sessions alive across client conn
 agent-client-protocol = { workspace = true, features = ["process"] }
 agent-client-protocol-http = { workspace = true, features = ["server"] }
 axum = { workspace = true }
+clap = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal"] }
