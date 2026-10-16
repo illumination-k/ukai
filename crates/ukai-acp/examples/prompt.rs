@@ -61,6 +61,7 @@ async fn run(agent: &str, prompt: &str) -> Result<(), Box<dyn std::error::Error>
             cwd: root.clone(),
             fs_root: Some(FsRoot::new(Path::new(&root))?),
             restore: restore.clone(),
+            update_check: None,
         },
     );
 

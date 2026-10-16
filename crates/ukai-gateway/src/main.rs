@@ -15,6 +15,10 @@
 //! them in its pod. Same token, same workspace headers; a report request
 //! never starts a pod.
 //!
+//! `POST /agents/<id>/restart` stops that workspace's pod, so the next
+//! connection starts a fresh one, e.g. to pick up a newer agent release.
+//! Every session in the workspace ends with it.
+//!
 //! `/agents/<id>/schedules` keeps the agent's [`schedules`]: commands and
 //! prompts the gateway runs on a cron pattern, in a workspace of each
 //! schedule's own. `GET` lists them and `POST` adds one; `GET`, `PUT`, and
@@ -125,6 +129,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(|| async { "ok" }))
         .route("/agents", get(list))
         .route("/agents/{id}/acp", get(connect))
+        .route("/agents/{id}/restart", post(restart))
         .route("/agents/{id}/reports", get(reports))
         .route("/agents/{id}/reports/files/{*path}", get(reports))
         .route(
@@ -202,6 +207,41 @@ async fn connect(
             tracing::warn!(agent = %id, %error, "connection ended with an error");
         }
     })
+}
+
+/// `POST /agents/<id>/restart`: stop the workspace's pod, resolved as for
+/// `/acp`. The next connection starts a new one.
+async fn restart(
+    State(gateway): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&gateway, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(agent) = gateway.agents.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let pane = match pane_key(&headers) {
+        Ok(pane) => pane,
+        Err(problem) => return (StatusCode::BAD_REQUEST, problem).into_response(),
+    };
+    let plan = Plan::new(
+        agent,
+        &gateway.user,
+        gateway.cluster.namespace(),
+        pane.as_deref(),
+    );
+    match gateway.cluster.stop(&plan).await {
+        Ok(()) => {
+            tracing::info!(agent = %id, job = %plan.job_name(), "restarting the agent's workspace");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot stop the workspace's pod");
+            StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
 }
 
 /// `GET /agents/<id>/reports[/files/<path>]`: what the agent wrote in the

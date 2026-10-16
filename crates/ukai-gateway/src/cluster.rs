@@ -181,6 +181,22 @@ impl Cluster {
         Ok(serving(&job, found))
     }
 
+    /// Stop the workspace's Job, if there is one, so the next connection
+    /// starts a fresh pod: a restart that picks up a newer image or a newer
+    /// release the agent's command fetches. The workspace sidecar snapshots
+    /// on its way out, as when the pod idles out.
+    pub async fn stop(&self, plan: &Plan) -> Result<()> {
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
+        match jobs
+            .delete(&plan.job_name(), &DeleteParams::foreground())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(status)) if status.is_not_found() => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Look at the workspace's Job once and move it along: create it, replace
     /// it if it has finished, or report what its pod is waiting for.
     async fn step(&self, plan: &Plan, relay_image: &str) -> Result<Step> {

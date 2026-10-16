@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use ukai_acp::{
     Attachment, ConfigOption, FileDiff, PastSession, PermissionChoice, PermissionId, PlanItem,
-    Prompt, PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Usage,
+    Prompt, PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Update, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +78,9 @@ pub struct Transcript {
     pub session_id: Option<String>,
     /// The agent's other sessions the pane could switch to.
     pub history: History,
+    /// A newer release of the agent, offered before the session is created:
+    /// restart to update, or [`Self::skip_update`] and start as it is.
+    pub update: Option<Update>,
 }
 
 /// The agent's earlier sessions, as far as the pane has asked for them.
@@ -132,6 +135,7 @@ impl Default for Transcript {
             config: Vec::new(),
             commands: Vec::new(),
             queued: None,
+            update: None,
         }
     }
 }
@@ -144,6 +148,8 @@ pub enum Alert {
     Finished,
     /// The agent is blocked on a permission request.
     NeedsInput { title: String },
+    /// A new session waits on whether to update the agent first.
+    UpdateAvailable { package: String, latest: String },
     /// A prompt failed or the connection dropped.
     Failed { message: String },
 }
@@ -161,6 +167,10 @@ impl Alert {
             SessionEvent::PromptFailed { message } => Some(Self::Failed {
                 message: message.clone(),
             }),
+            SessionEvent::UpdateAvailable(update) => Some(Self::UpdateAvailable {
+                package: update.package.clone(),
+                latest: update.latest.clone(),
+            }),
             SessionEvent::Closed { error: Some(error) } => Some(Self::Failed {
                 message: format!("disconnected: {error}"),
             }),
@@ -173,6 +183,9 @@ impl Alert {
         match self {
             Self::Finished => "Finished its turn".to_owned(),
             Self::NeedsInput { title } => format!("Needs permission: {title}"),
+            Self::UpdateAvailable { package, latest } => {
+                format!("{package} {latest} is out; update before starting?")
+            }
             Self::Failed { message } => message.clone(),
         }
     }
@@ -255,8 +268,26 @@ impl Transcript {
         }
     }
 
+    /// Start the session on the agent as it is, past [`Self::update`].
+    pub fn skip_update(&mut self) {
+        self.update = None;
+    }
+
     pub fn apply(&mut self, event: SessionEvent) {
         match event {
+            SessionEvent::UpdateAvailable(update) => self.update = Some(update),
+            SessionEvent::UpdateMissed(Update {
+                package,
+                current,
+                latest,
+            }) => self.entries.push(Entry::Notice {
+                text: format!(
+                    "restarted, but {package} is still {current} (latest {latest}): the agent's \
+                     command or image fixes its version; run it as `npx -y {package}@latest` \
+                     to follow releases"
+                ),
+                error: true,
+            }),
             SessionEvent::Preparing { message } => self.entries.push(Entry::Notice {
                 text: message,
                 error: false,
@@ -435,6 +466,7 @@ impl Transcript {
                         error: true,
                     });
                 }
+                self.update = None;
                 self.status = Status::Closed { error };
             }
         }
@@ -687,6 +719,50 @@ mod tests {
             }),
         };
         assert_eq!(usage_label(&usage), expected);
+    }
+
+    fn update() -> Update {
+        Update {
+            package: "@scope/agent".into(),
+            current: "1.0.0".into(),
+            latest: "1.2.0".into(),
+        }
+    }
+
+    #[test]
+    fn an_offered_update_waits_until_skipped_or_closed() {
+        let mut transcript = folded([SessionEvent::UpdateAvailable(update())]);
+        assert_eq!(transcript.update, Some(update()));
+        assert_eq!(transcript.status, Status::Connecting);
+        assert_eq!(
+            Alert::of(&SessionEvent::UpdateAvailable(update())),
+            Some(Alert::UpdateAvailable {
+                package: "@scope/agent".into(),
+                latest: "1.2.0".into(),
+            })
+        );
+        transcript.skip_update();
+        assert_eq!(transcript.update, None);
+
+        let closed = folded([
+            SessionEvent::UpdateAvailable(update()),
+            SessionEvent::Closed { error: None },
+        ]);
+        assert_eq!(closed.update, None);
+    }
+
+    #[test]
+    fn a_missed_update_is_an_error_notice() {
+        let transcript = folded([
+            SessionEvent::UpdateMissed(update()),
+            ready(None, RestoreOutcome::Fresh),
+        ]);
+        assert!(matches!(
+            transcript.entries.as_slice(),
+            [Entry::Notice { text, error: true }] if text.contains("still 1.0.0 (latest 1.2.0)")
+        ));
+        assert_eq!(transcript.update, None);
+        assert_eq!(transcript.status, Status::Idle);
     }
 
     #[test]

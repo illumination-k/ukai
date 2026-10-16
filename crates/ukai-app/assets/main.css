@@ -777,6 +777,11 @@ button.new-tab {
   margin-top: 12px;
 }
 
+.update-offer {
+  max-width: 480px;
+  margin: auto;
+}
+
 /* ---- picker (empty pane) ---------------------------------------------- */
 
 .picker {

@@ -36,6 +36,7 @@ use tokio::sync::mpsc;
 
 use crate::Transport;
 use crate::fs::FsRoot;
+use crate::updates::{Update, UpdateCheck};
 
 /// The receiving end of a session's events.
 pub type SessionEvents = mpsc::UnboundedReceiver<SessionEvent>;
@@ -48,6 +49,14 @@ pub type PermissionId = u64;
 pub enum SessionEvent {
     /// Progress before the agent can be reached, e.g. while its pod starts.
     Preparing { message: String },
+    /// The agent is behind its latest release. A new session waits for
+    /// [`SessionHandle::proceed`] before it is created; to update instead,
+    /// drop the handle and restart the agent.
+    UpdateAvailable(Update),
+    /// The agent was restarted to reach [`UpdateCheck::expecting`]'s release
+    /// and is still behind it, so its command or image fixes the version.
+    /// The session starts without asking.
+    UpdateMissed(Update),
     /// `initialize` and session setup succeeded; prompts can be sent.
     Ready {
         agent: Option<String>,
@@ -329,6 +338,7 @@ enum SessionCommand {
         value: ConfigInput,
     },
     ListSessions,
+    Proceed,
 }
 
 /// Sends commands to a running session. Dropping every handle ends it.
@@ -376,6 +386,11 @@ impl SessionHandle {
         self.send(SessionCommand::ListSessions)
     }
 
+    /// Create the session despite a [`SessionEvent::UpdateAvailable`].
+    pub fn proceed(&self) -> bool {
+        self.send(SessionCommand::Proceed)
+    }
+
     fn send(&self, command: SessionCommand) -> bool {
         self.commands.send(command).is_ok()
     }
@@ -391,6 +406,10 @@ pub struct SessionOptions {
     /// Session id from an earlier [`SessionEvent::Ready`] to continue instead
     /// of starting a new session.
     pub restore: Option<String>,
+    /// Look up the agent's latest release before a new session (never a
+    /// restored one, which may be in use elsewhere) and ask first when it
+    /// is behind.
+    pub update_check: Option<UpdateCheck>,
 }
 
 /// Start a session on the current tokio runtime.
@@ -462,6 +481,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
         cwd,
         fs_root,
         restore,
+        update_check,
     } = options;
     let replaying = Arc::new(AtomicBool::new(false));
     let last_progress = Arc::new(Mutex::new(Instant::now()));
@@ -591,22 +611,52 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                     SessionConfigOptionsCapabilities::new()
                         .boolean(BooleanConfigOptionCapabilities::new()),
                 ));
-            let handshake = async {
-                let init = cx
-                    .send_request(
-                        InitializeRequest::new(ProtocolVersion::V1)
-                            .client_capabilities(capabilities)
-                            .client_info(Implementation::new("ukai", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .block_task()
-                    .await?;
-                let can_load = init.agent_capabilities.load_session;
-                let can_resume = init
-                    .agent_capabilities
-                    .session_capabilities
-                    .resume
-                    .is_some();
-                let (session_id, outcome, config) = match restore {
+            let init = progressing(
+                &last_progress,
+                cx.send_request(
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(capabilities)
+                        .client_info(Implementation::new("ukai", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task(),
+            )
+            .await?;
+            let update = match (&update_check, &init.agent_info, &restore) {
+                (Some(check), Some(info), None) => check.check(&info.name, &info.version).await,
+                _ => None,
+            };
+            match update {
+                Some(update) if update_check.as_ref().is_some_and(|c| c.missed(&update)) => {
+                    let _ = events.send(SessionEvent::UpdateMissed(update));
+                }
+                Some(update) => {
+                    let _ = events.send(SessionEvent::UpdateAvailable(update));
+                    loop {
+                        tokio::select! {
+                            command = commands.recv() => match command {
+                                None => return Ok(()),
+                                Some(SessionCommand::Proceed) => break,
+                                // Nothing else means anything before the session exists.
+                                Some(_) => {}
+                            },
+                            () = cx.incoming_closed() => return Ok(()),
+                        }
+                    }
+                    // The time spent deciding is not the agent's.
+                    if let Ok(mut last) = last_progress.lock() {
+                        *last = Instant::now();
+                    }
+                }
+                None => {}
+            }
+            let can_load = init.agent_capabilities.load_session;
+            let can_resume = init
+                .agent_capabilities
+                .session_capabilities
+                .resume
+                .is_some();
+            let setup = async {
+                Ok(match restore {
                     Some(id) if can_load => {
                         // History arrives as session/update notifications before
                         // the response; user turns are only forwarded meanwhile.
@@ -638,20 +688,9 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                         };
                         (session.session_id, outcome, session.config_options)
                     }
-                };
-                Ok::<_, agent_client_protocol::Error>((init, session_id, outcome, config))
+                })
             };
-            // An agent that never answers (e.g. stuck on expired credentials)
-            // would otherwise leave the pane connecting forever.
-            let (init, session_id, restore, config) = tokio::select! {
-                result = handshake => result?,
-                () = stalled(&last_progress) => {
-                    return Err(agent_client_protocol::util::internal_error(format!(
-                        "agent made no progress on initialize and session setup for {}s",
-                        HANDSHAKE_TIMEOUT.as_secs()
-                    )));
-                }
-            };
+            let (session_id, restore, config) = progressing(&last_progress, setup).await?;
             let prompt = &init.agent_capabilities.prompt_capabilities;
             let _ = events.send(SessionEvent::Ready {
                 agent: init.agent_info.map(|info| info.title.unwrap_or(info.name)),
@@ -777,6 +816,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                                     Ok(())
                                 })?;
                             }
+                            Some(SessionCommand::Proceed) => {}
                             Some(SessionCommand::ResolvePermission { id, option }) => {
                                 if let Some(responder) = parked.remove(&id) {
                                     let outcome = match option {
@@ -851,8 +891,22 @@ fn send_prompt(
         })
 }
 
-/// `replaying`: a `session/load` is in progress, so user turns are history
-/// to show rather than echoes of a prompt the UI already displays.
+/// `work`, unless the agent stalls first. An agent that never answers (e.g.
+/// stuck on expired credentials) would otherwise leave the pane connecting
+/// forever.
+async fn progressing<T>(
+    last_progress: &Mutex<Instant>,
+    work: impl Future<Output = Result<T, agent_client_protocol::Error>>,
+) -> Result<T, agent_client_protocol::Error> {
+    tokio::select! {
+        result = work => result,
+        () = stalled(last_progress) => Err(agent_client_protocol::util::internal_error(format!(
+            "agent made no progress on initialize and session setup for {}s",
+            HANDSHAKE_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// Resolves once [`HANDSHAKE_TIMEOUT`] has passed since `last_progress`,
 /// which progress notifications keep moving forward.
 async fn stalled(last_progress: &Mutex<Instant>) {
@@ -889,6 +943,8 @@ fn translate_extension(message: &UntypedMessage) -> Option<SessionEvent> {
     }
 }
 
+/// `replaying`: a `session/load` is in progress, so user turns are history
+/// to show rather than echoes of a prompt the UI already displays.
 fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEvent> {
     Some(match update {
         SessionUpdate::UserMessageChunk(ContentChunk { content, .. }) if replaying => {
