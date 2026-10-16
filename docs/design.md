@@ -148,7 +148,8 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
   `select`（グループ付きも平らにして `group` を持たせる）と `boolean` を扱い、それ以外の種類は落とす。
   `boolean` は `clientCapabilities.session.configOptions.boolean` で広告する。`category`（`model` /
   `thought_level` / `mode` など）は表示のヒントとして運ぶだけ。UI は composer の下段にエージェントの並び順で
-  出し、エージェントが応答で確定した値だけを表示に反映する。旧来の `modes` / `session/set_mode` は扱わない。
+  出し、エージェントが応答で確定した値だけを表示に反映する。値が `default` の選択肢は、説明に入った実際のモデル
+  （claude-agent-acp は既定が解決したモデル名を入れる）を表示し、ないときだけ選択肢の名前を出す。旧来の `modes` / `session/set_mode` は扱わない。
 - `ToolCall` / `ToolCallUpdate` はツール呼び出しの `content` のうち `diff`（パス・変更前・変更後）を `FileDiff` として運ぶ。
   更新に `content` があれば差分を置き換え、なければ残す。
 - `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、

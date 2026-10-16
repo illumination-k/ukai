@@ -957,7 +957,7 @@ fn ConfigSelect(
     let shown = open() && !disabled;
     let len = choices.len();
     let selected = choices.iter().position(|choice| choice.value == current);
-    let label = selected.map_or(current.clone(), |at| choices[at].name.clone());
+    let label = ukai_core::config::current_label(&current, &choices);
     let mut pick = move |value: String| {
         open.set(false);
         onpick.call(value);
