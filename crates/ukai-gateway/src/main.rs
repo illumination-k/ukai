@@ -49,7 +49,7 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use serde_json::json;
 use tokio::net::TcpStream;
@@ -617,13 +617,28 @@ async fn connect_relay_at(endpoint: &RelayEndpoint) -> Result<Upstream, BoxError
     Ok(upstream)
 }
 
-/// Pass frames both ways until either side closes, then close the other.
-async fn pump(
-    mut client_tx: ClientTx,
-    mut client_rx: ClientRx,
-    mut relay_tx: SplitSink<Upstream, tungstenite::Message>,
-    mut relay_rx: SplitStream<Upstream>,
-) -> Result<(), BoxError> {
+/// How often an open connection pings its client. The proxies in front of a
+/// gateway (an ingress, an identity-aware proxy) drop a WebSocket that stays
+/// quiet past their idle timeout, as one does while the agent thinks or the
+/// user reads; a ping well under a minute apart keeps it open.
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Pass frames both ways until either side closes, then close the other,
+/// pinging the client every [`KEEPALIVE`] meanwhile.
+async fn pump<CT, CR, RT, RR>(
+    mut client_tx: CT,
+    mut client_rx: CR,
+    mut relay_tx: RT,
+    mut relay_rx: RR,
+) -> Result<(), BoxError>
+where
+    CT: Sink<Message, Error = axum::Error> + Unpin,
+    CR: Stream<Item = Result<Message, axum::Error>> + Unpin,
+    RT: Sink<tungstenite::Message, Error = tungstenite::Error> + Unpin,
+    RR: Stream<Item = Result<tungstenite::Message, tungstenite::Error>> + Unpin,
+{
+    let mut keepalive =
+        tokio::time::interval_at(tokio::time::Instant::now() + KEEPALIVE, KEEPALIVE);
     loop {
         tokio::select! {
             message = client_rx.next() => {
@@ -645,6 +660,9 @@ async fn pump(
                 if close {
                     break;
                 }
+            }
+            _ = keepalive.tick() => {
+                client_tx.send(Message::Ping(Default::default())).await?;
             }
         }
     }
@@ -724,5 +742,42 @@ mod tests {
             headers.insert("ukai-workspace", HeaderValue::from_static(key));
         }
         assert_eq!(pane_key(&headers).map_err(|_| ()), expected);
+    }
+
+    /// A quiet connection pings its client every keepalive, and frames still
+    /// cross while it does.
+    #[tokio::test(start_paused = true)]
+    async fn pings_a_quiet_client_and_still_relays() -> Result<(), BoxError> {
+        let (client_tx, mut client_out) = futures::channel::mpsc::unbounded::<Message>();
+        let (client_in, client_rx) =
+            futures::channel::mpsc::unbounded::<Result<Message, axum::Error>>();
+        let (relay_tx, mut relay_out) = futures::channel::mpsc::unbounded::<tungstenite::Message>();
+        let (_relay_in, relay_rx) =
+            futures::channel::mpsc::unbounded::<Result<tungstenite::Message, tungstenite::Error>>();
+        let pump = tokio::spawn(pump(
+            client_tx.sink_map_err(axum::Error::new),
+            client_rx,
+            relay_tx.sink_map_err(|_| tungstenite::Error::ConnectionClosed),
+            relay_rx,
+        ));
+
+        tokio::time::sleep(KEEPALIVE * 2 + std::time::Duration::from_millis(1)).await;
+        for _ in 0..2 {
+            assert!(matches!(client_out.next().await, Some(Message::Ping(_))));
+        }
+
+        client_in.unbounded_send(Ok(Message::Text("{}".into())))?;
+        assert_eq!(
+            relay_out.next().await,
+            Some(tungstenite::Message::text("{}"))
+        );
+
+        client_in.unbounded_send(Ok(Message::Close(None)))?;
+        pump.await??;
+        assert_eq!(
+            relay_out.next().await,
+            Some(tungstenite::Message::Close(None))
+        );
+        Ok(())
     }
 }
