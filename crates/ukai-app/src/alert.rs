@@ -26,7 +26,10 @@ pub fn raise(
     if window_focused {
         return;
     }
-    if matches!(alert, Alert::NeedsInput { .. }) {
+    if matches!(
+        alert,
+        Alert::NeedsInput { .. } | Alert::UpdateAvailable { .. }
+    ) {
         window
             .window
             .request_user_attention(Some(UserAttentionType::Informational));

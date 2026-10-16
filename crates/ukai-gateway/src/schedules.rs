@@ -451,6 +451,7 @@ async fn run_prompt(
             cwd: REPO_DIR.into(),
             fs_root: None,
             restore: None,
+            update_check: None,
         },
     );
     loop {

@@ -14,8 +14,8 @@ use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot,
-    PaneWorkspace, Prompt, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
-    SlashCommand, ToolStatus,
+    PaneWorkspace, Prompt, RestartEndpoint, SessionEvent, SessionEvents, SessionHandle,
+    SessionOptions, SlashCommand, ToolStatus, UpdateCheck,
 };
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
@@ -104,6 +104,11 @@ pub type Sessions = Signal<HashMap<PaneId, AgentSession>>;
 /// Start a session for the agent `pane` holds. With `resume`, continue the
 /// ACP session recorded for the pane (if any) instead of starting a new one.
 pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
+    connect_expecting(app, pane, resume, None);
+}
+
+/// [`connect`] after restarting the agent to reach release `expecting`.
+fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Option<String>) {
     let AppSignals {
         projects,
         configs,
@@ -134,8 +139,10 @@ pub fn connect(app: AppSignals, pane: PaneId, resume: bool) {
         Some(project) => format!("{agent} · {}", project.name()),
         None => agent.clone(),
     };
-    let started = project_context(&projects.peek(), &configs.peek(), &project)
-        .and_then(|context| start_session(&context, &agent, workspace.as_ref(), restore));
+    let started =
+        project_context(&projects.peek(), &configs.peek(), &project).and_then(|context| {
+            start_session(&context, &agent, workspace.as_ref(), restore, expecting)
+        });
     let handle = match started {
         Ok((handle, mut events)) => {
             let window = dioxus::desktop::window();
@@ -291,6 +298,7 @@ fn start_session(
     agent: &str,
     workspace: Option<&PaneWorkspace>,
     restore: Option<String>,
+    expecting: Option<String>,
 ) -> Result<(SessionHandle, SessionEvents), String> {
     let spec = context
         .config
@@ -306,8 +314,70 @@ fn start_session(
             cwd: context.root.clone(),
             fs_root: Some(fs_root),
             restore,
+            update_check: Some(match expecting {
+                Some(latest) => UpdateCheck::npm().expecting(latest),
+                None => UpdateCheck::npm(),
+            }),
         },
     ))
+}
+
+/// Restart `pane`'s agent so that it comes back at release `latest`, then
+/// start a new session on it: a gateway agent's workspace pod is replaced,
+/// and a local agent's process is started again.
+fn restart_to_update(app: AppSignals, pane: PaneId, latest: String) {
+    let Some(PaneContent::Agent {
+        project,
+        agent,
+        workspace,
+        ..
+    }) = app.layout.peek().content(pane).cloned()
+    else {
+        return;
+    };
+    let endpoint =
+        project_context(&app.projects.peek(), &app.configs.peek(), &project).and_then(|context| {
+            let spec = context
+                .config
+                .agents
+                .get(&agent)
+                .ok_or_else(|| format!("agent `{agent}` is not declared for this project"))?;
+            RestartEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.as_ref())
+                .map_err(|e| e.to_string())
+        });
+    let transcript = app.sessions.peek().get(&pane).map(|s| s.transcript);
+    let report = move |event: SessionEvent| {
+        if let Some(mut transcript) = transcript {
+            transcript.write().apply(event);
+        }
+    };
+    match endpoint {
+        Ok(None) => connect_expecting(app, pane, false, Some(latest)),
+        Ok(Some(endpoint)) => {
+            if let Some(mut transcript) = transcript {
+                transcript.write().skip_update();
+            }
+            // Leave the pod before it goes, rather than be cut off by it.
+            let mut sessions = app.sessions;
+            if let Some(session) = sessions.write().get_mut(&pane) {
+                session.handle = None;
+            }
+            report(SessionEvent::Preparing {
+                message: "Restarting the agent's workspace".to_owned(),
+            });
+            spawn_forever(async move {
+                match endpoint.restart().await {
+                    Ok(()) => connect_expecting(app, pane, false, Some(latest)),
+                    Err(error) => report(SessionEvent::Closed {
+                        error: Some(format!("could not restart the agent: {error}")),
+                    }),
+                }
+            });
+        }
+        Err(error) => report(SessionEvent::Closed {
+            error: Some(format!("could not restart the agent: {error}")),
+        }),
+    }
 }
 
 /// Send the message queued behind a turn that has stopped, or hand it back to
@@ -500,6 +570,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let empty = transcript.read().entries.is_empty();
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
     let config = transcript.read().config.clone();
+    let update = transcript.read().update.clone();
     let card_class = match (writable, dropping()) {
         (_, true) => "composer-card dropping",
         (true, false) => "composer-card",
@@ -534,6 +605,40 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         // `column-reverse` keeps the view pinned to the newest entry.
         div { class: "pane-body transcript",
             div { class: "entries",
+                if let Some(update) = update {
+                    div { class: "connect update-offer",
+                        p { class: "title", "{update.package} {update.latest} is available" }
+                        p { class: "muted",
+                            "This agent runs {update.current}. Restarting it fetches the new release "
+                            "when its command does, such as "
+                            code { "npx -y {update.package}@latest" }
+                            ". A gateway agent's workspace pod is replaced, which disconnects other panes on it."
+                        }
+                        div { class: "actions",
+                            button {
+                                class: "primary",
+                                onclick: {
+                                    let latest = update.latest.clone();
+                                    move |_| restart_to_update(app, pane, latest.clone())
+                                },
+                                "Restart and update"
+                            }
+                            button {
+                                class: "outline",
+                                onclick: {
+                                    let handle = handle.clone();
+                                    move |_| {
+                                        transcript.write().skip_update();
+                                        if let Some(handle) = &handle {
+                                            handle.proceed();
+                                        }
+                                    }
+                                },
+                                "Start without updating"
+                            }
+                        }
+                    }
+                }
                 if empty && idle {
                     div { class: "chat-empty",
                         p { class: "title", "Ready" }

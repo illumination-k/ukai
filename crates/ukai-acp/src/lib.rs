@@ -6,6 +6,8 @@
 //! so the UI never sees transport details. [`spawn_session`] then runs one
 //! ACP session over it.
 //!
+//! [`updates`] tells when an agent is behind its latest release.
+//!
 //! [`reports`] and [`schedules`] are what a gateway agent offers besides its
 //! session, both from the endpoint next to its `/acp`: the reports it writes
 //! stay in its pod and are read back, and the gateway runs its schedules.
@@ -15,6 +17,7 @@ pub mod reports;
 pub mod schedules;
 mod secrets;
 mod session;
+pub mod updates;
 
 pub use fs::{FsError, FsRoot};
 pub use reports::ReportsEndpoint;
@@ -25,6 +28,7 @@ pub use session::{
     RestoreOutcome, STEER_METHOD, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
     SlashCommand, TURN_STATE_METHOD, ToolStatus, Usage, spawn_session,
 };
+pub use updates::{RestartEndpoint, Update, UpdateCheck};
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig};
 use agent_client_protocol_http::{HttpClient, HttpClientError};

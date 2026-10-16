@@ -120,16 +120,26 @@ Pod の中で書かれたレポートは relay の読み取り専用 HTTP から
 3. `session/prompt` を投げ、`session/update` 通知を `SessionEvent` に変換して UI へ流す
 4. `session/cancel`、切断時は `session/load`（agent が `loadSession` を広告している場合）で復帰
 
+新しいセッション（復元ではないもの）は、1 と 2 の間でエージェントの版を確かめる（`ukai_acp::updates`）。
+`initialize` 応答の `agentInfo.name` が npm のパッケージ名として読めれば registry.npmjs.org の `latest` を引き
+（5 秒で諦める）、`agentInfo.version` より新しければ `UpdateAvailable` を出して `session/new` を止める。
+UI は「再起動して更新」か「そのまま開始」（`SessionHandle::proceed`）を選ばせる。再起動は stdio ならプロセスを
+起動し直し、gateway なら `POST /agents/<id>/restart` でワークスペースの Pod を止めてつなぎ直す。新しい版が
+入るかはエージェントのコマンド次第（`npx -y <package>@latest` なら起動のたびに取り直す）なので、再起動後も
+同じ `latest` に届かなければ聞き直さず `UpdateMissed` を出してそのまま始める。復元するセッションは他の pane が
+使っているかもしれないので確かめない。版の取得は claude-agent-acp のようにエージェント自身が npm パッケージ
+名を名乗る場合だけ働き、設定は要らない。
+
 接続 1 本に複数セッションを載せられる（RFD の connection/session 2 層構造に合わせる）。
 `SessionRegistry` が `(agent_id, session_id)` をキーにハンドルを保持する。
 
 ### イベント正規化
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
-`Preparing` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
+`Preparing` / `UpdateAvailable` / `UpdateMissed` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
 `PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
-UI からは `SessionHandle`（`prompt` / `steer` / `cancel` / `resolve_permission` / `set_config`）で操作する。
+UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `resolve_permission` / `set_config`）で操作する。
 
 - `Ready` はエージェントの `promptCapabilities`（`image` / `embeddedContext`）を `PromptCaps` として運ぶ。
 - モデル・推論レベル（reasoning effort）・モードなどの切り替えは ACP の Session Config Options で扱う。
@@ -159,6 +169,7 @@ UI からは `SessionHandle`（`prompt` / `steer` / `cancel` / `resolve_permissi
   （`prepare_request` にすることで、ターン終了がそれ以前の `session/update` より後に届く順序も保証される）。
 - `initialize` + `session/new` には 120 秒のタイムアウトを付ける（認証切れで無応答になるエージェント対策）。
   `_ukai/` の通知（`progress` / `heartbeat`）が届くたびに数え直すので、Pod の起動を待つ間は切れない。
+  更新するかをユーザーが決めている間は数えず、決めた時点から数え直す。
 
 ### 再接続
 
@@ -230,6 +241,10 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
 - スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
+- `POST /agents/<id>/restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
+  ワークスペースの決め方とトークンは `/acp` と同じ。サイドカーは TERM でスナップショットを取ってから終わるので、
+  作業ツリーは idle で止まったときと同じく残る。そのワークスペースのセッションはすべて切れる。
+  エージェントの新しい版を入れる（イメージを pull し直す、`npx ...@latest` で取り直す）ためのもの。
 - 権限は namespace の Role だけ（jobs、pods と events の参照、スケジュールのコマンド用の `pods/exec`、
   スケジュールを置く configmaps）。CRD も cluster-scoped な権限も要らない。
 - pane ごとのワークスペース: ukai は gateway のエージェントを開いた pane に鍵を作って `state.json` に残し、

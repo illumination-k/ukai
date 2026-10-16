@@ -86,7 +86,7 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                             .embedded_context(true),
                                     ),
                             )
-                            .agent_info(Implementation::new("mock", "0").title("Mock Agent")),
+                            .agent_info(Implementation::new("mock", "1.0.0").title("Mock Agent")),
                     )
                 }
             },
@@ -400,12 +400,37 @@ impl Harness {
         Self::connect_with(caps, restore, true).await
     }
 
+    /// Start a session that checks for updates with `check`, without
+    /// waiting for anything.
+    fn checking(restore: Option<&str>, check: UpdateCheck) -> Self {
+        Self::spawn(
+            Caps {
+                load: true,
+                ..Caps::default()
+            },
+            restore,
+            true,
+            Some(check),
+        )
+    }
+
     /// [`Self::connect`], offering `fs/*` only when `fs` is set.
     async fn connect_with(
         caps: Caps,
         restore: Option<&str>,
         fs: bool,
     ) -> (Self, Vec<SessionEvent>) {
+        let mut harness = Self::spawn(caps, restore, fs, None);
+        let seen = harness.until_ready().await;
+        (harness, seen)
+    }
+
+    fn spawn(
+        caps: Caps,
+        restore: Option<&str>,
+        fs: bool,
+        update_check: Option<UpdateCheck>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         let root = dir.path().canonicalize().unwrap_or_else(|e| panic!("{e}"));
         let (client_end, agent_end) = Channel::duplex();
@@ -414,21 +439,26 @@ impl Harness {
             cwd: root.clone(),
             fs_root: fs.then(|| FsRoot::new(&root).unwrap_or_else(|e| panic!("{e}"))),
             restore: restore.map(str::to_owned),
+            update_check,
         };
         let (handle, events) = spawn_on(client_end, options);
-        let mut harness = Self {
+        Self {
             _dir: dir,
             root,
             handle,
             events,
-        };
+        }
+    }
+
+    /// Events up to and including `Ready`.
+    async fn until_ready(&mut self) -> Vec<SessionEvent> {
         let mut seen = Vec::new();
         loop {
-            let event = harness.next().await;
+            let event = self.next().await;
             let ready = matches!(event, SessionEvent::Ready { .. });
             seen.push(event);
             if ready {
-                return (harness, seen);
+                return seen;
             }
         }
     }
@@ -899,4 +929,80 @@ async fn a_rejected_steer_is_reported() {
         harness.next().await,
         SessionEvent::SteerFailed { .. }
     ));
+}
+
+/// An [`UpdateCheck`] that says `latest` for every package.
+fn latest_is(latest: &'static str) -> UpdateCheck {
+    UpdateCheck::new(move |_| async move { Some(latest.to_owned()) })
+}
+
+#[tokio::test]
+async fn asks_before_creating_a_session_on_an_outdated_agent() {
+    let mut harness = Harness::checking(None, latest_is("1.2.0"));
+    assert_eq!(
+        harness.next().await,
+        SessionEvent::UpdateAvailable(Update {
+            package: "mock".into(),
+            current: "1.0.0".into(),
+            latest: "1.2.0".into(),
+        })
+    );
+    // Nothing is created while the user decides.
+    let waiting = tokio::time::timeout(Duration::from_millis(100), harness.events.recv()).await;
+    assert!(waiting.is_err(), "{waiting:?}");
+    assert!(harness.handle.proceed());
+    assert_eq!(
+        harness.until_ready().await,
+        vec![ready(SESSION, RestoreOutcome::Fresh)]
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_handle_while_asked_ends_without_a_session() {
+    let Harness {
+        handle, mut events, ..
+    } = Harness::checking(None, latest_is("1.2.0"));
+    assert!(matches!(
+        events.recv().await,
+        Some(SessionEvent::UpdateAvailable(_))
+    ));
+    drop(handle);
+    let closed = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;
+    assert_eq!(
+        closed.ok().flatten(),
+        Some(SessionEvent::Closed { error: None })
+    );
+}
+
+#[tokio::test]
+async fn reports_a_restart_that_did_not_update() {
+    let mut harness = Harness::checking(None, latest_is("1.2.0").expecting("1.2.0"));
+    assert_eq!(
+        harness.until_ready().await,
+        vec![
+            SessionEvent::UpdateMissed(Update {
+                package: "mock".into(),
+                current: "1.0.0".into(),
+                latest: "1.2.0".into(),
+            }),
+            ready(SESSION, RestoreOutcome::Fresh),
+        ]
+    );
+}
+
+#[rstest::rstest]
+#[case::up_to_date(None, "1.0.0")]
+#[case::unknown_latest(None, "unknown")]
+// A restored session may be the one another pane is using.
+#[case::restored(Some("earlier"), "1.2.0")]
+#[tokio::test]
+async fn starts_without_asking(#[case] restore: Option<&str>, #[case] latest: &'static str) {
+    let mut harness = Harness::checking(restore, latest_is(latest));
+    let events = harness.until_ready().await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::UpdateAvailable(_))),
+        "{events:?}"
+    );
 }
