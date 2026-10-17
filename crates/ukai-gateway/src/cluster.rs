@@ -17,8 +17,8 @@ use kube::config::InferConfigError;
 use kube::{Client, Config};
 
 use crate::job::{
-    AGENT_CONTAINER, GIT_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT, RELAY_TOKEN_ENV, REPORTS_PATH,
-    Runtime, WORKSPACE_CONTAINER, WORKSPACE_LABEL, job,
+    AGENT_CONTAINER, GIT_ANNOTATION, KNOWLEDGE_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT,
+    RELAY_TOKEN_ENV, REPORTS_PATH, Runtime, WORKSPACE_CONTAINER, WORKSPACE_LABEL, job,
 };
 
 /// Long enough for a cold node to pull a large image and clone the repository.
@@ -182,7 +182,7 @@ impl Cluster {
         Ok(serving(&job, found))
     }
 
-    /// The agent pod whose relay wants `token`: its repository, and its
+    /// The agent pod whose relay wants `token`: its knowledge scope, and its
     /// workspace. This is how the gateway tells whose knowledge a pod's MCP
     /// server reads and writes, without trusting anything the pod says.
     pub async fn pod_of(&self, token: &str) -> Result<Option<PodIdentity>> {
@@ -195,13 +195,14 @@ impl Cluster {
             .iter()
             .find(|pod| relay_token(pod).is_some_and(|wanted| same_secret(wanted, token)))
             .and_then(|pod| {
+                let annotations = pod.metadata.annotations.as_ref()?;
+                // A pod from before scopes were annotated has its repository.
+                let scope = match annotations.get(KNOWLEDGE_ANNOTATION) {
+                    Some(scope) => scope.clone(),
+                    None => ukai_core::knowledge::repository_key(annotations.get(GIT_ANNOTATION)?),
+                };
                 Some(PodIdentity {
-                    git: pod
-                        .metadata
-                        .annotations
-                        .as_ref()?
-                        .get(GIT_ANNOTATION)?
-                        .clone(),
+                    scope,
                     workspace: pod.metadata.labels.as_ref()?.get(WORKSPACE_LABEL)?.clone(),
                 })
             }))
@@ -311,8 +312,8 @@ fn serving(job: &Job, pods: Vec<Pod>) -> Option<Pod> {
 /// Which agent pod a request came from, as the gateway found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodIdentity {
-    /// The repository it works on, as `gateway.toml` names it.
-    pub git: String,
+    /// What its knowledge is kept under.
+    pub scope: String,
     /// Its workspace id.
     pub workspace: String,
 }

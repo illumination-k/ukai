@@ -32,6 +32,33 @@ fn kubernetes_agent_has_defaults() {
     assert_eq!(agent.workspace.snapshot_interval, "5m");
     assert_eq!(agent.resources, Resources::default());
     assert_eq!(agent.workspace.git_ref, None);
+    assert_eq!(agent.knowledge, None);
+    assert_eq!(agent.knowledge_scope(), "github.com/org/repo");
+}
+
+#[test]
+fn agents_on_different_repositories_share_a_named_project() {
+    let src = r#"
+        [agents.api]
+        image = "agent"
+        command = "claude-agent-acp"
+        workspace = { git = "https://github.com/org/api.git" }
+        knowledge = "plekti"
+
+        [agents.web]
+        image = "agent"
+        command = "claude-agent-acp"
+        workspace = { git = "git@github.com:org/web.git" }
+        knowledge = "plekti"
+    "#;
+    let Ok(GatewayConfig { agents }) = parse(src) else {
+        panic!("expected a valid config");
+    };
+    let scopes: Vec<String> = agents
+        .values()
+        .map(KubernetesAgent::knowledge_scope)
+        .collect();
+    assert_eq!(scopes, ["plekti", "plekti"]);
 }
 
 #[rstest]
@@ -56,6 +83,11 @@ fn kubernetes_agent_has_defaults() {
     "mounts = [{ claim = \"home\", path = \".claude\" }]",
     Problem::InvalidMountPath { context: "agents.k.mounts[0]".into(), path: ".claude".into() }
 )]
+#[case::bad_knowledge_scope(
+    IMAGE,
+    "knowledge = \"My Project\"",
+    Problem::InvalidKnowledgeScope { context: "agents.k.knowledge".into(), value: "My Project".into() }
+)]
 fn reports_kubernetes_problem(#[case] image: &str, #[case] extra: &str, #[case] expected: Problem) {
     assert_eq!(problems(&kubernetes(image, extra)), vec![expected]);
 }
@@ -75,8 +107,9 @@ fn reports_every_kubernetes_problem() {
         command = ""
         idle_timeout = "soon"
         workspace = { git = "", snapshot_interval = "1d", github_token = "/key" }
+        knowledge = ""
     "#;
-    assert_eq!(problems(src).len(), 6);
+    assert_eq!(problems(src).len(), 7);
 }
 
 #[rstest]

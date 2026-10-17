@@ -322,9 +322,14 @@ fn the_pod_can_reach_the_knowledge_of_its_repository() {
         url.map(|e| &e["value"]),
         Some(&json!("http://ukai-gateway"))
     );
-    // The gateway tells a pod's repository from the pod alone.
+    // The gateway tells a pod's knowledge scope from the pod alone.
     assert_eq!(
-        job.pointer("/spec/template/metadata/annotations/ukai.dev~1git"),
-        Some(&json!("https://github.com/org/repo"))
+        job.pointer("/spec/template/metadata/annotations/ukai.dev~1knowledge"),
+        Some(&json!("github.com/org/repo"))
+    );
+    let shared = json(&plan("knowledge = \"plekti\""));
+    assert_eq!(
+        shared.pointer("/spec/template/metadata/annotations/ukai.dev~1knowledge"),
+        Some(&json!("plekti"))
     );
 }

@@ -1,6 +1,7 @@
-//! Knowledge: notes a gateway keeps about the repository its agents work
-//! on, outside the repository. The app lists them under the selected
-//! project's gateway agents and shows one in a note pane, to read or edit;
+//! Knowledge: notes a gateway keeps outside the repositories its agents
+//! work on, per scope (a project `gateway.toml` names, else a repository).
+//! The app lists them under the selected project's gateway agents, those
+//! sharing a scope together, and shows one in a note pane, to read or edit;
 //! the agents read and write the same notes through the relay's MCP server,
 //! so a note can change under the pane, which then shows the new one.
 
@@ -9,7 +10,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use ukai_acp::knowledge::{KnowledgeEndpoint, KnowledgeError};
 use ukai_config::Config;
-use ukai_core::knowledge::{self, Editor, Note, NoteSpec, NoteSummary, NoteWrite, Revision};
+use ukai_core::knowledge::{
+    self, Editor, Listing, Note, NoteSpec, NoteSummary, NoteWrite, Revision,
+};
 use ukai_core::review::{self, LineKind};
 use ukai_core::{PaneContent, PaneId, ProjectId};
 
@@ -24,7 +27,7 @@ const LIST_EVERY: Duration = Duration::from_secs(15);
 /// How often an open note pane asks for its note.
 const PANE_EVERY: Duration = Duration::from_secs(5);
 
-/// Where `agent`'s repository's notes are kept.
+/// Where `agent`'s notes are kept.
 fn endpoint(config: &Config, agent: &str) -> Result<KnowledgeEndpoint, String> {
     let spec = config
         .agents
@@ -100,9 +103,49 @@ fn provenance_label(provenance: &knowledge::Provenance) -> String {
 }
 
 /// What one gateway agent listed.
-type Listing = (String, Result<Vec<NoteSummary>, String>);
+type Fetched = (String, Result<Listing, String>);
 
-/// The notes of the selected project's gateway agents' repositories.
+/// One section of the sidebar: the gateway agents that share a scope, and
+/// its notes, or one agent whose notes cannot be read.
+#[derive(Debug, Clone, PartialEq)]
+struct Section {
+    /// `None` when the notes cannot be read, so the scope is not known.
+    scope: Option<String>,
+    agents: Vec<String>,
+    notes: Result<Vec<NoteSummary>, String>,
+}
+
+/// What `fetched` shows, agents with the same scope together, in the order
+/// they were declared.
+fn sections(fetched: &[Fetched]) -> Vec<Section> {
+    let mut sections: Vec<Section> = Vec::new();
+    for (agent, listed) in fetched {
+        match listed {
+            Ok(listing) => {
+                let shared = sections
+                    .iter_mut()
+                    .find(|section| section.scope.as_deref() == Some(listing.scope.as_str()));
+                match shared {
+                    Some(section) => section.agents.push(agent.clone()),
+                    None => sections.push(Section {
+                        scope: Some(listing.scope.clone()),
+                        agents: vec![agent.clone()],
+                        notes: Ok(listing.notes.clone()),
+                    }),
+                }
+            }
+            Err(error) => sections.push(Section {
+                scope: None,
+                agents: vec![agent.clone()],
+                notes: Err(error.clone()),
+            }),
+        }
+    }
+    sections
+}
+
+/// The notes of the selected project's gateway agents, one section per
+/// scope they share.
 #[component]
 pub fn KnowledgeList(project: ProjectId, name: String) -> Element {
     let app = use_context::<AppSignals>();
@@ -121,19 +164,19 @@ pub fn KnowledgeList(project: ProjectId, name: String) -> Element {
                 .collect()
         }
     });
-    let mut listings = use_signal(Vec::<Listing>::new);
+    let mut fetched = use_signal(Vec::<Fetched>::new);
     use_future(move || {
         poll(app.knowledge_revision, LIST_EVERY, move || async move {
-            let mut fetched = Vec::new();
+            let mut now = Vec::new();
             for (agent, endpoint) in endpoints.peek().clone() {
                 let listed = match endpoint {
                     Ok(endpoint) => endpoint.list().await.map_err(|error| error.to_string()),
                     Err(error) => Err(error),
                 };
-                fetched.push((agent, listed));
+                now.push((agent, listed));
             }
-            if *listings.peek() != fetched {
-                listings.set(fetched);
+            if *fetched.peek() != now {
+                fetched.set(now);
             }
         })
     });
@@ -141,12 +184,8 @@ pub fn KnowledgeList(project: ProjectId, name: String) -> Element {
         Some(PaneContent::Note { agent, note, .. }) => Some((agent.clone(), note.clone())),
         _ => None,
     };
-    let agents: Vec<String> = endpoints
-        .read()
-        .iter()
-        .map(|(agent, _)| agent.clone())
-        .collect();
-    let listings = listings.read().clone();
+    let no_agents = endpoints.read().is_empty();
+    let sections = sections(&fetched.read());
     let now = local_now();
 
     rsx! {
@@ -154,52 +193,56 @@ pub fn KnowledgeList(project: ProjectId, name: String) -> Element {
             div { class: "sidebar-header",
                 span { class: "section-label", "Knowledge · {name}" }
             }
-            if agents.is_empty() {
+            if no_agents {
                 p { class: "muted hint",
-                    "A gateway keeps notes about its agents' repository outside it. This project has no gateway agent."
+                    "A gateway keeps notes for its agents outside their repositories. This project has no gateway agent."
                 }
             }
-            for agent in agents {
-                div { key: "{agent}", class: "schedule-agent",
-                    div { class: "schedule-agent-head",
-                        span { class: "muted", "{agent}" }
-                        button {
-                            class: "icon",
-                            title: "New note for {agent}'s repository",
-                            onclick: {
-                                let project = project.clone();
-                                let agent = agent.clone();
-                                move |_| open_note(app, &project, &agent, None)
-                            },
-                            Svg { icon: Icon::Plus }
-                        }
-                    }
-                    match listings.iter().find(|(a, _)| *a == agent).map(|(_, listed)| listed.clone()) {
-                        None => rsx! {},
-                        Some(Err(error)) => rsx! {
-                            p { class: "muted hint", title: "{error}", "Cannot read notes: {error}" }
-                        },
-                        Some(Ok(list)) if list.is_empty() => rsx! {
-                            p { class: "muted hint",
-                                "No notes yet. Agents write what they learn about the repository here instead of committing it."
-                            }
-                        },
-                        Some(Ok(list)) => {
-                            let focused = open
-                                .as_ref()
-                                .filter(|(a, _)| *a == agent)
-                                .and_then(|(_, note)| note.clone());
-                            rsx! {
-                                for note in list {
-                                    NoteRow {
-                                        key: "{note.name}",
-                                        project: project.clone(),
-                                        agent: agent.clone(),
-                                        focused: focused.as_deref() == Some(note.name.as_str()),
-                                        updated: when_unix(note.updated, now),
-                                        note,
-                                    }
+            for section in sections {
+                {
+                    let first = section.agents.first().cloned().unwrap_or_default();
+                    let label = match &section.scope {
+                        Some(scope) => format!("{scope} · {}", section.agents.join(", ")),
+                        None => first.clone(),
+                    };
+                    let focused = open
+                        .as_ref()
+                        .filter(|(agent, _)| section.agents.contains(agent))
+                        .and_then(|(_, note)| note.clone());
+                    rsx! {
+                        div { key: "{label}", class: "schedule-agent",
+                            div { class: "schedule-agent-head",
+                                span { class: "muted", title: "Agents sharing these notes", "{label}" }
+                                button {
+                                    class: "icon",
+                                    title: "New note",
+                                    onclick: {
+                                        let project = project.clone();
+                                        let first = first.clone();
+                                        move |_| open_note(app, &project, &first, None)
+                                    },
+                                    Svg { icon: Icon::Plus }
                                 }
+                            }
+                            match section.notes {
+                                Err(error) => rsx! {
+                                    p { class: "muted hint", title: "{error}", "Cannot read notes: {error}" }
+                                },
+                                Ok(list) if list.is_empty() => rsx! {
+                                    p { class: "muted hint", "No notes yet. Agents write what they learn here instead of committing it." }
+                                },
+                                Ok(list) => rsx! {
+                                    for note in list {
+                                        NoteRow {
+                                            key: "{note.name}",
+                                            project: project.clone(),
+                                            agent: first.clone(),
+                                            focused: focused.as_deref() == Some(note.name.as_str()),
+                                            updated: when_unix(note.updated, now),
+                                            note,
+                                        }
+                                    }
+                                },
                             }
                         }
                     }
@@ -599,7 +642,7 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                         }
                     }
                     p { class: "muted field-hint",
-                        "Kept on the gateway for {agent}'s repository, not in it. Revision {saved.revision}, {updated} by {by} {from}."
+                        "Kept on the gateway, outside the repositories, for the agents sharing {agent}'s notes. Revision {saved.revision}, {updated} by {by} {from}."
                     }
                     if !shown_errors.is_empty() {
                         ul { class: "problems",
@@ -798,5 +841,55 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listing(scope: &str, names: &[&str]) -> Result<Listing, String> {
+        Ok(Listing {
+            scope: scope.to_owned(),
+            notes: names
+                .iter()
+                .map(|name| NoteSummary {
+                    name: (*name).to_owned(),
+                    description: String::new(),
+                    revision: 1,
+                    updated: 0,
+                    updated_by: Editor::User,
+                    approved: None,
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn agents_sharing_a_scope_share_a_section() {
+        let fetched = vec![
+            ("api".to_owned(), listing("plekti", &["build"])),
+            ("down".to_owned(), Err("unreachable".to_owned())),
+            ("web".to_owned(), listing("plekti", &["build"])),
+            ("tool".to_owned(), listing("github.com/o/tool", &[])),
+        ];
+        let shown: Vec<(Option<String>, Vec<String>)> = sections(&fetched)
+            .into_iter()
+            .map(|section| (section.scope, section.agents))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    Some("plekti".to_owned()),
+                    vec!["api".to_owned(), "web".to_owned()]
+                ),
+                (None, vec!["down".to_owned()]),
+                (
+                    Some("github.com/o/tool".to_owned()),
+                    vec!["tool".to_owned()]
+                ),
+            ]
+        );
     }
 }

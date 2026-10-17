@@ -1,10 +1,12 @@
-//! Knowledge a gateway keeps for a repository, outside the repository: the
-//! wire types, and the client side of `/agents/<id>/knowledge`.
+//! Knowledge a gateway keeps outside the repositories it is about: the wire
+//! types, and the client side of `/agents/<id>/knowledge`.
 //!
 //! A note is a named piece of Markdown with a one-line description: a
 //! convention, a decision, a pitfall, something learnt about the codebase
 //! that should outlive one session without being committed to it. The
-//! gateway keeps the notes of each repository its agents work on; the app
+//! gateway keeps notes per scope: a project its `gateway.toml` names, which
+//! agents on several repositories share, or else each agent's repository.
+//! The app
 //! reads and edits them through an agent, and agents in its pods through the
 //! relay's MCP server, with the relay's token at [`WORKSPACE_KNOWLEDGE_PATH`].
 //! What a valid note is, is `ukai_core::knowledge`'s business, shared by
@@ -25,12 +27,12 @@ use ukai_config::{AgentSpec, Source};
 
 use crate::{ResolveError, header_map};
 
-/// Suffix of an agent's ACP endpoint that lists the knowledge of its
-/// repository. One note is `<it>/<name>`.
+/// Suffix of an agent's ACP endpoint that lists the knowledge of its scope.
+/// One note is `<it>/<name>`.
 pub const KNOWLEDGE_PATH: &str = "/knowledge";
 
-/// Where an agent pod reaches the knowledge of its own repository on the
-/// gateway, authenticated with its relay's token.
+/// Where an agent pod reaches the knowledge of its own scope on the gateway,
+/// authenticated with its relay's token.
 pub const WORKSPACE_KNOWLEDGE_PATH: &str = "/workspace/knowledge";
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -79,6 +81,14 @@ pub struct Provenance {
     /// The commit the writer's checkout was at, as the writer said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+}
+
+/// A scope's notes, as `GET .../knowledge` lists them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listing {
+    /// What the notes are kept under: agents with the same scope share them.
+    pub scope: String,
+    pub notes: Vec<NoteSummary>,
 }
 
 /// A note as listed: everything but the body.
@@ -210,7 +220,7 @@ pub enum KnowledgeError {
     Body(String),
 }
 
-/// The knowledge of one repository on a gateway.
+/// The knowledge of one scope on a gateway.
 #[derive(Debug, Clone)]
 pub struct KnowledgeEndpoint {
     client: reqwest::Client,
@@ -224,7 +234,7 @@ impl PartialEq for KnowledgeEndpoint {
 }
 
 impl KnowledgeEndpoint {
-    /// The knowledge of `spec`'s agent's repository, or `None` when it is
+    /// The knowledge of `spec`'s agent's scope, or `None` when it is
     /// not a gateway agent: nothing else keeps knowledge.
     pub fn resolve(
         spec: &AgentSpec,
@@ -270,8 +280,8 @@ impl KnowledgeEndpoint {
         &self.base
     }
 
-    /// Every note, by name.
-    pub async fn list(&self) -> Result<Vec<NoteSummary>, KnowledgeError> {
+    /// Every note of the scope, by name.
+    pub async fn list(&self) -> Result<Listing, KnowledgeError> {
         self.call(self.client.get(&self.base)).await
     }
 

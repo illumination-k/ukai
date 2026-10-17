@@ -6,7 +6,7 @@
 //! `ukai-relay mcp [--root DIR] [--gateway URL]` is the MCP server the relay
 //! hands the agent for each session (see `ukai_relay::mcp`), on
 //! stdin/stdout; with a gateway, and the relay's token in
-//! `UKAI_RELAY_TOKEN`, it also serves the repository's knowledge kept there.
+//! `UKAI_RELAY_TOKEN`, it also serves the knowledge kept there for its project.
 //!
 //! In a gateway's pod, `UKAI_GATEWAY_URL` is where the gateway is reached.
 
@@ -41,7 +41,7 @@ struct Cli {
     #[arg(long, env = "UKAI_SNAPSHOT_TRIGGER")]
     snapshot_trigger: Option<PathBuf>,
     /// The gateway that started this relay's pod, whose knowledge of the
-    /// repository the MCP server hands the agent.
+    /// project the MCP server hands the agent.
     #[arg(long, env = "UKAI_GATEWAY_URL")]
     gateway: Option<String>,
     /// The agent and its arguments.
@@ -56,7 +56,7 @@ enum Mode {
         /// The checkout whose reports it describes.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// The gateway keeping the repository's knowledge.
+        /// The gateway keeping the project's knowledge.
         #[arg(long)]
         gateway: Option<String>,
     },

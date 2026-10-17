@@ -245,7 +245,7 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
 - スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
-- リポジトリごとのナレッジ（後述「ナレッジ」）を `/agents/<id>/knowledge` と、Pod 向けの
+- プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を `/agents/<id>/knowledge` と、Pod 向けの
   `/workspace/knowledge` で持つ。
 - `POST /agents/<id>/restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
   ワークスペースの決め方とトークンは `/acp` と同じ。サイドカーは TERM でスナップショットを取ってから終わるので、
@@ -292,7 +292,7 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 ### ナレッジ
 
 規約、決めたこととその理由、ハマりどころなど、セッションを越えて残したいがリポジトリにはコミットしたくない
-知識を、gateway がリポジトリごとに持つ。`CLAUDE.md` やドキュメントに書かせると PR のノイズになり、
+知識を、gateway がスコープごとに持つ。`CLAUDE.md` やドキュメントに書かせると PR のノイズになり、
 エージェントが書いた未整理のメモまで履歴に残るため。
 
 - 単位はノート（名前、1 行の説明、Markdown の本文）。名前は小文字・数字・`-` の 64 文字まで、説明は 1 行
@@ -301,12 +301,17 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
   後続の全セッションの instructions に入り、本文も読まれるので、レビューで見えない指示（rules file
   backdoor）と漏れた資格情報がそこに残らないように。問題は全部集めて 422 で返し、アプリも保存前に同じ
   判定を出す（`ukai_core::knowledge`）。型は `ukai_acp::knowledge`（クライアント `KnowledgeEndpoint` も）。
-- スコープはリポジトリ。`workspace.git` を `ukai_core::knowledge::repository_key` で正規化したもの
-  （`https://github.com/o/r.git` も `git@github.com:o/r` も `github.com/o/r`）なので、同じリポジトリを
-  clone するエージェントは種類を問わず同じノートを見る。ワークスペースやブランチでは分けない。
+- スコープはプロジェクト。`gateway.toml` の `[agents.<id>] knowledge = "plekti"` で名付け（小文字・数字と
+  `-` `_` `.` `/`、`ukai_core::knowledge::valid_scope`）、同じ名前のエージェントはリポジトリが違っても
+  同じノートを見る。複数のリポジトリにまたがるプロジェクトのため。省略したエージェントのスコープは
+  リポジトリで、`workspace.git` を `ukai_core::knowledge::repository_key` で正規化したもの
+  （`https://github.com/o/r.git` も `git@github.com:o/r` も `github.com/o/r`）。1 つのエージェントが
+  見るスコープは 1 つで、リポジトリ単位とプロジェクト単位を重ねはしない（リポジトリ固有のことは説明に
+  書かせる）。宣言を `gateway.toml` に置くのは、Pod から変えられず、エージェントが別のプロジェクトの
+  ノートに触れられないようにするため。ワークスペースやブランチでは分けない。
 - 保存: SurrealDB（`deploy/gateway/surrealdb.yaml` の StatefulSet、PVC 1 つ、RocksDB）。gateway は
   公式の Rust SDK で WebSocket（`UKAI_KNOWLEDGE_URL`、root ユーザーは Secret `ukai-surrealdb`）でつなぐ。
-  namespace `ukai`・database `knowledge`。表 `note` が今のノートをレコード id `[repository, name]` で、
+  namespace `ukai`・database `knowledge`。表 `note` が今のノートをレコード id `[scope, name]` で、
   表 `note_revision` がすべての書き込みと削除を消さずに持つ。ConfigMap にしないのは、ノートが増えたときに
   etcd を文書置き場にしたくないのと、後で全文検索やベクトル検索、ノート同士のリンクを同じ所で扱いたいため。
   SurrealDB は BUSL-1.1（DB をサービスとして売ることだけを禁じる）で、`deny.toml` で許している。出荷する
@@ -327,15 +332,16 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 - gateway は起動時に store へつなぎ、つながるまで 10 秒ごとに試す。その間も agent は動き、ナレッジの
   要求だけが 503 になる。`UKAI_KNOWLEDGE_URL` がなければナレッジは持たず、Pod にも gateway の場所を
   渡さない（MCP のナレッジのツールも出ない）。テストは SDK の `kv-mem` で本物のエンジンに対して行う。
-- アプリから: `GET /agents/<id>/knowledge`（説明まで、名前順）、`GET` / `PUT` /
+- アプリから: `GET /agents/<id>/knowledge`（スコープと、説明までのノート、名前順）、`GET` / `PUT` /
   `DELETE ?revision=<n>` `/agents/<id>/knowledge/<name>`、`GET .../<name>/revisions`。トークンは
-  `/acp` と同じ。サイドバーの「Knowledge」に gateway エージェントごとに並び、ノートの pane で Markdown
+  `/acp` と同じ。サイドバーの「Knowledge」に、スコープを共有する gateway エージェントをまとめて並べ、ノートの pane で Markdown
   として読み、編集する。開いている pane はノートを読み直し続け、編集中に版が進んだら保存は拒否されるので、
   そう出して「自分の版で置き換える」を選ばせる。
 - Pod から: relay の MCP サーバー（`ukai-relay mcp --gateway <url>`）が `/workspace/knowledge` を叩く。
-  認証は relay のトークンで、gateway は同じトークンを持つ Pod を探し、その注釈 `ukai.dev/git` から
-  リポジトリを、ラベルからワークスペースを決める。Pod の申告は信じないので、Pod は自分のリポジトリの
-  ノートにしか触れない。gateway の場所は Job の `UKAI_GATEWAY_URL`（gateway の
+  認証は relay のトークンで、gateway は同じトークンを持つ Pod を探し、Job を作るときに付けた注釈
+  `ukai.dev/knowledge` からスコープを、ラベルからワークスペースを決める。Pod の申告は信じないので、Pod は
+  自分のスコープのノートにしか触れない。スコープを変えても、動いている Pod は作り直すまで前のスコープの
+  まま。gateway の場所は Job の `UKAI_GATEWAY_URL`（gateway の
   `UKAI_GATEWAY_INTERNAL_URL`、既定は `deploy/gateway` の Service `http://ukai-gateway`）。トークンは
   MCP サーバーの `env` で渡し、引数には載せない。
 - 書き込みの上限: 1 セッション（MCP サーバー 1 つ）で 8 件、1 ワークスペースで 1 時間 20 件まで

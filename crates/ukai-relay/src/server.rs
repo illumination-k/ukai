@@ -29,7 +29,7 @@ pub struct Options {
     /// `/health`.
     pub token: Option<String>,
     /// The gateway that started this pod: with `token`, the MCP server
-    /// hands the agent the knowledge it keeps for the repository.
+    /// hands the agent the knowledge it keeps for the project.
     pub gateway: Option<String>,
     /// Exit after this long with no client connected and no turn running.
     pub idle_timeout: Duration,
@@ -128,7 +128,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     };
 
     // The agent starts this binary again as an MCP server that tells it
-    // what ukai does with its reports, and hands it the repository's
+    // what ukai does with its reports, and hands it the project's
     // knowledge; see `crate::mcp`.
     let gateway = match (&options.gateway, &options.token) {
         (Some(url), Some(token)) => Some(crate::mcp::Gateway {

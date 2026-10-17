@@ -1,5 +1,7 @@
-//! Knowledge a gateway keeps for a repository outside it: what a valid note
-//! is, and which repository a git URL names. Pure, so the gateway that
+//! Knowledge a gateway keeps outside the repositories it is about: what a
+//! valid note is, and what scope notes are kept under. A scope is a project
+//! named in `gateway.toml`, which agents on several repositories can share,
+//! or else the repository a git URL names. Pure, so the gateway that
 //! stores notes and the app that edits them agree, and so it is tested here.
 //!
 //! Every later session on the repository is shown a note's name and
@@ -13,7 +15,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 pub use ukai_acp::knowledge::{
-    Approved, ApprovedSummary, Conflict, Editor, Note, NoteSpec, NoteSummary, NoteWrite,
+    Approved, ApprovedSummary, Conflict, Editor, Listing, Note, NoteSpec, NoteSummary, NoteWrite,
     Provenance, Revision,
 };
 
@@ -174,10 +176,28 @@ pub fn name_problems(name: &str) -> Vec<Problem> {
     problems
 }
 
+/// Longest scope a `gateway.toml` may name.
+pub const SCOPE_MAX: usize = 128;
+
+/// Whether `scope` can name a project in `gateway.toml`: lowercase letters,
+/// digits, and `-`, `_`, `.`, `/` between them, like `plekti` or
+/// `team/plekti`.
+pub fn valid_scope(scope: &str) -> bool {
+    !scope.is_empty()
+        && scope.len() <= SCOPE_MAX
+        && scope.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.' | b'/')
+        })
+        && !scope.starts_with(['/', '.', '-'])
+        && !scope.ends_with('/')
+        && !scope.contains("//")
+}
+
 /// The repository a git URL names, the same for every way of writing it:
 /// `https://github.com/o/r.git`, `git@github.com:o/r`, and
-/// `ssh://git@GitHub.com/o/r/` are all `github.com/o/r`. Notes are kept
-/// under it, so agents cloning one repository by different URLs share them.
+/// `ssh://git@GitHub.com/o/r/` are all `github.com/o/r`. It is the scope of
+/// an agent that names none, so agents cloning one repository by different
+/// URLs share notes.
 pub fn repository_key(git: &str) -> String {
     let url = git.trim();
     let (rest, scp) = match url.split_once("://") {
@@ -303,6 +323,23 @@ mod tests {
     #[case::spaces("  https://github.com/o/r  ")]
     fn one_repository_however_it_is_written(#[case] git: &str) {
         assert_eq!(repository_key(git), "github.com/o/r");
+    }
+
+    #[rstest]
+    #[case::name("plekti", true)]
+    #[case::nested("team/plekti", true)]
+    #[case::dots("plekti.v2", true)]
+    #[case::underscore("my_project-1", true)]
+    #[case::empty("", false)]
+    #[case::upper("Plekti", false)]
+    #[case::space("my project", false)]
+    #[case::leading_slash("/plekti", false)]
+    #[case::trailing_slash("plekti/", false)]
+    #[case::double_slash("team//plekti", false)]
+    #[case::dot_first("..", false)]
+    #[case::long(&"a".repeat(SCOPE_MAX + 1), false)]
+    fn scopes(#[case] scope: &str, #[case] valid: bool) {
+        assert_eq!(valid_scope(scope), valid, "{scope}");
     }
 
     #[test]

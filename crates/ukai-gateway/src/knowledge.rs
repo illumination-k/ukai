@@ -1,18 +1,20 @@
-//! Knowledge: notes the gateway keeps for each repository its agents work
-//! on, outside the repository, so what is learnt about a codebase outlives
-//! a session without being committed to it.
+//! Knowledge: notes the gateway keeps outside the repositories they are
+//! about, so what is learnt about a codebase outlives a session without
+//! being committed to it.
 //!
 //! Notes live in SurrealDB (namespace [`NAMESPACE`], database [`DATABASE`]),
 //! a server of its own next to the gateway (`deploy/gateway`), reached over
-//! WebSocket. Table `note` holds each note as it is now, under the record id
-//! `[repository, name]`; table `note_revision` keeps every write and delete
-//! for good. A delete only marks the note, so it can be written again and
-//! its history stays. Each change is one transaction that first checks the
-//! writer's base revision, so two writers never silently overwrite each
-//! other. A note also keeps the last revision a person approved (`approved`):
-//! a person's writes are approved as they are made, an agent's wait, and an
-//! agent cannot delete a note a person approved. Notes are kept under `ukai_core::knowledge::repository_key`,
-//! which every agent cloning the repository shares, by whatever URL.
+//! WebSocket. They are kept per scope: a project `gateway.toml` names, which
+//! agents on several repositories share, or else an agent's repository
+//! (`KubernetesAgent::knowledge_scope`). Table `note` holds each note as it
+//! is now, under the record id `[scope, name]`; table `note_revision` keeps
+//! every write and delete for good. A delete only marks the note, so it can
+//! be written again and its history stays. Each change is one transaction
+//! that first checks the writer's base revision, so two writers never
+//! silently overwrite each other. A note also keeps the last revision a
+//! person approved (`approved`): a person's writes are approved as they are
+//! made, an agent's wait, and an agent cannot delete a note a person
+//! approved.
 //!
 //! What is wrong with a note is `ukai_core::knowledge`'s business; this
 //! module stores.
@@ -29,7 +31,7 @@ pub const DATABASE: &str = "knowledge";
 /// Applied on every connection; each statement leaves what exists alone.
 const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS note SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS repository ON note TYPE string;
+DEFINE FIELD IF NOT EXISTS scope ON note TYPE string;
 DEFINE FIELD IF NOT EXISTS name ON note TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON note TYPE string;
 DEFINE FIELD IF NOT EXISTS body ON note TYPE string;
@@ -49,9 +51,9 @@ DEFINE FIELD IF NOT EXISTS approved.updated_by ON note TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS approved.provenance ON note TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS approved.provenance.workspace ON note TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS approved.provenance.commit ON note TYPE option<string>;
-DEFINE INDEX IF NOT EXISTS note_repository ON note FIELDS repository;
+DEFINE INDEX IF NOT EXISTS note_scope ON note FIELDS scope;
 DEFINE TABLE IF NOT EXISTS note_revision SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS repository ON note_revision TYPE string;
+DEFINE FIELD IF NOT EXISTS scope ON note_revision TYPE string;
 DEFINE FIELD IF NOT EXISTS name ON note_revision TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON note_revision TYPE string;
 DEFINE FIELD IF NOT EXISTS body ON note_revision TYPE string;
@@ -62,7 +64,7 @@ DEFINE FIELD IF NOT EXISTS provenance ON note_revision TYPE object;
 DEFINE FIELD IF NOT EXISTS provenance.workspace ON note_revision TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS provenance.commit ON note_revision TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS deleted ON note_revision TYPE bool;
-DEFINE INDEX IF NOT EXISTS note_revision_note ON note_revision FIELDS repository, name;
+DEFINE INDEX IF NOT EXISTS note_revision_note ON note_revision FIELDS scope, name;
 ";
 
 /// The fields of a note, without the record id, which is not JSON's.
@@ -81,7 +83,7 @@ const CONFLICT: &str = "ukai:conflict";
 /// approved one stays, and a delete clears it.
 const CHANGE: &str = "
 BEGIN TRANSACTION;
-LET $id = type::record('note', [$repository, $name]);
+LET $id = type::record('note', [$scope, $name]);
 LET $existing = (SELECT * FROM ONLY $id);
 LET $last = IF $existing = NONE { 0 } ELSE { $existing.revision };
 LET $current = IF $existing = NONE OR $existing.deleted { 0 } ELSE { $existing.revision };
@@ -89,7 +91,7 @@ IF $current != $base OR ($deleted AND $current = 0) { THROW 'ukai:conflict' };
 LET $description = IF $deleted { $existing.description } ELSE { $description };
 LET $body = IF $deleted { $existing.body } ELSE { $body };
 LET $fields = {
-    repository: $repository,
+    scope: $scope,
     name: $name,
     description: $description,
     body: $body,
@@ -122,7 +124,7 @@ COMMIT TRANSACTION;
 /// Approve `$id` as it is, if it is still at `$base`.
 const APPROVE: &str = "
 BEGIN TRANSACTION;
-LET $id = type::record('note', [$repository, $name]);
+LET $id = type::record('note', [$scope, $name]);
 LET $existing = (SELECT * FROM ONLY $id);
 IF $existing = NONE OR $existing.deleted OR $existing.revision != $base { THROW 'ukai:conflict' };
 UPDATE $id SET approved = {
@@ -171,7 +173,7 @@ impl std::fmt::Debug for StoreConfig {
 
 /// One write or delete, as [`Knowledge::change`] makes it.
 struct Change<'a> {
-    repository: &'a str,
+    scope: &'a str,
     name: &'a str,
     spec: Option<NoteSpec>,
     base: u64,
@@ -179,7 +181,7 @@ struct Change<'a> {
     provenance: Provenance,
 }
 
-/// The gateway's notes, by repository and name.
+/// The gateway's notes, by scope and name.
 pub struct Knowledge {
     db: Surreal<Any>,
 }
@@ -201,14 +203,14 @@ impl Knowledge {
         Ok(Self { db })
     }
 
-    /// `repository`'s notes, by name; deleted ones are not listed.
-    pub async fn list(&self, repository: &str) -> Result<Vec<NoteSummary>, KnowledgeError> {
+    /// `scope`'s notes, by name; deleted ones are not listed.
+    pub async fn list(&self, scope: &str) -> Result<Vec<NoteSummary>, KnowledgeError> {
         let rows: Vec<Value> = self
             .db
             .query(format!(
-                "SELECT {FIELDS} FROM note WHERE repository = $repository AND !deleted ORDER BY name"
+                "SELECT {FIELDS} FROM note WHERE scope = $scope AND !deleted ORDER BY name"
             ))
-            .bind(json!({ "repository": repository }))
+            .bind(json!({ "scope": scope }))
             .await?
             .check()?
             .take(0)?;
@@ -218,13 +220,13 @@ impl Knowledge {
     }
 
     /// The note as it is now; `None` when there is none or it is deleted.
-    pub async fn get(&self, repository: &str, name: &str) -> Result<Option<Note>, KnowledgeError> {
+    pub async fn get(&self, scope: &str, name: &str) -> Result<Option<Note>, KnowledgeError> {
         let rows: Vec<Value> = self
             .db
             .query(format!(
-                "SELECT {FIELDS} FROM type::record('note', [$repository, $name]) WHERE !deleted"
+                "SELECT {FIELDS} FROM type::record('note', [$scope, $name]) WHERE !deleted"
             ))
-            .bind(json!({ "repository": repository, "name": name }))
+            .bind(json!({ "scope": scope, "name": name }))
             .await?
             .check()?
             .take(0)?;
@@ -235,20 +237,20 @@ impl Knowledge {
             .map_err(Into::into)
     }
 
-    /// Every write and delete of `name` in `repository`, newest first.
+    /// Every write and delete of `name` in `scope`, newest first.
     pub async fn revisions(
         &self,
-        repository: &str,
+        scope: &str,
         name: &str,
     ) -> Result<Vec<Revision>, KnowledgeError> {
         let rows: Vec<Value> = self
             .db
             .query(
                 "SELECT revision, description, body, updated, updated_by, provenance, deleted \
-                 FROM note_revision WHERE repository = $repository AND name = $name \
+                 FROM note_revision WHERE scope = $scope AND name = $name \
                  ORDER BY revision DESC",
             )
-            .bind(json!({ "repository": repository, "name": name }))
+            .bind(json!({ "scope": scope, "name": name }))
             .await?
             .check()?
             .take(0)?;
@@ -257,11 +259,11 @@ impl Knowledge {
             .collect()
     }
 
-    /// Create or replace `name` in `repository`, if it is still at
+    /// Create or replace `name` in `scope`, if it is still at
     /// `write.base_revision`.
     pub async fn put(
         &self,
-        repository: &str,
+        scope: &str,
         name: &str,
         write: NoteWrite,
         editor: Editor,
@@ -278,7 +280,7 @@ impl Knowledge {
             body: write.spec.body,
         };
         self.change(Change {
-            repository,
+            scope,
             name,
             spec: Some(spec),
             base: write.base_revision,
@@ -289,22 +291,20 @@ impl Knowledge {
             },
         })
         .await?;
-        self.get(repository, name)
-            .await?
-            .ok_or(KnowledgeError::NotFound)
+        self.get(scope, name).await?.ok_or(KnowledgeError::NotFound)
     }
 
-    /// Delete `name` from `repository`, if it is still at `revision`. Its
+    /// Delete `name` from `scope`, if it is still at `revision`. Its
     /// revisions stay, and so does a revision recording the delete.
     pub async fn delete(
         &self,
-        repository: &str,
+        scope: &str,
         name: &str,
         revision: u64,
         editor: Editor,
         workspace: Option<String>,
     ) -> Result<(), KnowledgeError> {
-        let Some(note) = self.get(repository, name).await? else {
+        let Some(note) = self.get(scope, name).await? else {
             return Err(KnowledgeError::NotFound);
         };
         if editor == Editor::Agent && note.approved.is_some() {
@@ -315,7 +315,7 @@ impl Knowledge {
             ]));
         }
         self.change(Change {
-            repository,
+            scope,
             name,
             spec: None,
             base: revision,
@@ -328,28 +328,26 @@ impl Knowledge {
         .await
     }
 
-    /// Approve `name` in `repository` as it is at `revision`, which must be
+    /// Approve `name` in `scope` as it is at `revision`, which must be
     /// its latest. Only a person can: the gateway serves this to its clients,
     /// never to agent pods.
     pub async fn approve(
         &self,
-        repository: &str,
+        scope: &str,
         name: &str,
         revision: u64,
     ) -> Result<Note, KnowledgeError> {
-        if self.get(repository, name).await?.is_none() {
+        if self.get(scope, name).await?.is_none() {
             return Err(KnowledgeError::NotFound);
         }
         self.run(
             APPROVE,
-            json!({ "repository": repository, "name": name, "base": revision }),
-            repository,
+            json!({ "scope": scope, "name": name, "base": revision }),
+            scope,
             name,
         )
         .await?;
-        self.get(repository, name)
-            .await?
-            .ok_or(KnowledgeError::NotFound)
+        self.get(scope, name).await?.ok_or(KnowledgeError::NotFound)
     }
 
     async fn change(&self, change: Change<'_>) -> Result<(), KnowledgeError> {
@@ -359,7 +357,7 @@ impl Knowledge {
             body: String::new(),
         });
         let vars = json!({
-            "repository": change.repository,
+            "scope": change.scope,
             "name": change.name,
             "description": spec.description,
             "body": spec.body,
@@ -370,7 +368,7 @@ impl Knowledge {
             "updated_by": serde_json::to_value(change.editor)?,
             "provenance": serde_json::to_value(&change.provenance)?,
         });
-        self.run(CHANGE, vars, change.repository, change.name).await
+        self.run(CHANGE, vars, change.scope, change.name).await
     }
 
     /// Run a transaction on one note, telling a conflict apart.
@@ -378,7 +376,7 @@ impl Knowledge {
         &self,
         query: &str,
         vars: Value,
-        repository: &str,
+        scope: &str,
         name: &str,
     ) -> Result<(), KnowledgeError> {
         let mut response = self.db.query(query).bind(vars).await?;
@@ -390,7 +388,7 @@ impl Knowledge {
             .values()
             .any(|error| error.to_string().contains(CONFLICT))
         {
-            let current = self.get(repository, name).await?;
+            let current = self.get(scope, name).await?;
             return Err(KnowledgeError::Conflict(Box::new(current)));
         }
         let first = errors
@@ -413,7 +411,7 @@ mod tests {
 
     use super::*;
 
-    const REPO: &str = "github.com/o/r";
+    const SCOPE: &str = "plekti";
 
     async fn store() -> Knowledge {
         Knowledge::connect(&StoreConfig {
@@ -440,7 +438,7 @@ mod tests {
         let store = store().await;
         let written = store
             .put(
-                REPO,
+                SCOPE,
                 "release-process",
                 NoteWrite {
                     commit: Some("0123abcd".into()),
@@ -460,18 +458,18 @@ mod tests {
             }
         );
         assert_eq!(
-            store.get(REPO, "release-process").await?,
+            store.get(SCOPE, "release-process").await?,
             Some(written.clone())
         );
-        assert_eq!(store.list(REPO).await?, vec![written.summary()]);
+        assert_eq!(store.list(SCOPE).await?, vec![written.summary()]);
         store
-            .delete(REPO, "release-process", 1, Editor::User, None)
+            .delete(SCOPE, "release-process", 1, Editor::User, None)
             .await?;
-        assert_eq!(store.get(REPO, "release-process").await?, None);
-        assert_eq!(store.list(REPO).await?, Vec::new());
+        assert_eq!(store.get(SCOPE, "release-process").await?, None);
+        assert_eq!(store.list(SCOPE).await?, Vec::new());
         assert!(matches!(
             store
-                .delete(REPO, "release-process", 2, Editor::User, None)
+                .delete(SCOPE, "release-process", 2, Editor::User, None)
                 .await,
             Err(KnowledgeError::NotFound)
         ));
@@ -482,14 +480,14 @@ mod tests {
     async fn every_change_is_kept_as_a_revision() -> Result<(), KnowledgeError> {
         let store = store().await;
         store
-            .put(REPO, "build", write("Old", "old", 0), Editor::Agent, None)
+            .put(SCOPE, "build", write("Old", "old", 0), Editor::Agent, None)
             .await?;
         let new = store
-            .put(REPO, "build", write("New", "new", 1), Editor::User, None)
+            .put(SCOPE, "build", write("New", "new", 1), Editor::User, None)
             .await?;
         assert_eq!(new.revision, 2);
-        store.delete(REPO, "build", 2, Editor::User, None).await?;
-        let revisions = store.revisions(REPO, "build").await?;
+        store.delete(SCOPE, "build", 2, Editor::User, None).await?;
+        let revisions = store.revisions(SCOPE, "build").await?;
         let summary: Vec<(u64, &str, Editor, bool)> = revisions
             .iter()
             .map(|r| (r.revision, r.spec.body.as_str(), r.updated_by, r.deleted))
@@ -505,7 +503,7 @@ mod tests {
         // A deleted name is written again from 0, and keeps counting.
         let again = store
             .put(
-                REPO,
+                SCOPE,
                 "build",
                 write("Again", "again", 0),
                 Editor::Agent,
@@ -524,20 +522,20 @@ mod tests {
     async fn a_write_from_a_stale_read_is_refused(#[case] base: u64) -> Result<(), KnowledgeError> {
         let store = store().await;
         store
-            .put(REPO, "build", write("A", "a", 0), Editor::Agent, None)
+            .put(SCOPE, "build", write("A", "a", 0), Editor::Agent, None)
             .await?;
         let current = store
-            .put(REPO, "build", write("B", "b", 1), Editor::User, None)
+            .put(SCOPE, "build", write("B", "b", 1), Editor::User, None)
             .await?;
         let result = store
-            .put(REPO, "build", write("C", "c", base), Editor::Agent, None)
+            .put(SCOPE, "build", write("C", "c", base), Editor::Agent, None)
             .await;
         assert!(
             matches!(&result, Err(KnowledgeError::Conflict(now)) if **now == Some(current.clone())),
             "{result:?}"
         );
-        assert_eq!(store.get(REPO, "build").await?, Some(current));
-        assert_eq!(store.revisions(REPO, "build").await?.len(), 2);
+        assert_eq!(store.get(SCOPE, "build").await?, Some(current));
+        assert_eq!(store.revisions(SCOPE, "build").await?.len(), 2);
         Ok(())
     }
 
@@ -545,26 +543,26 @@ mod tests {
     async fn a_stale_delete_is_refused() -> Result<(), KnowledgeError> {
         let store = store().await;
         store
-            .put(REPO, "build", write("A", "a", 0), Editor::Agent, None)
+            .put(SCOPE, "build", write("A", "a", 0), Editor::Agent, None)
             .await?;
         store
-            .put(REPO, "build", write("B", "b", 1), Editor::User, None)
+            .put(SCOPE, "build", write("B", "b", 1), Editor::User, None)
             .await?;
-        let result = store.delete(REPO, "build", 1, Editor::User, None).await;
+        let result = store.delete(SCOPE, "build", 1, Editor::User, None).await;
         assert!(
             matches!(result, Err(KnowledgeError::Conflict(_))),
             "{result:?}"
         );
-        assert!(store.get(REPO, "build").await?.is_some());
+        assert!(store.get(SCOPE, "build").await?.is_some());
         Ok(())
     }
 
     #[tokio::test]
-    async fn repositories_keep_their_own_notes() -> Result<(), KnowledgeError> {
+    async fn scopes_keep_their_own_notes() -> Result<(), KnowledgeError> {
         let store = store().await;
-        let other = "github.com/o/s";
+        let other = "another-project";
         store
-            .put(REPO, "build", write("R", "r", 0), Editor::User, None)
+            .put(SCOPE, "build", write("R", "r", 0), Editor::User, None)
             .await?;
         store
             .put(other, "build", write("S", "s", 0), Editor::User, None)
@@ -573,11 +571,11 @@ mod tests {
             .put(other, "a-first", write("S", "s", 0), Editor::User, None)
             .await?;
         let names = |list: Vec<NoteSummary>| list.into_iter().map(|n| n.name).collect::<Vec<_>>();
-        assert_eq!(names(store.list(REPO).await?), ["build"]);
+        assert_eq!(names(store.list(SCOPE).await?), ["build"]);
         assert_eq!(names(store.list(other).await?), ["a-first", "build"]);
         store.delete(other, "build", 1, Editor::User, None).await?;
-        assert!(store.get(REPO, "build").await?.is_some());
-        assert_eq!(store.revisions(REPO, "build").await?.len(), 1);
+        assert!(store.get(SCOPE, "build").await?.is_some());
+        assert_eq!(store.revisions(SCOPE, "build").await?.len(), 1);
         Ok(())
     }
 
@@ -588,9 +586,9 @@ mod tests {
     #[tokio::test]
     async fn refuses_what_is_wrong_with_a_note(#[case] name: &str, #[case] write: NoteWrite) {
         let store = store().await;
-        let result = store.put(REPO, name, write, Editor::Agent, None).await;
+        let result = store.put(SCOPE, name, write, Editor::Agent, None).await;
         assert!(matches!(result, Err(KnowledgeError::Refused(problems)) if !problems.is_empty()));
-        assert_eq!(store.list(REPO).await.map(|l| l.len()).ok(), Some(0));
+        assert_eq!(store.list(SCOPE).await.map(|l| l.len()).ok(), Some(0));
     }
 
     #[rstest]
@@ -607,11 +605,11 @@ mod tests {
     async fn a_persons_write_is_approved_and_an_agents_waits() -> Result<(), KnowledgeError> {
         let store = store().await;
         let by_person = store
-            .put(REPO, "build", write("Person", "p", 0), Editor::User, None)
+            .put(SCOPE, "build", write("Person", "p", 0), Editor::User, None)
             .await?;
         assert!(!by_person.awaits_review());
         let by_agent = store
-            .put(REPO, "build", write("Agent", "a", 1), Editor::Agent, None)
+            .put(SCOPE, "build", write("Agent", "a", 1), Editor::Agent, None)
             .await?;
         assert!(by_agent.awaits_review());
         let approved = by_agent
@@ -619,7 +617,7 @@ mod tests {
             .clone()
             .unwrap_or_else(|| panic!("the approved revision is kept"));
         assert_eq!((approved.revision, approved.spec.body.as_str()), (1, "p"));
-        let listed = store.list(REPO).await?;
+        let listed = store.list(SCOPE).await?;
         assert_eq!(
             listed
                 .first()
@@ -629,7 +627,7 @@ mod tests {
         );
         assert!(listed.first().is_some_and(NoteSummary::awaits_review));
         // Approving the agent's revision makes it the approved one.
-        let now = store.approve(REPO, "build", 2).await?;
+        let now = store.approve(SCOPE, "build", 2).await?;
         assert!(!now.awaits_review());
         assert_eq!(now.approved.map(|a| a.spec.body), Some("a".to_owned()));
         Ok(())
@@ -639,18 +637,18 @@ mod tests {
     async fn an_agents_new_note_has_nothing_approved() -> Result<(), KnowledgeError> {
         let store = store().await;
         let note = store
-            .put(REPO, "build", write("Agent", "a", 0), Editor::Agent, None)
+            .put(SCOPE, "build", write("Agent", "a", 0), Editor::Agent, None)
             .await?;
         assert_eq!(note.approved, None);
         assert!(
             store
-                .list(REPO)
+                .list(SCOPE)
                 .await?
                 .iter()
                 .all(NoteSummary::awaits_review)
         );
         // An agent may take back what nobody approved.
-        store.delete(REPO, "build", 1, Editor::Agent, None).await?;
+        store.delete(SCOPE, "build", 1, Editor::Agent, None).await?;
         Ok(())
     }
 
@@ -658,17 +656,17 @@ mod tests {
     async fn only_a_person_deletes_an_approved_note() -> Result<(), KnowledgeError> {
         let store = store().await;
         store
-            .put(REPO, "build", write("Person", "p", 0), Editor::User, None)
+            .put(SCOPE, "build", write("Person", "p", 0), Editor::User, None)
             .await?;
-        let result = store.delete(REPO, "build", 1, Editor::Agent, None).await;
+        let result = store.delete(SCOPE, "build", 1, Editor::Agent, None).await;
         assert!(
             matches!(result, Err(KnowledgeError::Refused(_))),
             "{result:?}"
         );
-        store.delete(REPO, "build", 1, Editor::User, None).await?;
+        store.delete(SCOPE, "build", 1, Editor::User, None).await?;
         // Written again by an agent, it starts unapproved.
         let again = store
-            .put(REPO, "build", write("Agent", "a", 0), Editor::Agent, None)
+            .put(SCOPE, "build", write("Agent", "a", 0), Editor::Agent, None)
             .await?;
         assert_eq!(again.approved, None);
         Ok(())
@@ -683,18 +681,18 @@ mod tests {
     ) -> Result<(), KnowledgeError> {
         let store = store().await;
         store
-            .put(REPO, "build", write("A", "a", 0), Editor::Agent, None)
+            .put(SCOPE, "build", write("A", "a", 0), Editor::Agent, None)
             .await?;
         store
-            .put(REPO, "build", write("B", "b", 1), Editor::Agent, None)
+            .put(SCOPE, "build", write("B", "b", 1), Editor::Agent, None)
             .await?;
-        let result = store.approve(REPO, "build", revision).await;
+        let result = store.approve(SCOPE, "build", revision).await;
         assert!(
             matches!(result, Err(KnowledgeError::Conflict(_))),
             "{result:?}"
         );
         assert_eq!(
-            store.get(REPO, "build").await?.and_then(|n| n.approved),
+            store.get(SCOPE, "build").await?.and_then(|n| n.approved),
             None
         );
         Ok(())

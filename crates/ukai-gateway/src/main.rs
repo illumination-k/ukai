@@ -26,15 +26,16 @@
 //! `GET <schedule>/runs` lists its recent runs, and `POST <schedule>/run` and
 //! `<schedule>/stop` start and stop one now.
 //!
-//! `/agents/<id>/knowledge` is the [`knowledge`] of the agent's repository:
-//! notes kept outside it. `GET` lists them; `GET`, `PUT`, and
+//! `/agents/<id>/knowledge` is the [`knowledge`] of the agent's scope (its
+//! project in `gateway.toml`, else its repository): notes kept outside the
+//! repositories. `GET` lists them; `GET`, `PUT`, and
 //! `DELETE ?revision=<n>` on `<it>/<name>` read, write, and remove one, a
 //! change being refused with 409 when the note is no longer at the revision
 //! the writer read; `GET <name>/revisions` is its history, and
 //! `POST <name>/approve?revision=<n>` approves what an agent wrote. Agent pods reach
 //! the same, with a cap on how many changes each makes, at
 //! `/workspace/knowledge` with their relay's token instead of the gateway's,
-//! which names the repository of the pod it belongs to and no other.
+//! which names the scope of the pod it belongs to and no other.
 //!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
@@ -83,7 +84,7 @@ use crate::config::KubernetesAgent;
 use crate::job::{Plan, Runtime};
 use crate::knowledge::{Knowledge, KnowledgeError, StoreConfig};
 use crate::schedules::Scheduler;
-use ukai_core::knowledge::{Conflict, Editor, NoteWrite};
+use ukai_core::knowledge::{Conflict, Editor, Listing, NoteWrite};
 use ukai_core::schedule::{ScheduleSpec, Trigger};
 
 struct Gateway {
@@ -582,14 +583,14 @@ async fn stop_schedule(
 
 /// Whose knowledge a request is about, and who is asking.
 struct Caller {
-    repository: String,
+    scope: String,
     editor: Editor,
     /// The agent pod's workspace, for a pod.
     workspace: Option<String>,
 }
 
-/// The repository whose knowledge a client asks for through `agent`, or the
-/// response when it may not.
+/// The scope whose knowledge a client asks for through `agent`, or the
+/// status when it may not.
 fn client_caller(
     gateway: &Gateway,
     headers: &HeaderMap,
@@ -600,7 +601,7 @@ fn client_caller(
     }
     let agent = gateway.agents.get(agent).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Caller {
-        repository: ukai_core::knowledge::repository_key(&agent.workspace.git),
+        scope: agent.knowledge_scope(),
         editor: Editor::User,
         workspace: None,
     })
@@ -617,7 +618,7 @@ async fn workspace_caller(gateway: &Gateway, headers: &HeaderMap) -> Result<Call
         .ok_or(StatusCode::UNAUTHORIZED)?;
     match gateway.cluster.pod_of(token).await {
         Ok(Some(pod)) => Ok(Caller {
-            repository: ukai_core::knowledge::repository_key(&pod.git),
+            scope: pod.scope,
             editor: Editor::Agent,
             workspace: Some(pod.workspace),
         }),
@@ -685,7 +686,7 @@ fn knowledge_failed(error: KnowledgeError) -> Response {
     }
 }
 
-/// What can be asked of one repository's knowledge.
+/// What can be asked of one scope's knowledge.
 enum Ask {
     List,
     Read(String),
@@ -711,23 +712,26 @@ async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask)
         )
             .into_response();
     }
-    let repository = &caller.repository;
+    let scope = &caller.scope;
     let result = match ask {
-        Ask::List => knowledge
-            .list(repository)
-            .await
-            .map(|list| axum::Json(list).into_response()),
-        Ask::Read(name) => knowledge.get(repository, &name).await.map(found),
+        Ask::List => knowledge.list(scope).await.map(|notes| {
+            axum::Json(Listing {
+                scope: scope.clone(),
+                notes,
+            })
+            .into_response()
+        }),
+        Ask::Read(name) => knowledge.get(scope, &name).await.map(found),
         Ask::Revisions(name) => knowledge
-            .revisions(repository, &name)
+            .revisions(scope, &name)
             .await
             .map(|revisions| found((!revisions.is_empty()).then_some(revisions))),
         Ask::Write(name, write) => knowledge
-            .put(repository, &name, write, caller.editor, caller.workspace)
+            .put(scope, &name, write, caller.editor, caller.workspace)
             .await
             .map(|note| axum::Json(note).into_response()),
         Ask::Delete(name, revision) => knowledge
-            .delete(repository, &name, revision, caller.editor, caller.workspace)
+            .delete(scope, &name, revision, caller.editor, caller.workspace)
             .await
             .map(|()| axum::Json(json!({})).into_response()),
         Ask::Approve(name, revision) => {
@@ -735,7 +739,7 @@ async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask)
                 return StatusCode::FORBIDDEN.into_response();
             }
             knowledge
-                .approve(repository, &name, revision)
+                .approve(scope, &name, revision)
                 .await
                 .map(|note| axum::Json(note).into_response())
         }

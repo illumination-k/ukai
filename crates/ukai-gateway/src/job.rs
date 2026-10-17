@@ -51,9 +51,11 @@ pub const RELAY_TOKEN_ENV: &str = "UKAI_RELAY_TOKEN";
 /// The agent container's environment variable holding where the gateway is
 /// reached from inside the cluster.
 pub const GATEWAY_URL_ENV: &str = "UKAI_GATEWAY_URL";
-/// Annotation on the Job and its pod naming the repository, which the
-/// gateway reads to tell a pod's repository from its relay token.
+/// Annotation on the Job and its pod naming the repository.
 pub const GIT_ANNOTATION: &str = "ukai.dev/git";
+/// Annotation on the Job and its pod naming the knowledge scope, which the
+/// gateway reads to tell whose knowledge a pod may use from its relay token.
+pub const KNOWLEDGE_ANNOTATION: &str = "ukai.dev/knowledge";
 /// The relay binary's path in the image named by [`job`]'s `relay_image`.
 const RELAY_IN_IMAGE: &str = "/usr/local/bin/ukai-relay";
 const RELAY_DIR: &str = "/ukai/bin";
@@ -326,10 +328,10 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
 
     let metadata = ObjectMeta {
         labels: Some(plan.labels()),
-        annotations: Some(BTreeMap::from([(
-            GIT_ANNOTATION.to_owned(),
-            agent.workspace.git.clone(),
-        )])),
+        annotations: Some(BTreeMap::from([
+            (GIT_ANNOTATION.to_owned(), agent.workspace.git.clone()),
+            (KNOWLEDGE_ANNOTATION.to_owned(), agent.knowledge_scope()),
+        ])),
         ..ObjectMeta::default()
     };
     Job {
@@ -337,6 +339,7 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
             name: Some(plan.job_name()),
             annotations: Some(BTreeMap::from([
                 (GIT_ANNOTATION.to_owned(), agent.workspace.git.clone()),
+                (KNOWLEDGE_ANNOTATION.to_owned(), agent.knowledge_scope()),
                 ("ukai.dev/user".to_owned(), plan.user.clone()),
             ])),
             ..metadata.clone()
