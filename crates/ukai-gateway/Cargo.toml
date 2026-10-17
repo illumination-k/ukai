@@ -20,6 +20,7 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+surrealdb = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
@@ -33,6 +34,7 @@ ukai-core = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

@@ -14,6 +14,7 @@ use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Project
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
 use crate::icons::{Icon, Svg};
+use crate::knowledge::NoteView;
 use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
@@ -155,6 +156,10 @@ pub fn pane_label(
         }) => (
             Some(project_name(project)),
             schedule_label(schedules, schedule.as_ref()),
+        ),
+        Some(PaneContent::Note { project, note, .. }) => (
+            Some(project_name(project)),
+            note.clone().unwrap_or_else(|| "New note".to_owned()),
         ),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
     }
@@ -380,6 +385,15 @@ fn PaneView(pane: PaneId) -> Element {
                         project,
                         agent,
                         schedule,
+                    }
+                },
+                PaneContent::Note { project, agent, note } => rsx! {
+                    NoteView {
+                        key: "{agent}-{note:?}",
+                        pane,
+                        project,
+                        agent,
+                        note,
                     }
                 },
                 PaneContent::Report { project, path, source } => rsx! {

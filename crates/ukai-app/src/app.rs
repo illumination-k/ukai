@@ -10,6 +10,7 @@ use crate::Startup;
 use crate::agent_pane::agent_status;
 use crate::alert::{is_unread, mark_read};
 use crate::icons::{Icon, Svg};
+use crate::knowledge::KnowledgeList;
 use crate::layout::{Workbench, launch_agent, transport_label};
 use crate::palette::Palette;
 use crate::persist::use_autosave;
@@ -50,6 +51,7 @@ pub fn App() -> Element {
             palette: Signal::new(false),
             schedule_names: Signal::new(HashMap::new()),
             schedule_revision: Signal::new(0),
+            knowledge_revision: Signal::new(0),
         }
     });
     use_hook(|| {
@@ -132,6 +134,8 @@ fn Sidebar() -> Element {
     let report_project_name = selected_name.clone();
     let schedule_project = selected.clone();
     let schedule_project_name = selected_name.clone();
+    let knowledge_project = selected.clone();
+    let knowledge_project_name = selected_name.clone();
     drop(projects);
     let agents: Result<Vec<(String, &'static str)>, String> = match &selected {
         None => Ok(Vec::new()),
@@ -282,6 +286,9 @@ fn Sidebar() -> Element {
             }
             if let (Some(project), Some(name)) = (schedule_project, schedule_project_name) {
                 ScheduleList { key: "schedules-{project}", project, name }
+            }
+            if let (Some(project), Some(name)) = (knowledge_project, knowledge_project_name) {
+                KnowledgeList { key: "knowledge-{project}", project, name }
             }
             if let (Some(project), Some(name)) = (report_project, report_project_name) {
                 ReportList { key: "{project}", project, name }

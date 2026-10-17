@@ -5,6 +5,7 @@ mod alert;
 mod app;
 mod clipboard;
 mod icons;
+mod knowledge;
 mod layout;
 mod markdown;
 mod palette;

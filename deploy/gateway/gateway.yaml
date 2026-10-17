@@ -1,7 +1,8 @@
 # ukai-gateway in one namespace, with only namespaced RBAC: it creates a Job
 # per workspace for the agents in its gateway.toml and relays ACP to them.
 # Apply with `kubectl apply -k deploy/gateway` (see kustomization.yaml), then
-# reach it with `kubectl port-forward deploy/ukai-gateway 8080` or a Service.
+# reach it with `kubectl port-forward deploy/ukai-gateway 8080`, or through
+# the Service below from an Ingress.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -85,6 +86,21 @@ spec:
                   name: ukai-gateway
                   key: token
                   optional: true
+            # The knowledge store (surrealdb.yaml) and its root user.
+            - name: UKAI_KNOWLEDGE_URL
+              value: ws://ukai-surrealdb:8000
+            - name: UKAI_KNOWLEDGE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-surrealdb
+                  key: user
+                  optional: true
+            - name: UKAI_KNOWLEDGE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-surrealdb
+                  key: pass
+                  optional: true
           ports:
             - name: http
               containerPort: 8080
@@ -111,3 +127,21 @@ spec:
         - name: config
           configMap:
             name: ukai-gateway
+---
+# Agent pods reach the gateway here for the knowledge of their repository
+# (the gateway's `UKAI_GATEWAY_INTERNAL_URL`, `http://ukai-gateway` by
+# default); an Ingress in front of the gateway points here too.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ukai-gateway
+  labels:
+    app.kubernetes.io/name: ukai-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ukai-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -41,6 +41,8 @@ pub struct AppSignals {
     pub schedule_names: Signal<HashMap<String, String>>,
     /// Bumped after a schedule changes, so its listings read it again.
     pub schedule_revision: Signal<u64>,
+    /// Bumped after a note changes, so the knowledge listings read it again.
+    pub knowledge_revision: Signal<u64>,
 }
 
 /// What a session needs from its project.

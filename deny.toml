@@ -21,6 +21,9 @@ allow = [
   # whisper-rs / whisper-rs-sys (voice input). A public-domain dedication;
   # whisper.cpp itself is MIT.
   "Unlicense",
+  # surrealdb and its crates (the gateway's knowledge store client). It only
+  # restricts offering SurrealDB itself as a database service.
+  "BUSL-1.1",
 ]
 confidence-threshold = 0.8
 
@@ -41,6 +44,13 @@ ignore = [
   { id = "RUSTSEC-2025-0057", reason = "fxhash via wry -> kuchikiki -> selectors" },
   { id = "RUSTSEC-2024-0436", reason = "paste via dioxus-desktop -> image (exr, rav1e)" },
   { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via glib-macros (Linux GTK bindings of tao/muda)" },
+  # Only through surrealdb's embedded engine (`kv-mem`), which ukai-gateway's
+  # tests alone use; the gateway itself is a client and links none of it.
+  # Keep `cargo tree -p ukai-gateway -e normal -i <crate>` empty for each.
+  { id = "RUSTSEC-2025-0141", reason = "bincode via surrealmx (surrealdb kv-mem, tests only)" },
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
+  { id = "RUSTSEC-2023-0071", reason = "rsa via jsonwebtoken (surrealdb-core, tests only)" },
 ]
 
 [sources]

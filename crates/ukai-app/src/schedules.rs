@@ -36,7 +36,7 @@ const PANE_EVERY: Duration = Duration::from_secs(4);
 const NOTICE: Duration = Duration::from_millis(300);
 
 /// The gateway agents of `config`, by name.
-fn gateway_agents(config: &Config) -> Vec<String> {
+pub(crate) fn gateway_agents(config: &Config) -> Vec<String> {
     config
         .agents
         .iter()
@@ -56,7 +56,7 @@ fn endpoint(config: &Config, agent: &str) -> Result<SchedulesEndpoint, String> {
         .ok_or_else(|| format!("agent `{agent}` is not a gateway agent, so it keeps no schedules"))
 }
 
-fn config_of(app: AppSignals, project: &ProjectId) -> Result<Config, String> {
+pub(crate) fn config_of(app: AppSignals, project: &ProjectId) -> Result<Config, String> {
     app.configs
         .read()
         .get(project)
@@ -81,16 +81,17 @@ fn refresh(app: AppSignals) {
     *revision.write() += 1;
 }
 
-/// Calls `read` now, every `every`, and soon after [`refresh`].
-async fn poll<F: Future<Output = ()>>(
-    app: AppSignals,
+/// Calls `read` now, every `every`, and soon after `revision` is bumped
+/// (for schedules, by [`refresh`]).
+pub(crate) async fn poll<F: Future<Output = ()>>(
+    revision: Signal<u64>,
     every: Duration,
     mut read: impl FnMut() -> F,
 ) {
     let mut last = None;
     let mut next = Instant::now();
     loop {
-        let current = *app.schedule_revision.peek();
+        let current = *revision.peek();
         if last != Some(current) || Instant::now() >= next {
             last = Some(current);
             next = Instant::now() + every;
@@ -166,7 +167,7 @@ fn local_offset() -> UtcOffset {
     LOCAL_OFFSET.get().copied().unwrap_or(UtcOffset::UTC)
 }
 
-fn local_now() -> OffsetDateTime {
+pub(crate) fn local_now() -> OffsetDateTime {
     OffsetDateTime::now_utc().to_offset(local_offset())
 }
 
@@ -189,7 +190,7 @@ fn when(at: OffsetDateTime, now: OffsetDateTime) -> String {
     }
 }
 
-fn when_unix(seconds: i64, now: OffsetDateTime) -> String {
+pub(crate) fn when_unix(seconds: i64, now: OffsetDateTime) -> String {
     OffsetDateTime::from_unix_timestamp(seconds).map_or_else(|_| String::new(), |at| when(at, now))
 }
 
@@ -239,7 +240,7 @@ pub fn ScheduleList(project: ProjectId, name: String) -> Element {
         move || {
             let seen = seen.clone();
             let source = source.clone();
-            poll(app, LIST_EVERY, move || {
+            poll(app.schedule_revision, LIST_EVERY, move || {
                 let seen = seen.clone();
                 let source = source.clone();
                 async move {
@@ -483,7 +484,7 @@ pub fn ScheduleView(
                 let Some(id) = schedule else {
                     return;
                 };
-                poll(app, PANE_EVERY, move || {
+                poll(app.schedule_revision, PANE_EVERY, move || {
                     let id = id.clone();
                     async move {
                         let result = match endpoint.peek().clone() {

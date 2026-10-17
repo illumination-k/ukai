@@ -17,6 +17,7 @@ use ukai_acp::{
     PaneWorkspace, Prompt, RestartEndpoint, SessionEvent, SessionEvents, SessionHandle,
     SessionOptions, SlashCommand, ToolStatus, UpdateCheck,
 };
+use ukai_core::config::{ApplyDefaults, Setting};
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
@@ -139,6 +140,7 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
         Some(project) => format!("{agent} · {}", project.name()),
         None => agent.clone(),
     };
+    let mut defaults = ApplyDefaults::new(projects.peek().defaults(&project, &agent));
     let started =
         project_context(&projects.peek(), &configs.peek(), &project).and_then(|context| {
             start_session(&context, &agent, workspace.as_ref(), restore, expecting)
@@ -146,10 +148,14 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
     let handle = match started {
         Ok((handle, mut events)) => {
             let window = dioxus::desktop::window();
+            let control = handle.clone();
             spawn_forever(async move {
                 while let Some(event) = events.recv().await {
                     if let SessionEvent::Ready { session_id, .. } = &event {
                         layout.write().record_session(pane, session_id.clone());
+                    }
+                    if let Some((id, value)) = defaults.on_event(&event) {
+                        control.set_config(id, value);
                     }
                     let raised = Alert::of(&event);
                     transcript.write().apply(event);
@@ -893,12 +899,24 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
 
 /// The agent's settings, e.g. model and reasoning effort, changed through
 /// `session/set_config_option`. A change shows once the agent confirms it.
+/// The model and effort picked become what the project's new sessions of
+/// the agent start with.
 #[component]
 fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> Element {
-    let sessions = use_context::<AppSignals>().sessions;
+    let AppSignals {
+        sessions,
+        mut projects,
+        layout,
+        ..
+    } = use_context::<AppSignals>();
     let set = move |id: String, value: ConfigInput| {
         if let Some(handle) = sessions.read().get(&pane).and_then(|s| s.handle.clone()) {
             handle.set_config(id, value);
+        }
+    };
+    let mut remember = move |setting: Setting, value: String| {
+        if let Some(PaneContent::Agent { project, agent, .. }) = layout.peek().content(pane) {
+            projects.write().set_default(project, agent, setting, value);
         }
     };
     rsx! {
@@ -906,6 +924,7 @@ fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> E
             for option in options {
                 {
                     let id = option.id.clone();
+                    let setting = Setting::of(&option);
                     let title = match &option.description {
                         Some(description) => format!("{}: {description}", option.name),
                         None => option.name.clone(),
@@ -919,7 +938,12 @@ fn ConfigControls(pane: PaneId, options: Vec<ConfigOption>, disabled: bool) -> E
                                 current,
                                 choices,
                                 disabled,
-                                onpick: move |value| set(id.clone(), ConfigInput::Select(value)),
+                                onpick: move |value: String| {
+                                    if let Some(setting) = setting {
+                                        remember(setting, value.clone());
+                                    }
+                                    set(id.clone(), ConfigInput::Select(value));
+                                },
                             }
                         },
                         ConfigValue::Toggle(on) => rsx! {

@@ -4,6 +4,7 @@
 pub mod attachment;
 pub mod config;
 pub mod keymap;
+pub mod knowledge;
 mod layout;
 pub mod markdown;
 pub mod palette;
