@@ -5,6 +5,9 @@
 //!
 //! `ukai-relay mcp [--root DIR]` is the MCP server the relay hands the agent
 //! for each session (see `ukai_relay::mcp`), on stdin/stdout.
+//!
+//! In a gateway's pod the relay is PID 1, so it runs itself again as its
+//! child and stays as that child's init (`ukai_relay::init`).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -50,8 +53,7 @@ enum Mode {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -60,6 +62,31 @@ async fn main() -> ExitCode {
         )
         .init();
     let cli = Cli::parse();
+    // Before the runtime starts threads that would take the signals init
+    // forwards.
+    #[cfg(target_os = "linux")]
+    if cli.mode.is_none() && ukai_relay::init::is_init() {
+        return match ukai_relay::init::supervise_self() {
+            Ok(exit) => {
+                tracing::info!(code = exit.code, orphans = exit.orphans, "relay exited");
+                ExitCode::from(u8::try_from(exit.code).unwrap_or(1))
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not run the relay as init");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime.block_on(serve(cli)),
+        Err(error) => {
+            tracing::error!(%error, "could not start the runtime");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn serve(cli: Cli) -> ExitCode {
     if let Some(Mode::Mcp { root }) = cli.mode {
         return match ukai_relay::mcp::serve(&root) {
             Ok(()) => ExitCode::SUCCESS,

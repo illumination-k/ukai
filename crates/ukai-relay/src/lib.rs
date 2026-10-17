@@ -2,8 +2,12 @@
 //! client connections. [`hub`] is the protocol side, [`server`] the process,
 //! [`reports`] serves the reports the agent writes in its checkout, which
 //! no client can read for itself, and [`mcp`] tells the agent about them.
+//! As its container's first process, the relay also does what an init
+//! would (`init`, on Linux).
 
 pub mod hub;
+#[cfg(target_os = "linux")]
+pub mod init;
 pub mod mcp;
 pub mod reports;
 pub mod server;
