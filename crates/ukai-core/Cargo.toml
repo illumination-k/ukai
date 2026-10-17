@@ -12,6 +12,7 @@ description = "UI-independent application state for ukai"
 globset = { workspace = true }
 percent-encoding = { workspace = true }
 pulldown-cmark = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }

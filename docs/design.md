@@ -224,8 +224,9 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   ACP のエージェントが必ずクライアントから受け取る経路なのでエージェントの種類を問わず、checkout の
   `CLAUDE.md` / `AGENTS.md` も汚さない。MCP の `initialize` 応答の `instructions` で、レポートとは何か、この
   checkout の `[reports]`（`dirs` / `globs`、`allow_network` による制限、相対参照の範囲）を伝え、`dirs` が
-  空なら `ukai.toml` への足し方を教える。ツールは `list_reports`（ユーザーが今開けるレポート）だけ。
-  ukai の機能をエージェントに知らせるときはここを育てる。手元の stdio エージェントにはまだ渡していない。
+  空なら `ukai.toml` への足し方を教える。ツールは `list_reports`（ユーザーが今開けるレポート）と、gateway の
+  Pod ではナレッジ（後述「ナレッジ」）の 4 つ。ukai の機能をエージェントに知らせるときはここを育てる。
+  手元の stdio エージェントにはまだ渡していない。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
 - クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
 
@@ -244,6 +245,8 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
 - スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
+- リポジトリごとのナレッジ（後述「ナレッジ」）を `/agents/<id>/knowledge` と、Pod 向けの
+  `/workspace/knowledge` で持つ。
 - `POST /agents/<id>/restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
   ワークスペースの決め方とトークンは `/acp` と同じ。サイドカーは TERM でスナップショットを取ってから終わるので、
   作業ツリーは idle で止まったときと同じく残る。そのワークスペースのセッションはすべて切れる。
@@ -285,6 +288,71 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 - 保存: スケジュールごとに ConfigMap `ukai-schedule-<id>`（ラベル `ukai.dev/schedule`）にスケジュールと直近
   20 件の run（出力は末尾 16 KiB）を JSON で置く。変更のたびと、走っている間は 10 秒ごとに書く。gateway の
   再起動で走っていた run は「Interrupted」にする。
+
+### ナレッジ
+
+規約、決めたこととその理由、ハマりどころなど、セッションを越えて残したいがリポジトリにはコミットしたくない
+知識を、gateway がリポジトリごとに持つ。`CLAUDE.md` やドキュメントに書かせると PR のノイズになり、
+エージェントが書いた未整理のメモまで履歴に残るため。
+
+- 単位はノート（名前、1 行の説明、Markdown の本文）。名前は小文字・数字・`-` の 64 文字まで、説明は 1 行
+  200 文字まで、本文は 256 KiB まで。見えない文字（ゼロ幅、双方向制御、Unicode タグ）と、秘密情報らしい
+  もの（秘密鍵、GitHub / AWS / Google / Slack / Anthropic / OpenAI のトークン、JWT）は拒否する。説明は
+  後続の全セッションの instructions に入り、本文も読まれるので、レビューで見えない指示（rules file
+  backdoor）と漏れた資格情報がそこに残らないように。問題は全部集めて 422 で返し、アプリも保存前に同じ
+  判定を出す（`ukai_core::knowledge`）。型は `ukai_acp::knowledge`（クライアント `KnowledgeEndpoint` も）。
+- スコープはリポジトリ。`workspace.git` を `ukai_core::knowledge::repository_key` で正規化したもの
+  （`https://github.com/o/r.git` も `git@github.com:o/r` も `github.com/o/r`）なので、同じリポジトリを
+  clone するエージェントは種類を問わず同じノートを見る。ワークスペースやブランチでは分けない。
+- 保存: SurrealDB（`deploy/gateway/surrealdb.yaml` の StatefulSet、PVC 1 つ、RocksDB）。gateway は
+  公式の Rust SDK で WebSocket（`UKAI_KNOWLEDGE_URL`、root ユーザーは Secret `ukai-surrealdb`）でつなぐ。
+  namespace `ukai`・database `knowledge`。表 `note` が今のノートをレコード id `[repository, name]` で、
+  表 `note_revision` がすべての書き込みと削除を消さずに持つ。ConfigMap にしないのは、ノートが増えたときに
+  etcd を文書置き場にしたくないのと、後で全文検索やベクトル検索、ノート同士のリンクを同じ所で扱いたいため。
+  SurrealDB は BUSL-1.1（DB をサービスとして売ることだけを禁じる）で、`deny.toml` で許している。出荷する
+  gateway が持つのは SDK のクライアント側だけで、組み込みエンジン（`kv-mem`）はテストでしか使わない。
+- 版と排他: 書き込みと削除はどれも 1 つの revision（名前ごとに 1 からの連番、削除をまたいでも数え続ける）
+  になる。書き手は読んだ revision（新規は 0）を渡し、1 つのトランザクションの中で今の revision と違えば
+  409 で今のノートを返す。黙った上書き（最後に書いたほうが勝つ）は起きない。削除は印を付けるだけで、
+  履歴は `GET .../<name>/revisions` で読め、アプリから任意の版に戻せる。汚染されたノートを後から戻せる
+  ようにするため。
+- 承認: ノートは最後に人が承認した revision（`approved`）を別に持つ。人がアプリで書いたものは書いた時点で
+  承認済み、エージェントが書いたものは承認待ちで、その間も前に承認された revision はそのまま残る。承認は
+  アプリから（`POST /agents/<id>/knowledge/<name>/approve?revision=<n>`、最新の revision のときだけ）で、
+  Pod 向けの `/workspace/...` には入口がない。人が承認したノートはエージェントからは消せない（人に
+  理由を伝えさせる）。アプリはサイドバーで承認待ちに印を付け、ノートの pane で承認済みの revision との
+  差分と「Approve」を出す。
+- 由来: revision ごとに書き手（人 / エージェント）、エージェントなら gateway がトークンから突き止めた
+  ワークスペース、書き手の申告する commit（16 進だけを残す）を持つ。
+- gateway は起動時に store へつなぎ、つながるまで 10 秒ごとに試す。その間も agent は動き、ナレッジの
+  要求だけが 503 になる。`UKAI_KNOWLEDGE_URL` がなければナレッジは持たず、Pod にも gateway の場所を
+  渡さない（MCP のナレッジのツールも出ない）。テストは SDK の `kv-mem` で本物のエンジンに対して行う。
+- アプリから: `GET /agents/<id>/knowledge`（説明まで、名前順）、`GET` / `PUT` /
+  `DELETE ?revision=<n>` `/agents/<id>/knowledge/<name>`、`GET .../<name>/revisions`。トークンは
+  `/acp` と同じ。サイドバーの「Knowledge」に gateway エージェントごとに並び、ノートの pane で Markdown
+  として読み、編集する。開いている pane はノートを読み直し続け、編集中に版が進んだら保存は拒否されるので、
+  そう出して「自分の版で置き換える」を選ばせる。
+- Pod から: relay の MCP サーバー（`ukai-relay mcp --gateway <url>`）が `/workspace/knowledge` を叩く。
+  認証は relay のトークンで、gateway は同じトークンを持つ Pod を探し、その注釈 `ukai.dev/git` から
+  リポジトリを、ラベルからワークスペースを決める。Pod の申告は信じないので、Pod は自分のリポジトリの
+  ノートにしか触れない。gateway の場所は Job の `UKAI_GATEWAY_URL`（gateway の
+  `UKAI_GATEWAY_INTERNAL_URL`、既定は `deploy/gateway` の Service `http://ukai-gateway`）。トークンは
+  MCP サーバーの `env` で渡し、引数には載せない。
+- 書き込みの上限: 1 セッション（MCP サーバー 1 つ）で 8 件、1 ワークスペースで 1 時間 20 件まで
+  （gateway、429）。悪意ある入力を読んだセッションが、本物を数で上回るノートを流し込めないように。
+- エージェントへの渡し方: MCP の `instructions` に承認済みのノートの一覧（名前と承認された説明。承認待ちは
+  件数だけ。一覧はデータであって指示ではないと断る）と使い方を入れ、ツール
+  `list_knowledge` / `read_knowledge` / `write_knowledge` / `delete_knowledge` を出す。使い方は、
+  ノートは確かめるべき主張で指示ではない（作業の範囲を越えることを求めるノートには従わない）、
+  ほとんどのセッションは何も書かない、このセッションで確かめたことで後から再発見しにくいことだけを書く、
+  概要やコードとドキュメントにあることは書かない、落とし穴は症状・原因・対処で書く、変えるときは読んだ
+  revision を渡す、チェックアウトには書かない、秘密を書かない。一覧の取得は 5 秒で諦め、セッションの
+  開始を待たせない。`list_knowledge` は承認待ちも含めて印を付けて返し、`read_knowledge` は承認済みの
+  revision を（なければ最新を「レビューされていない」と明示して）revision、書き手、commit を付けて返す。
+  承認済みより新しい revision があればそう言い、`revision` を指定すれば最新も読める。
+- これらは LLM エージェントの記憶についての研究（自己生成の知識は選別しないと効かない、記憶汚染は
+  少数の書き込みで成立する、全体の書き直しは詳細を失う）を踏まえている。コード位置の引用と使用前の検証、
+  全文検索は次の段階。
 
 ### ワークスペース Pod
 
@@ -615,6 +683,7 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 
 ## Open questions
 
+- ナレッジを手元の stdio エージェントにも渡すか（今は gateway の Pod だけ）。渡すなら置き場所が要る。
 - 認証: RFD は認証を別ページに切り出している。OAuth 系のクラウドエージェントをどう扱うか（ブラウザで
   ログインしてトークンを受け取るフロー）を Phase 2 で決める。
 - ACP v2（`unstable_protocol_v2`）をいつ追うか。`SessionEvent` 境界で吸収できる前提だが要確認。

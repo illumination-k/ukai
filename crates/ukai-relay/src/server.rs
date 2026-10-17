@@ -28,6 +28,9 @@ pub struct Options {
     /// Clients must send `Authorization: Bearer <token>` to everything but
     /// `/health`.
     pub token: Option<String>,
+    /// The gateway that started this pod: with `token`, the MCP server
+    /// hands the agent the knowledge it keeps for the repository.
+    pub gateway: Option<String>,
     /// Exit after this long with no client connected and no turn running.
     pub idle_timeout: Duration,
     pub command: String,
@@ -125,9 +128,19 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     };
 
     // The agent starts this binary again as an MCP server that tells it
-    // what ukai does with its reports; see `crate::mcp`.
+    // what ukai does with its reports, and hands it the repository's
+    // knowledge; see `crate::mcp`.
+    let gateway = match (&options.gateway, &options.token) {
+        (Some(url), Some(token)) => Some(crate::mcp::Gateway {
+            url: url.clone(),
+            token: token.clone(),
+        }),
+        _ => None,
+    };
     let mcp_servers = match (&cwd, std::env::current_exe()) {
-        (Some(root), Ok(program)) => vec![crate::mcp::server_entry(&program, root)],
+        (Some(root), Ok(program)) => {
+            vec![crate::mcp::server_entry(&program, root, gateway.as_ref())]
+        }
         (_, Err(error)) => {
             tracing::warn!(%error, "cannot find the relay binary; sessions get no ukai MCP server");
             Vec::new()

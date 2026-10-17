@@ -32,8 +32,11 @@ fn plan(extra: &str) -> Plan {
 }
 
 fn json(plan: &Plan) -> Value {
-    serde_json::to_value(job(plan, "registry.example.com/ukai-runtime:1", "s3cret"))
-        .unwrap_or_default()
+    let runtime = Runtime {
+        relay_image: "registry.example.com/ukai-runtime:1".into(),
+        gateway_url: Some("http://ukai-gateway".into()),
+    };
+    serde_json::to_value(job(plan, &runtime, "s3cret")).unwrap_or_default()
 }
 
 fn container<'a>(job: &'a Value, path: &str, name: &str) -> &'a Value {
@@ -306,4 +309,22 @@ fn the_relay_serves_the_agent_from_the_checkout() {
         .map(|c| c.iter().filter_map(|c| c["name"].as_str()).collect())
         .unwrap_or_default();
     assert_eq!(order, ["relay-install", "workspace"]);
+}
+
+#[test]
+fn the_pod_can_reach_the_knowledge_of_its_repository() {
+    let job = json(&plan(""));
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    let url = agent["env"]
+        .as_array()
+        .and_then(|env| env.iter().find(|e| e["name"] == GATEWAY_URL_ENV));
+    assert_eq!(
+        url.map(|e| &e["value"]),
+        Some(&json!("http://ukai-gateway"))
+    );
+    // The gateway tells a pod's repository from the pod alone.
+    assert_eq!(
+        job.pointer("/spec/template/metadata/annotations/ukai.dev~1git"),
+        Some(&json!("https://github.com/org/repo"))
+    );
 }

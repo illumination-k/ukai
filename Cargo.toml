@@ -39,6 +39,7 @@ percent-encoding = "2"
 proptest = "1"
 # No `html` or `getopts`: the app renders the parsed tree itself, never HTML.
 pulldown-cmark = { version = "0.13", default-features = false }
+regex = "1"
 reqwest = { version = "0.13", default-features = false }
 # No backend feature: dioxus-desktop already depends on rfd with `xdg-portal`
 # on Linux, and rfd refuses to build with both `xdg-portal` and `gtk3`.
@@ -49,6 +50,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 similar = "3"
+# The gateway's knowledge store, reached over WebSocket; engines are opted
+# into where needed (`kv-mem` in tests).
+surrealdb = { version = "3.3", default-features = false, features = ["protocol-ws", "rustls"] }
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["std"] }

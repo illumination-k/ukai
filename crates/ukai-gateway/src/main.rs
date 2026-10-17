@@ -26,25 +26,41 @@
 //! `GET <schedule>/runs` lists its recent runs, and `POST <schedule>/run` and
 //! `<schedule>/stop` start and stop one now.
 //!
+//! `/agents/<id>/knowledge` is the [`knowledge`] of the agent's repository:
+//! notes kept outside it. `GET` lists them; `GET`, `PUT`, and
+//! `DELETE ?revision=<n>` on `<it>/<name>` read, write, and remove one, a
+//! change being refused with 409 when the note is no longer at the revision
+//! the writer read; `GET <name>/revisions` is its history, and
+//! `POST <name>/approve?revision=<n>` approves what an agent wrote. Agent pods reach
+//! the same, with a cap on how many changes each makes, at
+//! `/workspace/knowledge` with their relay's token instead of the gateway's,
+//! which names the repository of the pod it belongs to and no other.
+//!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
 //! - `UKAI_GATEWAY_LISTEN`: address to serve (default `0.0.0.0:8080`)
 //! - `UKAI_GATEWAY_TOKEN`: if set, clients must send `Authorization: Bearer <it>`
 //! - `UKAI_RELAY_IMAGE`: image whose `/usr/local/bin/ukai-relay` agent pods
 //!   run; the gateway's own image (read from its pod, `HOSTNAME`) when unset
+//! - `UKAI_KNOWLEDGE_URL`: the SurrealDB server keeping the [`knowledge`]
+//!   (`ws://ukai-surrealdb:8000` in `deploy/gateway`); without it the
+//!   gateway keeps none, and agent pods are not offered any
+//! - `UKAI_KNOWLEDGE_USER`, `UKAI_KNOWLEDGE_PASS`: its root user
+//! - `UKAI_GATEWAY_INTERNAL_URL`: where agent pods reach the gateway for the
+//!   knowledge (default `http://ukai-gateway`, the Service in `deploy/gateway`)
 //!
 //! Each agent runs in a Job per workspace, in the gateway's namespace, with
 //! nothing installed cluster-side: no CRD, no PersistentVolumeClaim of its
 //! own. [`job`] builds the Job from the config without touching the cluster;
 //! [`cluster`] finds or creates it and waits for its pod.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -59,21 +75,30 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 mod cluster;
 mod config;
 mod job;
+mod knowledge;
 mod schedules;
 
 use crate::cluster::{Cluster, RelayEndpoint};
 use crate::config::KubernetesAgent;
-use crate::job::Plan;
+use crate::job::{Plan, Runtime};
+use crate::knowledge::{Knowledge, KnowledgeError, StoreConfig};
 use crate::schedules::Scheduler;
+use ukai_core::knowledge::{Conflict, Editor, NoteWrite};
 use ukai_core::schedule::{ScheduleSpec, Trigger};
 
 struct Gateway {
     agents: BTreeMap<String, KubernetesAgent>,
     cluster: Cluster,
     user: String,
-    relay_image: String,
+    runtime: Runtime,
     token: Option<String>,
     schedules: Scheduler,
+    /// Whether the gateway keeps knowledge at all.
+    keeps_knowledge: bool,
+    /// Set once the store is reached.
+    knowledge: tokio::sync::OnceCell<Knowledge>,
+    /// When each agent pod's workspace last changed notes, for [`POD_WRITES`].
+    pod_writes: Mutex<HashMap<String, VecDeque<std::time::Instant>>>,
 }
 
 #[tokio::main]
@@ -112,19 +137,36 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("UKAI_RELAY_IMAGE is not set and the gateway pod has no image")?
         }
     };
+    let store = env("UKAI_KNOWLEDGE_URL").map(|url| StoreConfig {
+        url,
+        credentials: env("UKAI_KNOWLEDGE_USER").zip(env("UKAI_KNOWLEDGE_PASS")),
+    });
+    // Agent pods are told where the gateway is only when it keeps knowledge.
+    let gateway_url = store.as_ref().map(|_| {
+        env("UKAI_GATEWAY_INTERNAL_URL").unwrap_or_else(|| "http://ukai-gateway".to_owned())
+    });
     let user = cluster.whoami().await?;
-    tracing::info!(namespace = cluster.namespace(), %user, %relay_image, agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
+    tracing::info!(namespace = cluster.namespace(), %user, %relay_image, ?gateway_url, knowledge = ?store.as_ref().map(|s| &s.url), agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
     let (schedules, saver) = Scheduler::load(&cluster).await?;
     let gateway = Arc::new(Gateway {
         agents: config.agents,
         cluster,
         user,
-        relay_image,
+        runtime: Runtime {
+            relay_image,
+            gateway_url,
+        },
         token: env("UKAI_GATEWAY_TOKEN"),
         schedules,
+        keeps_knowledge: store.is_some(),
+        knowledge: tokio::sync::OnceCell::new(),
+        pod_writes: Mutex::default(),
     });
     tokio::spawn(saver.run(gateway.clone()));
     tokio::spawn(schedules::tick(gateway.clone()));
+    if let Some(store) = store {
+        tokio::spawn(reach_knowledge(gateway.clone(), store));
+    }
     let router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/agents", get(list))
@@ -148,11 +190,59 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "/agents/{id}/schedules/{schedule}/stop",
             post(stop_schedule),
         )
+        .route("/agents/{id}/knowledge", get(agent_notes))
+        .route(
+            "/agents/{id}/knowledge/{name}",
+            get(agent_note)
+                .put(put_agent_note)
+                .delete(delete_agent_note),
+        )
+        .route(
+            "/agents/{id}/knowledge/{name}/revisions",
+            get(agent_note_revisions),
+        )
+        // Approval is a person's: there is no route for it under /workspace.
+        .route(
+            "/agents/{id}/knowledge/{name}/approve",
+            post(approve_agent_note),
+        )
+        .route("/workspace/knowledge", get(workspace_notes))
+        .route(
+            "/workspace/knowledge/{name}",
+            get(workspace_note)
+                .put(put_workspace_note)
+                .delete(delete_workspace_note),
+        )
+        .route(
+            "/workspace/knowledge/{name}/revisions",
+            get(workspace_note_revisions),
+        )
         .with_state(gateway);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(%listen, "serving");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// How long the gateway waits between attempts to reach the knowledge store.
+const KNOWLEDGE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Reach the knowledge store, trying until it answers: the gateway serves
+/// agents meanwhile, and knowledge requests are 503 until then.
+async fn reach_knowledge(gateway: Arc<Gateway>, store: StoreConfig) {
+    loop {
+        match Knowledge::connect(&store).await {
+            Ok(knowledge) => {
+                tracing::info!(url = %store.url, "knowledge store reached");
+                let _ = gateway.knowledge.set(knowledge);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(url = %store.url, %error, "cannot reach the knowledge store; trying again");
+                tokio::time::sleep(KNOWLEDGE_RETRY).await;
+            }
+        }
+    }
 }
 
 fn authorized(gateway: &Gateway, headers: &HeaderMap) -> bool {
@@ -163,14 +253,7 @@ fn authorized(gateway: &Gateway, headers: &HeaderMap) -> bool {
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|presented| {
-            presented.len() == token.len()
-                && presented
-                    .bytes()
-                    .zip(token.bytes())
-                    .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                    == 0
-        })
+        .is_some_and(|presented| cluster::same_secret(token, presented))
 }
 
 async fn list(State(gateway): State<Arc<Gateway>>, headers: HeaderMap) -> Response {
@@ -497,6 +580,276 @@ async fn stop_schedule(
     }
 }
 
+/// Whose knowledge a request is about, and who is asking.
+struct Caller {
+    repository: String,
+    editor: Editor,
+    /// The agent pod's workspace, for a pod.
+    workspace: Option<String>,
+}
+
+/// The repository whose knowledge a client asks for through `agent`, or the
+/// response when it may not.
+fn client_caller(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    agent: &str,
+) -> Result<Caller, StatusCode> {
+    if !authorized(gateway, headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let agent = gateway.agents.get(agent).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Caller {
+        repository: ukai_core::knowledge::repository_key(&agent.workspace.git),
+        editor: Editor::User,
+        workspace: None,
+    })
+}
+
+/// The agent pod whose relay token the request carries, or the response
+/// when it carries none that the gateway knows.
+async fn workspace_caller(gateway: &Gateway, headers: &HeaderMap) -> Result<Caller, StatusCode> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    match gateway.cluster.pod_of(token).await {
+        Ok(Some(pod)) => Ok(Caller {
+            repository: ukai_core::knowledge::repository_key(&pod.git),
+            editor: Editor::Agent,
+            workspace: Some(pod.workspace),
+        }),
+        Ok(None) => Err(StatusCode::UNAUTHORIZED),
+        Err(error) => {
+            tracing::warn!(%error, "cannot look up the pod asking for knowledge");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
+}
+
+/// Changes one agent pod's workspace may make to the knowledge per
+/// [`POD_WRITE_WINDOW`]: a session that read something hostile cannot flood
+/// the store with notes that outnumber the real ones.
+const POD_WRITES: usize = 20;
+const POD_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Count a change by `caller`; `false` when its workspace has made too many.
+fn admit_write(gateway: &Gateway, caller: &Caller) -> bool {
+    let Some(workspace) = &caller.workspace else {
+        return true;
+    };
+    let now = std::time::Instant::now();
+    let mut writes = gateway
+        .pod_writes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let recent = writes.entry(workspace.clone()).or_default();
+    recent.retain(|at| now.duration_since(*at) < POD_WRITE_WINDOW);
+    if recent.len() >= POD_WRITES {
+        return false;
+    }
+    recent.push_back(now);
+    true
+}
+
+/// The knowledge store, or why there is none to use.
+fn knowledge_of(gateway: &Gateway) -> Result<&Knowledge, (StatusCode, &'static str)> {
+    let unavailable = |why| (StatusCode::SERVICE_UNAVAILABLE, why);
+    if !gateway.keeps_knowledge {
+        return Err(unavailable(
+            "this gateway keeps no knowledge: set UKAI_KNOWLEDGE_URL",
+        ));
+    }
+    gateway
+        .knowledge
+        .get()
+        .ok_or_else(|| unavailable("the gateway has not reached its knowledge store yet"))
+}
+
+/// The response to a failed knowledge request.
+fn knowledge_failed(error: KnowledgeError) -> Response {
+    match error {
+        KnowledgeError::Refused(problems) => refused(problems),
+        KnowledgeError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        KnowledgeError::Conflict(current) => (
+            StatusCode::CONFLICT,
+            axum::Json(Conflict { current: *current }),
+        )
+            .into_response(),
+        error @ (KnowledgeError::Store(_) | KnowledgeError::Unreadable(_)) => {
+            tracing::warn!(%error, "knowledge request failed");
+            StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
+}
+
+/// What can be asked of one repository's knowledge.
+enum Ask {
+    List,
+    Read(String),
+    Revisions(String),
+    Write(String, NoteWrite),
+    Delete(String, u64),
+    Approve(String, u64),
+}
+
+async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask) -> Response {
+    let caller = match caller {
+        Ok(caller) => caller,
+        Err(status) => return status.into_response(),
+    };
+    let knowledge = match knowledge_of(gateway) {
+        Ok(knowledge) => knowledge,
+        Err(unavailable) => return unavailable.into_response(),
+    };
+    if matches!(ask, Ask::Write(..) | Ask::Delete(..)) && !admit_write(gateway, &caller) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "this workspace has changed too many notes for now",
+        )
+            .into_response();
+    }
+    let repository = &caller.repository;
+    let result = match ask {
+        Ask::List => knowledge
+            .list(repository)
+            .await
+            .map(|list| axum::Json(list).into_response()),
+        Ask::Read(name) => knowledge.get(repository, &name).await.map(found),
+        Ask::Revisions(name) => knowledge
+            .revisions(repository, &name)
+            .await
+            .map(|revisions| found((!revisions.is_empty()).then_some(revisions))),
+        Ask::Write(name, write) => knowledge
+            .put(repository, &name, write, caller.editor, caller.workspace)
+            .await
+            .map(|note| axum::Json(note).into_response()),
+        Ask::Delete(name, revision) => knowledge
+            .delete(repository, &name, revision, caller.editor, caller.workspace)
+            .await
+            .map(|()| axum::Json(json!({})).into_response()),
+        Ask::Approve(name, revision) => {
+            if caller.editor != Editor::User {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            knowledge
+                .approve(repository, &name, revision)
+                .await
+                .map(|note| axum::Json(note).into_response())
+        }
+    };
+    result.unwrap_or_else(knowledge_failed)
+}
+
+/// `?revision=<n>` on a delete or an approval: the revision the person or
+/// agent read.
+#[derive(serde::Deserialize)]
+struct RevisionQuery {
+    revision: u64,
+}
+
+async fn agent_notes(
+    State(gateway): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::List).await
+}
+
+async fn agent_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::Read(name)).await
+}
+
+async fn agent_note_revisions(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::Revisions(name)).await
+}
+
+async fn put_agent_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    axum::Json(write): axum::Json<NoteWrite>,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::Write(name, write)).await
+}
+
+async fn delete_agent_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::Delete(name, query.revision)).await
+}
+
+async fn approve_agent_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::Approve(name, query.revision)).await
+}
+
+async fn workspace_notes(State(gateway): State<Arc<Gateway>>, headers: HeaderMap) -> Response {
+    let caller = workspace_caller(&gateway, &headers).await;
+    answer(&gateway, caller, Ask::List).await
+}
+
+async fn workspace_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = workspace_caller(&gateway, &headers).await;
+    answer(&gateway, caller, Ask::Read(name)).await
+}
+
+async fn workspace_note_revisions(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = workspace_caller(&gateway, &headers).await;
+    answer(&gateway, caller, Ask::Revisions(name)).await
+}
+
+async fn put_workspace_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    axum::Json(write): axum::Json<NoteWrite>,
+) -> Response {
+    let caller = workspace_caller(&gateway, &headers).await;
+    answer(&gateway, caller, Ask::Write(name, write)).await
+}
+
+async fn delete_workspace_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = workspace_caller(&gateway, &headers).await;
+    answer(&gateway, caller, Ask::Delete(name, query.revision)).await
+}
+
 /// The pane key when the client asks for a pod of the pane's own.
 fn pane_key(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
     let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
@@ -567,7 +920,7 @@ async fn prepare(
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<String>();
     let ensure = gateway
         .cluster
-        .ensure_pod(plan, &gateway.relay_image, move |message| {
+        .ensure_pod(plan, &gateway.runtime, move |message| {
             let _ = progress_tx.send(message);
         });
     tokio::pin!(ensure);

@@ -1,0 +1,101 @@
+# SurrealDB keeping the gateway's knowledge: notes about each repository its
+# agents work on, outside the repository. One replica on a volume of its own;
+# only the gateway talks to it.
+#
+# Its root user comes from the Secret `ukai-surrealdb` (keys `user` and
+# `pass`), which this base does not create:
+#   kubectl create secret generic ukai-surrealdb \
+#     --from-literal=user=root --from-literal=pass="$(openssl rand -hex 24)"
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ukai-surrealdb
+  labels:
+    app.kubernetes.io/name: ukai-surrealdb
+spec:
+  replicas: 1
+  serviceName: ukai-surrealdb
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ukai-surrealdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ukai-surrealdb
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: surrealdb
+          image: surrealdb
+          # Kubernetes expands `$(...)` from the environment below, so the
+          # password stays out of the pod spec.
+          args:
+            - start
+            - --bind
+            - 0.0.0.0:8000
+            - --user
+            - $(SURREAL_USER)
+            - --pass
+            - $(SURREAL_PASS)
+            - rocksdb:///data/knowledge
+          env:
+            - name: SURREAL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-surrealdb
+                  key: user
+            - name: SURREAL_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-surrealdb
+                  key: pass
+          ports:
+            - name: surrealdb
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: surrealdb
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ukai-surrealdb
+  labels:
+    app.kubernetes.io/name: ukai-surrealdb
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ukai-surrealdb
+  ports:
+    - name: surrealdb
+      port: 8000
+      targetPort: surrealdb

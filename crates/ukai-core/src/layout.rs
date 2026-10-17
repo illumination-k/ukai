@@ -76,6 +76,15 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schedule: Option<String>,
     },
+    /// A note of the knowledge the gateway behind `[agents.<agent>]` of
+    /// `project` keeps for its repository; `None` while a new one is being
+    /// written and not yet saved.
+    Note {
+        project: ProjectId,
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
 }
 
 /// Where a report pane reads its file from.
@@ -123,7 +132,8 @@ impl PaneContent {
             PaneContent::Empty => None,
             PaneContent::Agent { project, .. }
             | PaneContent::Report { project, .. }
-            | PaneContent::Schedule { project, .. } => Some(project),
+            | PaneContent::Schedule { project, .. }
+            | PaneContent::Note { project, .. } => Some(project),
         }
     }
 }

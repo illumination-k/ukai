@@ -17,7 +17,8 @@ use kube::config::InferConfigError;
 use kube::{Client, Config};
 
 use crate::job::{
-    AGENT_CONTAINER, Plan, RELAY_PORT, RELAY_TOKEN_ENV, REPORTS_PATH, WORKSPACE_CONTAINER, job,
+    AGENT_CONTAINER, GIT_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT, RELAY_TOKEN_ENV, REPORTS_PATH,
+    Runtime, WORKSPACE_CONTAINER, WORKSPACE_LABEL, job,
 };
 
 /// Long enough for a cold node to pull a large image and clone the repository.
@@ -134,19 +135,19 @@ impl Cluster {
     }
 
     /// Return a ready pod for `plan`'s workspace, creating its Job (with the
-    /// relay from `relay_image`) if there is none and replacing it if it has
+    /// relay from `runtime`) if there is none and replacing it if it has
     /// finished. `progress` hears each change in what is being waited for.
     pub async fn ensure_pod(
         &self,
         plan: &Plan,
-        relay_image: &str,
+        runtime: &Runtime,
         progress: impl Fn(String),
     ) -> Result<Pod> {
         let name = plan.job_name();
         let mut last = String::new();
         let waiting = async {
             loop {
-                match self.step(plan, relay_image).await? {
+                match self.step(plan, runtime).await? {
                     Step::Ready(pod) => return Ok(*pod),
                     Step::Waiting(message) => {
                         if message != last {
@@ -181,6 +182,31 @@ impl Cluster {
         Ok(serving(&job, found))
     }
 
+    /// The agent pod whose relay wants `token`: its repository, and its
+    /// workspace. This is how the gateway tells whose knowledge a pod's MCP
+    /// server reads and writes, without trusting anything the pod says.
+    pub async fn pod_of(&self, token: &str) -> Result<Option<PodIdentity>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let found = pods
+            .list(&ListParams::default().labels(&format!("{MANAGED_BY}=ukai")))
+            .await?
+            .items;
+        Ok(found
+            .iter()
+            .find(|pod| relay_token(pod).is_some_and(|wanted| same_secret(wanted, token)))
+            .and_then(|pod| {
+                Some(PodIdentity {
+                    git: pod
+                        .metadata
+                        .annotations
+                        .as_ref()?
+                        .get(GIT_ANNOTATION)?
+                        .clone(),
+                    workspace: pod.metadata.labels.as_ref()?.get(WORKSPACE_LABEL)?.clone(),
+                })
+            }))
+    }
+
     /// Stop the workspace's Job, if there is one, so the next connection
     /// starts a fresh pod: a restart that picks up a newer image or a newer
     /// release the agent's command fetches. The workspace sidecar snapshots
@@ -199,11 +225,11 @@ impl Cluster {
 
     /// Look at the workspace's Job once and move it along: create it, replace
     /// it if it has finished, or report what its pod is waiting for.
-    async fn step(&self, plan: &Plan, relay_image: &str) -> Result<Step> {
+    async fn step(&self, plan: &Plan, runtime: &Runtime) -> Result<Step> {
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
         let name = plan.job_name();
         let Some(existing) = jobs.get_opt(&name).await? else {
-            let job = job(plan, relay_image, &token()?);
+            let job = job(plan, runtime, &token()?);
             match jobs.create(&PostParams::default(), &job).await {
                 Ok(_) => {}
                 // Another pane got there first; use its Job.
@@ -282,6 +308,15 @@ fn serving(job: &Job, pods: Vec<Pod>) -> Option<Pod> {
         .find(|pod| pod.metadata.deletion_timestamp.is_none() && pod_state(pod) == PodState::Ready)
 }
 
+/// Which agent pod a request came from, as the gateway found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodIdentity {
+    /// The repository it works on, as `gateway.toml` names it.
+    pub git: String,
+    /// Its workspace id.
+    pub workspace: String,
+}
+
 /// Where `pod`'s relay serves, and the token it wants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayEndpoint {
@@ -293,22 +328,9 @@ pub struct RelayEndpoint {
 impl RelayEndpoint {
     pub fn of(pod: &Pod) -> Option<Self> {
         let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
-        let agent = pod
-            .spec
-            .as_ref()?
-            .containers
-            .iter()
-            .find(|container| container.name == AGENT_CONTAINER)?;
-        let token = agent
-            .env
-            .iter()
-            .flatten()
-            .find(|env| env.name == RELAY_TOKEN_ENV)?
-            .value
-            .clone()?;
         Some(Self {
             address: format!("{ip}:{RELAY_PORT}"),
-            token,
+            token: relay_token(pod)?.to_owned(),
         })
     }
 
@@ -322,6 +344,32 @@ impl RelayEndpoint {
     pub fn reports_url(&self, suffix: &str) -> String {
         format!("http://{}{REPORTS_PATH}{suffix}", self.address)
     }
+}
+
+/// The token `pod`'s relay wants from its clients.
+fn relay_token(pod: &Pod) -> Option<&str> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .iter()
+        .find(|container| container.name == AGENT_CONTAINER)?
+        .env
+        .iter()
+        .flatten()
+        .find(|env| env.name == RELAY_TOKEN_ENV)?
+        .value
+        .as_deref()
+}
+
+/// Whether `presented` is `secret`, taking as long for every `presented` of
+/// the same length.
+pub fn same_secret(secret: &str, presented: &str) -> bool {
+    presented.len() == secret.len()
+        && presented
+            .bytes()
+            .zip(secret.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }
 
 /// 128 random bits, hex: the relay's token for one Job.

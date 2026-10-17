@@ -307,7 +307,7 @@ async fn execute(
     );
     let id = schedule.id.as_str();
     let pod = tokio::select! {
-        pod = gateway.cluster.ensure_pod(&plan, &gateway.relay_image, |message| {
+        pod = gateway.cluster.ensure_pod(&plan, &gateway.runtime, |message| {
             tracing::debug!(schedule = %id, %message, "waiting for the workspace");
         }) => pod,
         _ = &mut stop => return Outcome::Stopped,
