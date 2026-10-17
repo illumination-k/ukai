@@ -150,6 +150,13 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
   `thought_level` / `mode` など）は表示のヒントとして運ぶだけ。UI は composer の下段にエージェントの並び順で
   出し、エージェントが応答で確定した値だけを表示に反映する。値が `default` の選択肢は、説明に入った実際のモデル
   （claude-agent-acp は既定が解決したモデル名を入れる）を表示し、ないときだけ選択肢の名前を出す。旧来の `modes` / `session/set_mode` は扱わない。
+- モデルと推論レベルには、プロジェクト × エージェントごとの既定を持つ（`state.json` のプロジェクトの
+  `defaults`。例: `"defaults": { "claude": { "model": "opus", "effort": "high" } }`）。option の id はエージェント
+  固有なので、`category` が `model` / `thought_level` のものに当てる。ユーザーが pane で選んだ値がそのまま既定に
+  なり、アプリを閉じている間なら手で書き換えてもよい。新規セッション（`Fresh`、または復元できず新規になった
+  `Unsupported`）の `Ready` の後に、モデル → 推論レベルの順に 1 つずつ `set_config` する。モデルを変えると
+  選べる推論レベルが変わるので、次の値はその応答の `ConfigChanged` で確かめる。すでにその値か選択肢にない値は
+  飛ばし、エージェントが拒んだら残りは送らない。`session/load` / `resume` で続けるセッションの設定には触らない。
 - `ToolCall` / `ToolCallUpdate` はツール呼び出しの `content` のうち `diff`（パス・変更前・変更後）を `FileDiff` として運ぶ。
   更新に `content` があれば差分を置き換え、なければ残す。
 - `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、
@@ -475,8 +482,8 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   パスを id にしないのは、後で worktree やリモートの作業ディレクトリを同じプロジェクトに束ねるため。
   サイドバーでフォルダ選択ダイアログから追加、`ukai <dir>` でも追加（引数なしなら cwd から `ukai.toml` を
   遡って探す）。閉じるとそのプロジェクトの pane とセッションも閉じる。
-- **DB は使わない。** 永続化するのはプロジェクトの登録とタブ/pane の配置（各 agent pane の ACP セッション id を含む）
-  だけで、`~/.local/state/ukai/state.json`（`$UKAI_STATE_DIR` / `$XDG_STATE_HOME/ukai`）の 1 ドキュメント。
+- **DB は使わない。** 永続化するのはプロジェクトの登録（エージェントごとのモデル・推論レベルの既定を含む）と
+  タブ/pane の配置（各 agent pane の ACP セッション id を含む）だけで、`~/.local/state/ukai/state.json`（`$UKAI_STATE_DIR` / `$XDG_STATE_HOME/ukai`）の 1 ドキュメント。
   - `version` 付き。新しい版のファイルや壊れたファイル、不変条件を満たさない配置は読まずに
     `state.json.broken-<unix秒>` へ退避して空の状態で起動する。
   - 変更から 500ms デバウンスして、一時ファイル → `fsync` → `rename` → ディレクトリ `fsync` で書く。

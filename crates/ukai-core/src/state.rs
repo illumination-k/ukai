@@ -1,5 +1,6 @@
-//! What survives a restart: registered projects and the tab/pane layout,
-//! including each agent pane's ACP session id so it can be continued.
+//! What survives a restart: registered projects with the model and effort
+//! their agents' new sessions start with, and the tab/pane layout, including
+//! each agent pane's ACP session id so it can be continued.
 //!
 //! One versioned JSON document, written atomically. Transcripts are not
 //! stored: agents that support `session/load` replay them.
