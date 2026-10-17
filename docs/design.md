@@ -235,7 +235,9 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   Secret 参照、既存 PVC の mount、リソース、`idle_timeout`）を `GET /agents/<id>/acp` の WebSocket で出す。
 - 接続が来たらそのワークスペースの Job を確保して Pod の ready を待ち、Pod 内の relay に中継する。
   待つ間はクライアントに `_ukai/progress`（状況が変わるたび）と `_ukai/heartbeat`（20 秒ごと）を送り、
-  クライアントからのメッセージは溜めておく。
+  クライアントからのメッセージは溜めておく。中継が始まってからは 20 秒ごとにクライアントへ WebSocket の
+  Ping を送る。前段の Ingress や IAP のプロキシは、エージェントが考えている間やユーザーが読んでいる間の
+  静かな接続をアイドルタイムアウトで切るため。
 - レポートは `GET /agents/<id>/reports` と `/agents/<id>/reports/files/<path>` で中継する。ワークスペースの
   決め方（`Ukai-Workspace-Scope` / `Ukai-Workspace`）とトークンは `/acp` と同じだが、**Pod は起こさない**:
   すでにある仕事を読むだけなので、動いている Pod がなければ 410 を返してクライアントにそう言わせる
