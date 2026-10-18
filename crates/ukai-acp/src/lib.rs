@@ -8,11 +8,13 @@
 //!
 //! [`updates`] tells when an agent is behind its latest release.
 //!
-//! [`reports`] and [`schedules`] are what a gateway agent offers besides its
-//! session, both from the endpoint next to its `/acp`: the reports it writes
-//! stay in its pod and are read back, and the gateway runs its schedules.
+//! [`reports`], [`schedules`], and [`knowledge`] are what a gateway agent
+//! offers besides its session, all from the endpoint next to its `/acp`: the
+//! reports it writes stay in its pod and are read back, the gateway runs its
+//! schedules, and it keeps the knowledge of its repository.
 
 mod fs;
+pub mod knowledge;
 pub mod reports;
 pub mod schedules;
 mod secrets;

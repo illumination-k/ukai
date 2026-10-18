@@ -10,3 +10,6 @@
 image = "registry.example.com/agent:latest"
 command = "claude-agent-acp"
 workspace = { git = "https://github.com/org/repo.git" }
+# Agents naming the same project share its knowledge, whatever repository
+# each works on; without it, an agent's knowledge is its repository's.
+# knowledge = "my-project"

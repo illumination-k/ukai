@@ -1,0 +1,10 @@
+# Advisories cargo-audit would fail on that reach only test code; deny.toml
+# has the same ignores and why.
+[advisories]
+ignore = [
+  # Through surrealdb's embedded engine (`kv-mem`), which ukai-gateway's
+  # tests alone use; the gateway links none of it.
+  "RUSTSEC-2026-0194", # quick-xml
+  "RUSTSEC-2026-0195", # quick-xml
+  "RUSTSEC-2023-0071", # rsa
+]

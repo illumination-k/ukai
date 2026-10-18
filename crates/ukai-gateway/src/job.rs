@@ -12,7 +12,8 @@
 //!   sessions that outlive client connections. It asks the sidecar for a
 //!   snapshot after each turn and exits once idle for `idle_timeout`; the
 //!   kubelet then stops the sidecar, whose TERM handler pushes a final
-//!   snapshot.
+//!   snapshot. Its MCP server reaches the knowledge of the repository on
+//!   the gateway at [`GATEWAY_URL_ENV`], with the relay's token.
 
 use std::collections::BTreeMap;
 
@@ -47,6 +48,14 @@ pub const RELAY_PORT: i32 = 7070;
 pub const REPORTS_PATH: &str = "/reports";
 /// The agent container's environment variable holding the relay's token.
 pub const RELAY_TOKEN_ENV: &str = "UKAI_RELAY_TOKEN";
+/// The agent container's environment variable holding where the gateway is
+/// reached from inside the cluster.
+pub const GATEWAY_URL_ENV: &str = "UKAI_GATEWAY_URL";
+/// Annotation on the Job and its pod naming the repository.
+pub const GIT_ANNOTATION: &str = "ukai.dev/git";
+/// Annotation on the Job and its pod naming the knowledge scope, which the
+/// gateway reads to tell whose knowledge a pod may use from its relay token.
+pub const KNOWLEDGE_ANNOTATION: &str = "ukai.dev/knowledge";
 /// The relay binary's path in the image named by [`job`]'s `relay_image`.
 const RELAY_IN_IMAGE: &str = "/usr/local/bin/ukai-relay";
 const RELAY_DIR: &str = "/ukai/bin";
@@ -110,7 +119,18 @@ impl Plan {
     }
 }
 
-fn workspace_id(parts: &[&str]) -> String {
+/// What the gateway itself contributes to every Job.
+#[derive(Debug, Clone)]
+pub struct Runtime {
+    /// The image whose `ukai-relay` the pod runs.
+    pub relay_image: String,
+    /// Where the pod reaches the gateway, e.g. `http://ukai-gateway`; set
+    /// only when the gateway keeps knowledge, which is what pods reach it for.
+    pub gateway_url: Option<String>,
+}
+
+/// A short hash of `parts`, 12 hex digits.
+pub(crate) fn workspace_id(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update(part.as_bytes());
@@ -126,11 +146,11 @@ fn workspace_id(parts: &[&str]) -> String {
         .collect()
 }
 
-/// The Job for `plan`, with `ukai-relay` taken from `relay_image` and
+/// The Job for `plan`, with `ukai-relay` taken from `runtime`'s image and
 /// requiring `relay_token` from clients. Values were validated with the
 /// config, so unparsable durations and secret references cannot reach here;
 /// they fall back to defaults rather than panicking.
-pub fn job(plan: &Plan, relay_image: &str, relay_token: &str) -> Job {
+pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
     let agent = &plan.agent;
     let seconds = |value: &str, default: u64| {
         parse_duration(value)
@@ -162,6 +182,12 @@ pub fn job(plan: &Plan, relay_image: &str, relay_token: &str) -> Job {
         env("UKAI_SNAPSHOT_TRIGGER", "/workspace/.ukai/snapshot"),
         env(RELAY_TOKEN_ENV, relay_token),
     ];
+    agent_env.extend(
+        runtime
+            .gateway_url
+            .as_deref()
+            .map(|url| env(GATEWAY_URL_ENV, url)),
+    );
     agent_env.extend(agent.env.iter().map(|(name, value)| env(name, value)));
     agent_env.extend(secret_env(&agent.secret_env));
     if let Some(token) = github_token {
@@ -221,7 +247,7 @@ pub fn job(plan: &Plan, relay_image: &str, relay_token: &str) -> Job {
 
     let install = Container {
         name: "relay-install".to_owned(),
-        image: Some(relay_image.to_owned()),
+        image: Some(runtime.relay_image.clone()),
         command: Some(vec![
             "cp".into(),
             RELAY_IN_IMAGE.into(),
@@ -302,13 +328,18 @@ pub fn job(plan: &Plan, relay_image: &str, relay_token: &str) -> Job {
 
     let metadata = ObjectMeta {
         labels: Some(plan.labels()),
+        annotations: Some(BTreeMap::from([
+            (GIT_ANNOTATION.to_owned(), agent.workspace.git.clone()),
+            (KNOWLEDGE_ANNOTATION.to_owned(), agent.knowledge_scope()),
+        ])),
         ..ObjectMeta::default()
     };
     Job {
         metadata: ObjectMeta {
             name: Some(plan.job_name()),
             annotations: Some(BTreeMap::from([
-                ("ukai.dev/git".to_owned(), agent.workspace.git.clone()),
+                (GIT_ANNOTATION.to_owned(), agent.workspace.git.clone()),
+                (KNOWLEDGE_ANNOTATION.to_owned(), agent.knowledge_scope()),
                 ("ukai.dev/user".to_owned(), plan.user.clone()),
             ])),
             ..metadata.clone()

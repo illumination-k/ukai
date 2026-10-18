@@ -3,11 +3,14 @@
 //! that outlive client connections. The token clients must present comes
 //! from `UKAI_RELAY_TOKEN`, never an argument, so it stays out of `ps`.
 //!
-//! `ukai-relay mcp [--root DIR]` is the MCP server the relay hands the agent
-//! for each session (see `ukai_relay::mcp`), on stdin/stdout.
+//! `ukai-relay mcp [--root DIR] [--gateway URL]` is the MCP server the relay
+//! hands the agent for each session (see `ukai_relay::mcp`), on
+//! stdin/stdout; with a gateway, and the relay's token in
+//! `UKAI_RELAY_TOKEN`, it also serves the knowledge kept there for its project.
 //!
-//! In a gateway's pod the relay is PID 1, so it runs itself again as its
-//! child and stays as that child's init (`ukai_relay::init`).
+//! In a gateway's pod, `UKAI_GATEWAY_URL` is where the gateway is reached.
+//! There the relay is PID 1, so it runs itself again as its child and stays
+//! as that child's init (`ukai_relay::init`).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -15,6 +18,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use ukai_acp::knowledge::KnowledgeEndpoint;
 use ukai_relay::server::{Options, run};
 
 #[derive(Debug, Parser)]
@@ -38,6 +42,10 @@ struct Cli {
     /// to take a snapshot.
     #[arg(long, env = "UKAI_SNAPSHOT_TRIGGER")]
     snapshot_trigger: Option<PathBuf>,
+    /// The gateway that started this relay's pod, whose knowledge of the
+    /// project the MCP server hands the agent.
+    #[arg(long, env = "UKAI_GATEWAY_URL")]
+    gateway: Option<String>,
     /// The agent and its arguments.
     #[arg(last = true, required = true, value_name = "AGENT")]
     command: Vec<String>,
@@ -50,6 +58,9 @@ enum Mode {
         /// The checkout whose reports it describes.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The gateway keeping the project's knowledge.
+        #[arg(long)]
+        gateway: Option<String>,
     },
 }
 
@@ -87,8 +98,23 @@ fn main() -> ExitCode {
 }
 
 async fn serve(cli: Cli) -> ExitCode {
-    if let Some(Mode::Mcp { root }) = cli.mode {
-        return match ukai_relay::mcp::serve(&root) {
+    let token = std::env::var(ukai_relay::mcp::TOKEN_ENV)
+        .ok()
+        .filter(|t| !t.is_empty());
+    if let Some(Mode::Mcp { root, gateway }) = cli.mode {
+        let notes = match (gateway, &token) {
+            (Some(gateway), Some(token)) => {
+                match KnowledgeEndpoint::for_workspace(&gateway, token) {
+                    Ok(endpoint) => Some(endpoint),
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot reach the gateway's knowledge");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        return match ukai_relay::mcp::serve(&root, notes).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "mcp server failed");
@@ -102,9 +128,8 @@ async fn serve(cli: Cli) -> ExitCode {
     };
     let options = Options {
         listen: cli.listen,
-        token: std::env::var("UKAI_RELAY_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty()),
+        token,
+        gateway: cli.gateway.filter(|url| !url.is_empty()),
         idle_timeout: Duration::from_secs(cli.idle_timeout),
         command: program,
         args: command.collect(),
@@ -159,7 +184,12 @@ mod tests {
     fn mcp_needs_no_agent() {
         let cli = parse(&["mcp", "--root", "/workspace"]).unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            matches!(cli.mode, Some(Mode::Mcp { root }) if root == std::path::Path::new("/workspace"))
+            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None }) if root == std::path::Path::new("/workspace"))
+        );
+        let cli =
+            parse(&["mcp", "--gateway", "http://ukai-gateway"]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(cli.mode, Some(Mode::Mcp { gateway: Some(url), .. }) if url == "http://ukai-gateway")
         );
     }
 

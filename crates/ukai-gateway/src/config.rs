@@ -52,6 +52,10 @@ pub struct KubernetesAgent {
     /// How long the pod outlives its last agent process, e.g. `"30m"`.
     #[serde(default = "KubernetesAgent::default_idle_timeout")]
     pub idle_timeout: String,
+    /// The project whose knowledge the agent reads and writes, shared with
+    /// every agent naming the same one, whatever repository it works on;
+    /// the agent's repository when absent.
+    pub knowledge: Option<String>,
 }
 
 impl KubernetesAgent {
@@ -65,6 +69,14 @@ impl KubernetesAgent {
 
     fn default_idle_timeout() -> String {
         "30m".to_owned()
+    }
+
+    /// What the agent's knowledge is kept under: its project, or else its
+    /// repository.
+    pub fn knowledge_scope(&self) -> String {
+        self.knowledge
+            .clone()
+            .unwrap_or_else(|| ukai_core::knowledge::repository_key(&self.workspace.git))
     }
 }
 
@@ -177,6 +189,10 @@ pub enum Problem {
     InvalidSecretRef { context: String, value: String },
     #[error("{context}: `{path}` must be absolute or start with `~/`")]
     InvalidMountPath { context: String, path: String },
+    #[error(
+        "{context}: `{value}` is not a project name: lowercase letters, digits, and `-`, `_`, `.`, `/`"
+    )]
+    InvalidKnowledgeScope { context: String, value: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -253,6 +269,14 @@ fn validate(context: &str, agent: &KubernetesAgent, problems: &mut Vec<Problem>)
                 value: value.clone(),
             });
         }
+    }
+    if let Some(scope) = &agent.knowledge
+        && !ukai_core::knowledge::valid_scope(scope)
+    {
+        problems.push(Problem::InvalidKnowledgeScope {
+            context: format!("{context}.knowledge"),
+            value: scope.clone(),
+        });
     }
     for (index, mount) in agent.mounts.iter().enumerate() {
         if !(mount.path.starts_with('/') || mount.path.starts_with("~/")) {
