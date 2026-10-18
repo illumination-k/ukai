@@ -9,6 +9,8 @@
 //! `UKAI_RELAY_TOKEN`, it also serves the knowledge kept there for its project.
 //!
 //! In a gateway's pod, `UKAI_GATEWAY_URL` is where the gateway is reached.
+//! There the relay is PID 1, so it runs itself again as its child and stays
+//! as that child's init (`ukai_relay::init`).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -62,8 +64,7 @@ enum Mode {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -72,6 +73,31 @@ async fn main() -> ExitCode {
         )
         .init();
     let cli = Cli::parse();
+    // Before the runtime starts threads that would take the signals init
+    // forwards.
+    #[cfg(target_os = "linux")]
+    if cli.mode.is_none() && ukai_relay::init::is_init() {
+        return match ukai_relay::init::supervise_self() {
+            Ok(exit) => {
+                tracing::info!(code = exit.code, orphans = exit.orphans, "relay exited");
+                ExitCode::from(u8::try_from(exit.code).unwrap_or(1))
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not run the relay as init");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime.block_on(serve(cli)),
+        Err(error) => {
+            tracing::error!(%error, "could not start the runtime");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn serve(cli: Cli) -> ExitCode {
     let token = std::env::var(ukai_relay::mcp::TOKEN_ENV)
         .ok()
         .filter(|t| !t.is_empty());

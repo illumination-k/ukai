@@ -207,6 +207,12 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 
 - エージェントを子プロセスに持ち、`AcpHttpServer` で `/acp` を出す。中核（`hub`）は I/O を持たない状態機械で、
   JSON-RPC の値を受けて送り先付きの出力を返す。
+- Pod の中では relay が PID 1 なので、親を失ったプロセスはすべて relay に渡される。回収しないとゾンビが残り、
+  デーモンになるツール（Bazel のサーバーなど）が pid ファイルの pid を「まだ生きている」と見て作り直せなくなる。
+  そこで PID 1 のときは自分を同じ引数で子として起動し直し、自分は `tini` のような init として残る（`init`、
+  Linux のみ）。`SIGTERM` などを子に転送し、終わった子をすべて回収し、子と同じ終了コードで終わる。Job に
+  `shareProcessNamespace` を足す手もあるが、sidecar（git の資格情報を持つ）のプロセスがエージェントから
+  見えるようになるので使わない。
 - エージェントには `initialize` を 1 回だけ送り、各クライアントの `initialize` には記録で答える
   （`loadSession` を広告する）。
 - セッションごとに `session/update` と、転送したユーザーの prompt を記録する。既知のセッションへの
