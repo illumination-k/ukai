@@ -80,7 +80,8 @@ impl Supervisor {
 
     /// The thread forwarding signals, for tests to signal directly.
     pub fn forwarder(&self) -> Pthread {
-        self.forwarder.as_pthread_t()
+        // std's `pthread_t` is `u64` on musl, the `libc` crate's a pointer.
+        self.forwarder.as_pthread_t() as Pthread
     }
 
     /// Reap every child that ends, orphans handed to this process included,
