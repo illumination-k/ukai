@@ -9,9 +9,8 @@
 //! it, which loads only its own files through the `ukai-report` protocol
 //! (see [`ukai_core::report`]).
 //!
-//! The child view is native, so it sits above the app's DOM: the pane keeps it
-//! over its body by polling the body's position, hides it while the command
-//! palette is open, and drops it on unmount.
+//! The child view is native, so it sits above the app's DOM; see
+//! [`crate::child_view`] for how the pane keeps it in place.
 //!
 //! A report of a gateway agent's workspace is in a pod, not on this machine,
 //! so the same protocol handler fetches it through the gateway instead of
@@ -21,12 +20,9 @@
 //! differs, and what may be read is then the relay's decision.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use dioxus::desktop::wry::dpi::{LogicalPosition, LogicalSize};
 use dioxus::desktop::wry::http::{Request, Response, header};
 use dioxus::desktop::wry::{
     NewWindowResponse, Rect, RequestAsyncResponder, WebView, WebViewBuilder,
@@ -38,6 +34,7 @@ use ukai_core::markdown::LINK_SCHEMES;
 use ukai_core::report::{self, CONFINED_CSP, IMAGE_VIEW_QUERY, ReportFile, ReportKind};
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource};
 
+use crate::child_view::{ChildView, use_child_view};
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, project_context};
@@ -52,9 +49,6 @@ const ORIGIN: &str = if cfg!(any(target_os = "windows", target_os = "android")) 
 } else {
     "ukai-report://localhost"
 };
-
-/// How often the view follows the pane's position.
-const POLL: Duration = Duration::from_millis(150);
 
 /// How often a local report is checked for changes: one `stat`, so often.
 const WATCH_LOCAL: Duration = Duration::from_millis(150);
@@ -206,85 +200,13 @@ fn open_source(
 /// in the DOM is drawn over the pane, so the view hides.
 #[component]
 fn ReportSurface(source: Source, covered: Signal<bool>) -> Element {
-    let view = use_hook(|| Rc::new(RefCell::new(None::<WebView>)));
-    let mut host = use_signal(|| None::<Rc<MountedData>>);
-    let mut failure = use_signal(|| None::<String>);
-
-    // Hide at once; the poll below shows the view again once uncovered.
-    use_effect({
-        let view = view.clone();
-        move || {
-            if covered()
-                && let Some(webview) = view.borrow().as_ref()
-            {
-                let _ = webview.set_visible(false);
-            }
-        }
-    });
-
-    use_drop({
-        let view = view.clone();
-        move || drop(view.borrow_mut().take())
-    });
-
-    // Keep the view over the pane's body, which moves with every split,
-    // tab change, and window resize.
-    use_future({
-        let view = view.clone();
+    let ChildView {
+        view,
+        mut host,
+        failure,
+    } = use_child_view(covered, {
         let source = source.clone();
-        move || {
-            let view = view.clone();
-            let source = source.clone();
-            async move {
-                let window = dioxus::desktop::window();
-                let mut placed = None;
-                loop {
-                    let element = host.peek().clone();
-                    if let Some(element) = element
-                        && let Ok(rect) = element.get_client_rect().await
-                    {
-                        let window_size = window.window.inner_size();
-                        let hidden = *covered.peek();
-                        let key = (
-                            rect.origin.x,
-                            rect.origin.y,
-                            rect.size.width,
-                            rect.size.height,
-                            window_size,
-                            hidden,
-                        );
-                        if placed != Some(key) {
-                            placed = Some(key);
-                            let bounds = Rect {
-                                position: LogicalPosition::new(rect.origin.x, rect.origin.y).into(),
-                                size: LogicalSize::new(rect.size.width, rect.size.height).into(),
-                            };
-                            let visible =
-                                !hidden && rect.size.width > 0.0 && rect.size.height > 0.0;
-                            let mut slot = view.borrow_mut();
-                            match slot.as_ref() {
-                                Some(webview) => {
-                                    let _ = webview.set_bounds(bounds);
-                                    let _ = webview.set_visible(visible);
-                                }
-                                None => match build(&source, bounds, &window.window) {
-                                    Ok(webview) => {
-                                        let _ = webview.set_visible(visible);
-                                        *slot = Some(webview);
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(%error, "cannot open a report view");
-                                        failure.set(Some(error.to_string()));
-                                        return;
-                                    }
-                                },
-                            }
-                        }
-                    }
-                    tokio::time::sleep(POLL).await;
-                }
-            }
-        }
+        move |bounds, window| build(&source, bounds, window)
     });
 
     // Follow the report itself: an agent that rewrites it reloads the view.

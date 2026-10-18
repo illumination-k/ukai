@@ -82,12 +82,20 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // The agent's reports live in the directory it works in, and the relay
     // is the only thing that can read them; see `crate::reports`.
     let cwd = std::env::current_dir().ok();
+    // The servers the agent runs in the pod are as out of reach as its
+    // reports; the MCP server records the ones it asks the user to look
+    // at in `previews`. See `crate::ports`.
+    let previews = previews_file();
     let token = options.token.clone().map(Arc::<str>::from);
     let router = server
         .into_router()
         .merge(crate::reports::router(
             cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
         ))
+        .merge(crate::ports::router(crate::ports::Ports {
+            own: options.listen.port(),
+            previews: previews.clone(),
+        }))
         .layer(middleware::from_fn(move |request, next| {
             authorize(token.clone(), request, next)
         }));
@@ -139,7 +147,12 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     };
     let mcp_servers = match (&cwd, std::env::current_exe()) {
         (Some(root), Ok(program)) => {
-            vec![crate::mcp::server_entry(&program, root, gateway.as_ref())]
+            vec![crate::mcp::server_entry(
+                &program,
+                root,
+                gateway.as_ref(),
+                Some(&previews),
+            )]
         }
         (_, Err(error)) => {
             tracing::warn!(%error, "cannot find the relay binary; sessions get no ukai MCP server");
@@ -201,12 +214,24 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Where this relay's MCP servers record previews: a file of its own under
+/// the temporary directory, emptied at start, so the previews listed are
+/// this relay's and the checkout stays clean.
+fn previews_file() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ukai-relay-{}", std::process::id()));
+    let file = dir.join("previews.jsonl");
+    if let Err(error) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&file, b"")) {
+        tracing::warn!(%error, path = %file.display(), "cannot keep previews");
+    }
+    file
+}
+
 async fn authorize(token: Option<Arc<str>>, request: Request, next: Next) -> Response {
     let Some(token) = token else {
         return next.run(request).await;
     };
-    // `/health` stays open for the kubelet's probes; `/acp` and the reports
-    // of the agent's checkout both want the token.
+    // `/health` stays open for the kubelet's probes; `/acp`, the reports
+    // of the agent's checkout, and its ports all want the token.
     if request.uri().path().starts_with("/health") {
         return next.run(request).await;
     }

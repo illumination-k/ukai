@@ -248,6 +248,38 @@ mod tests {
         assert_eq!(serde_json::from_str::<PaneContent>(&json).ok(), Some(plain));
     }
 
+    #[test]
+    fn browser_panes_round_trip() {
+        let mut projects = Projects::default();
+        let project = projects.add(Path::new("/work/ukai"));
+        let local = PaneContent::Browser {
+            project: project.clone(),
+            port: 5173,
+            path: "/".into(),
+            source: ReportSource::Project,
+        };
+        let json = serde_json::to_string(&local).unwrap_or_default();
+        assert_eq!(
+            json,
+            format!(r#"{{"kind":"browser","project":"{project}","port":5173,"path":"/"}}"#)
+        );
+        assert_eq!(serde_json::from_str::<PaneContent>(&json).ok(), Some(local));
+        let remote = PaneContent::Browser {
+            project,
+            port: 3000,
+            path: "/docs?q=1".into(),
+            source: ReportSource::Agent {
+                agent: "claude".into(),
+                workspace: None,
+            },
+        };
+        let json = serde_json::to_string(&remote).unwrap_or_default();
+        assert_eq!(
+            serde_json::from_str::<PaneContent>(&json).ok(),
+            Some(remote)
+        );
+    }
+
     #[rstest]
     fn round_trips(dir: TempDir) {
         let path = dir.path().join("state.json");

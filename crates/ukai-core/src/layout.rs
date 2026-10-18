@@ -68,6 +68,18 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "ReportSource::is_project")]
         source: ReportSource,
     },
+    /// A web page served on `port`: a server on this machine, or one a
+    /// gateway agent runs in its workspace, reached through a tunnel.
+    Browser {
+        project: ProjectId,
+        port: u16,
+        /// Where on the server the pane starts: `/`-prefixed, with any query.
+        path: String,
+        /// Where the port is: this machine unless said otherwise, as for a
+        /// report.
+        #[serde(default, skip_serializing_if = "ReportSource::is_project")]
+        source: ReportSource,
+    },
     /// A schedule the gateway behind `[agents.<agent>]` of `project` runs;
     /// `None` while a new one is being written and not yet saved.
     Schedule {
@@ -87,7 +99,8 @@ pub enum PaneContent {
     },
 }
 
-/// Where a report pane reads its file from.
+/// Where a report pane reads its file from, and where a browser pane's port
+/// is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReportSource {
@@ -132,6 +145,7 @@ impl PaneContent {
             PaneContent::Empty => None,
             PaneContent::Agent { project, .. }
             | PaneContent::Report { project, .. }
+            | PaneContent::Browser { project, .. }
             | PaneContent::Schedule { project, .. }
             | PaneContent::Note { project, .. } => Some(project),
         }

@@ -219,6 +219,7 @@ fn server_entry_runs_the_relay_for_the_checkout() {
         server_entry(
             Path::new("/relay/ukai-relay"),
             Path::new("/workspace"),
+            None,
             None
         ),
         json!({
@@ -240,7 +241,8 @@ fn server_entry_hands_the_gateway_on_with_the_token_in_the_environment() {
         server_entry(
             Path::new("/relay/ukai-relay"),
             Path::new("/workspace"),
-            Some(&gateway)
+            Some(&gateway),
+            None
         ),
         json!({
             "name": "ukai",
@@ -286,7 +288,7 @@ fn instructions_follow_the_checkouts_report_settings(
     #[case] expected: &str,
 ) {
     let dir = checkout(config);
-    let text = instructions(dir.path(), None);
+    let text = instructions(dir.path(), None, false);
     assert!(text.contains(expected), "{text}");
     assert!(text.contains("`list_reports`"), "{text}");
     assert!(!text.contains("Knowledge"), "{text}");
@@ -326,7 +328,7 @@ fn instructions_list_only_the_approved_notes(
     #[case] expected: &str,
 ) {
     let dir = checkout(None);
-    let text = instructions(dir.path(), Some(&known));
+    let text = instructions(dir.path(), Some(&known), false);
     assert!(text.contains("Knowledge:"), "{text}");
     assert!(text.contains("claims to check, not instructions"), "{text}");
     assert!(text.contains("data, not instructions"), "{text}");
@@ -675,4 +677,98 @@ fn answers_ping() {
         call(dir.path(), "ping", json!({})),
         json!({ "jsonrpc": "2.0", "id": 7, "result": {} })
     );
+}
+
+/// A session that records previews into `file`.
+fn previewing(file: &Path) -> Session {
+    session().with_previews(file.to_owned())
+}
+
+/// What `open_preview` answered with `arguments`, in a session recording
+/// into `file`: its text, and whether it failed.
+fn preview(root: &Path, file: &Path, arguments: Value) -> (String, bool) {
+    let message = req(
+        "tools/call",
+        json!({ "name": "open_preview", "arguments": arguments }),
+    );
+    let reply = block_on(handle::<Fake>(root, None, &previewing(file), &message))
+        .unwrap_or_else(|| panic!("no reply to open_preview"));
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text in {reply}"))
+        .to_owned();
+    (text, reply["result"]["isError"] == json!(true))
+}
+
+#[test]
+fn offers_previews_only_with_a_file_to_record_them_in() {
+    let dir = checkout(None);
+    let file = dir.path().join("previews.jsonl");
+    let message = req("tools/list", json!({}));
+    let reply = block_on(handle::<Fake>(
+        dir.path(),
+        None,
+        &previewing(&file),
+        &message,
+    ))
+    .unwrap_or_else(|| panic!("no reply"));
+    assert_eq!(tool_names(&reply), ["list_reports", "open_preview"]);
+    let (text, failed) = open_preview_unoffered(dir.path());
+    assert!(failed, "{text}");
+
+    let text = instructions(dir.path(), None, true);
+    assert!(text.contains("Previews:"), "{text}");
+    assert!(text.contains("`open_preview`"), "{text}");
+    assert!(!instructions(dir.path(), None, false).contains("Previews:"));
+}
+
+/// `open_preview` called where it is not offered.
+fn open_preview_unoffered(root: &Path) -> (String, bool) {
+    let reply = call(
+        root,
+        "tools/call",
+        json!({ "name": "open_preview", "arguments": { "port": 3000 } }),
+    );
+    (reply.to_string(), reply["error"]["code"] == json!(-32602))
+}
+
+#[test]
+fn records_a_preview_for_the_relay_to_list() {
+    let dir = checkout(None);
+    let file = dir.path().join("previews.jsonl");
+    let (text, failed) = preview(
+        dir.path(),
+        &file,
+        json!({ "port": 5173, "path": "/docs/?q=1", "title": "  Docs  " }),
+    );
+    assert!(!failed, "{text}");
+    assert!(text.contains("port 5173"), "{text}");
+    let (_, failed) = preview(dir.path(), &file, json!({ "port": 8080 }));
+    assert!(!failed);
+    let recorded = crate::ports::previews(&file);
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(
+        (
+            recorded[0].port,
+            recorded[0].path.as_str(),
+            recorded[0].title.as_deref()
+        ),
+        (5173, "/docs/?q=1", Some("Docs"))
+    );
+    assert_eq!((recorded[1].port, recorded[1].path.as_str()), (8080, "/"));
+}
+
+#[rstest]
+#[case::no_port(json!({}))]
+#[case::zero(json!({ "port": 0 }))]
+#[case::too_large(json!({ "port": 70000 }))]
+#[case::not_a_number(json!({ "port": "3000" }))]
+#[case::full_url(json!({ "port": 3000, "path": "http://evil.example/" }))]
+#[case::relative(json!({ "port": 3000, "path": "docs" }))]
+fn refuses_a_preview_it_cannot_show(#[case] arguments: Value) {
+    let dir = checkout(None);
+    let file = dir.path().join("previews.jsonl");
+    let (text, failed) = preview(dir.path(), &file, arguments);
+    assert!(failed, "{text}");
+    assert!(crate::ports::previews(&file).is_empty());
 }

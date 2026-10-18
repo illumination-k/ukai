@@ -14,6 +14,7 @@ use crate::knowledge::KnowledgeList;
 use crate::layout::{Workbench, launch_agent, transport_label};
 use crate::palette::Palette;
 use crate::persist::use_autosave;
+use crate::ports::{FollowPorts, PortList};
 use crate::projects::{
     AppSignals, OpenAgent, Paths, add_project, load_config, open_agents, pick_and_add_project,
     reload_project, remove_project,
@@ -48,6 +49,7 @@ pub fn App() -> Element {
             layout: Signal::new(state.layout),
             sessions: Signal::new(HashMap::new()),
             reports: Signal::new(HashMap::new()),
+            ports: Signal::new(HashMap::new()),
             palette: Signal::new(false),
             schedule_names: Signal::new(HashMap::new()),
             schedule_revision: Signal::new(0),
@@ -90,6 +92,7 @@ pub fn App() -> Element {
             Sidebar {}
             Workbench {}
             Follow {}
+            FollowPorts {}
             if palette() {
                 Palette {}
             }
@@ -136,6 +139,8 @@ fn Sidebar() -> Element {
     let schedule_project_name = selected_name.clone();
     let knowledge_project = selected.clone();
     let knowledge_project_name = selected_name.clone();
+    let port_project = selected.clone();
+    let port_project_name = selected_name.clone();
     drop(projects);
     let agents: Result<Vec<(String, &'static str)>, String> = match &selected {
         None => Ok(Vec::new()),
@@ -292,6 +297,9 @@ fn Sidebar() -> Element {
             }
             if let (Some(project), Some(name)) = (report_project, report_project_name) {
                 ReportList { key: "{project}", project, name }
+            }
+            if let (Some(project), Some(name)) = (port_project, port_project_name) {
+                PortList { key: "ports-{project}", project, name }
             }
             div { class: "sidebar-footer",
                 for (action, label) in [

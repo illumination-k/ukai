@@ -16,6 +16,8 @@ use kube::api::{
 use kube::config::InferConfigError;
 use kube::{Client, Config};
 
+use ukai_acp::ports::{FORWARD_PATH, PORTS_PATH};
+
 use crate::job::{
     AGENT_CONTAINER, GIT_ANNOTATION, KNOWLEDGE_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT,
     RELAY_TOKEN_ENV, REPORTS_PATH, Runtime, WORKSPACE_CONTAINER, WORKSPACE_LABEL, job,
@@ -345,6 +347,16 @@ impl RelayEndpoint {
     pub fn reports_url(&self, suffix: &str) -> String {
         format!("http://{}{REPORTS_PATH}{suffix}", self.address)
     }
+
+    /// What listens in the pod, and the previews its agent asked for.
+    pub fn ports_url(&self) -> String {
+        format!("http://{}{PORTS_PATH}", self.address)
+    }
+
+    /// The WebSocket carrying one connection to `port` in the pod.
+    pub fn forward_url(&self, port: u16) -> String {
+        format!("ws://{}{FORWARD_PATH}/{port}", self.address)
+    }
 }
 
 /// The token `pod`'s relay wants from its clients.
@@ -535,6 +547,11 @@ mod tests {
         let endpoint = RelayEndpoint::of(&pod).unwrap_or_else(|| panic!("the pod has an address"));
         assert_eq!(endpoint.acp_url(), "ws://10.0.0.7:7070/acp");
         assert_eq!(endpoint.reports_url(""), "http://10.0.0.7:7070/reports");
+        assert_eq!(endpoint.ports_url(), "http://10.0.0.7:7070/ports");
+        assert_eq!(
+            endpoint.forward_url(5173),
+            "ws://10.0.0.7:7070/forward/5173"
+        );
         assert_eq!(
             endpoint.reports_url("/files/reports/run%201.html"),
             "http://10.0.0.7:7070/reports/files/reports/run%201.html"
