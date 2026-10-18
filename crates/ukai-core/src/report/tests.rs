@@ -234,6 +234,47 @@ fn a_tree_lists_the_same_files_as_a_pane() {
 }
 
 #[test]
+fn a_tree_names_every_file_a_report_may_load() {
+    let root = project();
+    let tree = tree(&root, &["reports", "missing"]);
+    let files = tree.files();
+    let paths: Vec<_> = files.iter().map(|file| file.path.clone()).collect();
+    assert_eq!(
+        paths,
+        [
+            "reports/2026/run 1.html",
+            "reports/data.bin",
+            "reports/img/plot.png",
+            "reports/グラフ.svg",
+        ]
+        .map(PathBuf::from)
+    );
+    // The version is what serving the file says of it.
+    let served = tree.serve("/reports/img/plot.png");
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file.path == Path::new("reports/img/plot.png"))
+            .map(|file| file.version.clone()),
+        served.etag
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_names_no_symlinks() {
+    let root = project();
+    std::os::unix::fs::symlink(root.path().join(".env"), root.path().join("reports/env"))
+        .unwrap_or_else(|e| panic!("symlink: {e}"));
+    let tree = tree(&root, &["reports"]);
+    assert!(
+        tree.files()
+            .iter()
+            .all(|file| file.path != Path::new("reports/env"))
+    );
+}
+
+#[test]
 fn a_tree_serves_reports_by_project_relative_path() {
     let root = project();
     let tree = tree(&root, &["reports"]);

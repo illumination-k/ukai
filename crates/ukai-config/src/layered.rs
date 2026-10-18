@@ -56,14 +56,42 @@ pub fn merge(user: Config, project: Config) -> Config {
     }
 }
 
+/// The environment variable naming report directories on top of
+/// `[reports] dirs`, separated as in `PATH` and relative to the project
+/// root: how a pod's image or a gateway agent's environment adds reports to
+/// a checkout whose `ukai.toml` declares none.
+pub const REPORT_DIRS_ENV: &str = "UKAI_REPORT_DIRS";
+
 /// Load the configuration for the project at `root`: the user file (if any)
-/// overlaid with the project's `ukai.toml` (if any), validated together.
+/// overlaid with the project's `ukai.toml` (if any), with the report
+/// directories of [`REPORT_DIRS_ENV`] added, validated together.
 pub fn load_layered(user_file: Option<&Path>, root: &Path) -> Result<Config, ConfigError> {
+    load_layered_with(user_file, root, |name| std::env::var(name).ok())
+}
+
+/// [`load_layered`], reading the environment through `env`.
+pub fn load_layered_with(
+    user_file: Option<&Path>,
+    root: &Path,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Config, ConfigError> {
     let user = read_optional(user_file)?;
     let project = read_optional(Some(&root.join(FILE_NAME)))?;
     let mut problems = validate::project_only(&project);
-    let merged = merge(user, project);
+    let mut merged = merge(user, project);
     problems.extend(validate::validate(&merged));
+    if let Some(value) = env(REPORT_DIRS_ENV) {
+        for dir in std::env::split_paths(&value) {
+            if dir.as_os_str().is_empty() || merged.reports.dirs.contains(&dir) {
+                continue;
+            }
+            if validate::inside_project(&dir) {
+                merged.reports.dirs.push(dir);
+            } else {
+                problems.push(crate::Problem::EnvReportDirOutsideProject(dir));
+            }
+        }
+    }
     if problems.is_empty() {
         Ok(merged)
     } else {
@@ -205,6 +233,50 @@ mod tests {
             load_layered(Some(&user_file), &root),
             Err(ConfigError::Invalid(problems)) if problems == [Problem::KeybindingsInProject]
         ));
+    }
+
+    #[rstest]
+    #[case::adds("out:build/reports", &["reports", "out", "build/reports"])]
+    #[case::skips_repeats_and_empty("reports::out:", &["reports", "out"])]
+    #[case::unset_keeps_the_file(None, &["reports"])]
+    fn report_dirs_come_from_the_environment_too(
+        #[case] value: impl Into<Option<&'static str>>,
+        #[case] expected: &[&str],
+    ) {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            "[reports]\ndirs = [\"reports\"]\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let value = value.into();
+        let vars: Vec<(&str, &str)> = value.map(|v| (REPORT_DIRS_ENV, v)).into_iter().collect();
+        let merged =
+            load_layered_with(None, dir.path(), env(&vars)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            merged.reports.dirs,
+            expected.iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn report_dirs_from_the_environment_stay_inside_the_project() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let merged = load_layered_with(
+            None,
+            dir.path(),
+            env(&[(REPORT_DIRS_ENV, "reports:../elsewhere:/etc")]),
+        );
+        assert!(
+            matches!(
+                &merged,
+                Err(ConfigError::Invalid(problems)) if *problems == [
+                    Problem::EnvReportDirOutsideProject(PathBuf::from("../elsewhere")),
+                    Problem::EnvReportDirOutsideProject(PathBuf::from("/etc")),
+                ]
+            ),
+            "{merged:?}"
+        );
     }
 
     #[test]

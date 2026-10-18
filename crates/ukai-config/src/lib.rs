@@ -12,7 +12,10 @@ mod validate;
 use std::path::{Path, PathBuf};
 
 pub use interpolate::{InterpolateError, Source, interpolate};
-pub use layered::{USER_FILE_NAME, config_dir, load_layered, load_user, merge, state_dir};
+pub use layered::{
+    REPORT_DIRS_ENV, USER_FILE_NAME, config_dir, load_layered, load_layered_with, load_user, merge,
+    state_dir,
+};
 pub use schema::{
     AgentSpec, Config, Decision, Keys, PermissionRule, Project, Reports, Voice, WorkspaceScope,
 };

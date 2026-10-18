@@ -6,6 +6,7 @@ kind: Kustomization
 resources:
   - gateway.yaml
   - surrealdb.yaml
+  - rustfs.yaml
 images:
   - name: ukai-runtime
     newName: ghcr.io/illumination-k/ukai-runtime
@@ -14,6 +15,9 @@ images:
   - name: surrealdb
     newName: surrealdb/surrealdb
     newTag: v3.3.4
+  - name: rustfs
+    newName: rustfs/rustfs
+    newTag: 1.0.1
 configMapGenerator:
   - name: ukai-gateway
     files:

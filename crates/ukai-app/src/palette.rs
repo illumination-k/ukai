@@ -89,7 +89,7 @@ fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
     // What the gateway agents' workspaces last listed; `remote_reports`
     // keeps it, so the palette does not wait on the network to open.
     for (workspace, listing) in app.reports.peek().iter() {
-        let Listing::Reports(paths) = listing else {
+        let (Listing::Reports(paths) | Listing::Saved { paths, .. }) = listing else {
             continue;
         };
         let project = projects

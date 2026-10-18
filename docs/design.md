@@ -230,7 +230,8 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   `GET /reports/files/<プロジェクト相対パス>` が 1 ファイルを `ETag` 付きで返す。配信範囲は
   `ukai_core::report::ReportTree` が `reports.dirs` の中だけに限る（`..`・エンコードされた `..`・
   外に出るシンボリックリンクは拒否）。設定はリクエストごとに読むので、Pod の中で `ukai.toml` を
-  直せばそのまま効く。`/health` 以外はトークンが必要。
+  直せばそのまま効く。`GET /reports/tree` はアセットも含めたツリーの全ファイルを `ETag` 付きで返す
+  （gateway がコピーを取るため。後述「レポートのコピー」）。`/health` 以外はトークンが必要。
 - エージェントは ukai に見られていることも、`reports.dirs` に書いた HTML がユーザーのサイドバーに出ることも
   知らない。そこで `session/new` / `load` / `resume` の `mcpServers` に relay 自身の MCP サーバー
   （`ukai-relay mcp --root <作業ディレクトリ>`、名前は `ukai`。`mcp`）を足す（同名のクライアントの指定は置き換える）。
@@ -257,8 +258,8 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   静かな接続をアイドルタイムアウトで切るため。
 - レポートは `GET /agents/<id>/reports` と `/agents/<id>/reports/files/<path>` で中継する。ワークスペースの
   決め方（`Ukai-Workspace-Scope` / `Ukai-Workspace`）とトークンは `/acp` と同じだが、**Pod は起こさない**:
-  すでにある仕事を読むだけなので、動いている Pod がなければ 410 を返してクライアントにそう言わせる
-  （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
+  すでにある仕事を読むだけなので、動いている Pod がなければコピー（後述「レポートのコピー」）から答え、
+  それもなければ 410 を返してクライアントにそう言わせる（イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
 - ポートは `GET /agents/<id>/ports`（一覧）と `GET /agents/<id>/forward/<port>`（WebSocket）で中継する。
   ワークスペースの決め方・トークン・Pod を起こさないことはレポートと同じ。forward はクライアントを upgrade する
@@ -464,6 +465,10 @@ globs = [
 allow_network = false # true でレポートからの外部読み込み（CDN の JS など）を許す
 ```
 
+環境変数 `UKAI_REPORT_DIRS`（`PATH` と同じ区切り、プロジェクトルート相対）があれば、そのディレクトリを
+`reports.dirs` に足す（`ukai_config::load_layered`。外に出る指定は同じく検証エラー）。`ukai.toml` を持たない
+リポジトリでも、Pod のイメージや `gateway.toml` のエージェントの `env` でレポートを出せるようにするため。
+
 `[layouts]` / `[commands]` のような配置の宣言は意図的に持たない（未知のキーとして拒否する）。
 
 ### タブと pane（実行時）
@@ -541,12 +546,37 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
   エージェント id とワークスペースを残す。
 - `ukai-app/src/remote_reports.rs` が、開いている gateway エージェント pane のワークスペースの一覧を
   3 秒ごとに読み直して 1 つの signal に置く。サイドバーもパレットもそれを読むので、パレットは
-  ネットワークを待たずに開く。Pod が idle で落ちていれば「not running」と出す。
+  ネットワークを待たずに開く。Pod が idle で落ちていれば、コピーがあればその一覧を「Saved <時刻> · not running」と、
+  なければ「not running」と出す。
 - pane の描画は手元のレポートと同じ（IPC ハンドラのない子 WebView、`incognito`、同じ CSP）。違うのは
   `ukai-report` プロトコルの応答がファイルの読み出しではなく gateway への fetch になるところだけで、
   ネットワークを待つので非同期ハンドラ（`with_asynchronous_custom_protocol`）で答える。
 - URL のパス空間は Pod の checkout のルート。`../img/plot.png` のような相対参照はディスク上と同じに解決し、
   レポートのディレクトリの外に出たものは relay が 403 で拒否する。
+
+### レポートのコピー（S3）
+
+Pod は idle で落ちるので、そのままでは落ちた後のレポートが読めない（410）。スケジュールの run のように
+Pod が終わる前提のワークスペースでは、成果のレポートが Pod と一緒に消える。そこで gateway が、S3 の
+バケット（`UKAI_REPORTS_BUCKET`。`deploy/gateway` では RustFS）にワークスペースごとのコピーを持つ
+（`ukai-gateway/src/archive.rs`）。
+
+- **読み出しの API は変えない。** Pod が動いていれば今まで通り relay から（書き換えに 2 秒で追従）、
+  動いていなければ gateway がコピーから答える。コピーからの一覧には `synced`（コピーを最後に更新した時刻）が
+  付き、サイドバーは「Saved <時刻> · not running」と出す。コピーもなければ 410。
+- **コピーするのは gateway。** ready なワークスペース Pod の relay から 30 秒ごとに `/reports/tree` を読み、
+  版（`ETag`）が変わったファイルだけを取り直して置き、消えたファイルは消す。restart で Pod を止める前にも
+  1 回取る。relay の idle 終了はターンが終わって `idle_timeout` 経ってからなので、その間に追いつく。
+- **資格情報は gateway だけが持つ。** Pod には渡さない（エージェントの書いたものは信頼しないので、
+  バケットを触らせない。git の資格情報をサイドカーだけが持つのと同じ考え）。relay の読み取り専用の
+  ルートを経由するので、配信範囲（`reports.dirs` の中だけ）も relay の判定のまま。
+- バケットの中は `<ワークスペース id>/manifest.json`（relay の一覧と、コピーした各ファイルの版）と
+  `<ワークスペース id>/files/<checkout 相対パス>`（content type 付き）。コピーからの読み出しもパスを
+  1 回だけデコードし、`..` などの名前でない区切りは拒否する。
+- 接続は `object_store`（標準の `AWS_*` 変数。`http://` のエンドポイントはそのまま許す）。起動時に
+  バケットがなければ作る（RustFS は空で始まるため。作れない資格情報なら警告だけ）。1 ファイル 32 MiB、
+  1 ワークスペース 2000 ファイルまで。期限は持たないので、古いワークスペースのコピーはバケットの
+  lifecycle ルールで消す。
 
 ### 描画方式
 
@@ -782,6 +812,7 @@ pane の上部に戻る・進む・再読込・アドレス（オリジン上の
 - `_ukai/turn_state` / `_ukai/progress` を、ACP v2 の `state_update` やリモートトランスポートの仕様が
   固まったらそちらに置き換える。
 - snapshot の `refs/ukai/wip/*` を各ホスティングが受けるか。ブランチにすると CI の push トリガーに乗る。
+- レポートのコピーを Pod が落ちていなくても見せるか（relay が遅いときなど）、版を残すか（今は最新だけ）。
 - gateway の外部公開と認証。port-forward のほか、認証するリバースプロキシ（Ingress の前の IAP など、
   bearer token を検証するもの）越しに `wss://` で使えることを確認済み。その場合 `Authorization` は
   プロキシのトークンに使うので、gateway 自身の `UKAI_GATEWAY_TOKEN` は設定しない。トークンには期限があり、

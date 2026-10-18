@@ -21,6 +21,19 @@ use ukai_config::Reports;
 /// How many files [`list`] returns at most, so a huge tree cannot stall the UI.
 pub const MAX_LISTED: usize = 500;
 
+/// The most files [`ReportTree::files`] names, assets included.
+pub const MAX_TREE_FILES: usize = 2000;
+
+/// A file of a [`ReportTree`], report or asset, with something that changes
+/// when its contents do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeFile {
+    /// Relative to the project root.
+    pub path: PathBuf,
+    /// The file's validator, as its `ETag` when served.
+    pub version: String,
+}
+
 /// Query that asks [`ReportFile::serve`] for the page framing an image.
 pub const IMAGE_VIEW_QUERY: &str = "ukai-view";
 
@@ -287,6 +300,50 @@ impl ReportTree {
     /// The reports to offer, newest first, as [`list_detailed`].
     pub fn list(&self) -> Vec<Listed> {
         list_detailed(&self.root, &self.reports)
+    }
+
+    /// Every file a report may load, reports and assets alike, so the whole
+    /// tree can be copied elsewhere: what is in the report directories,
+    /// without hidden files and directories or symlinks, up to
+    /// [`MAX_TREE_FILES`].
+    pub fn files(&self) -> Vec<TreeFile> {
+        let mut found = Vec::new();
+        for base in &self.bases {
+            let Ok(prefix) = base.strip_prefix(&self.root) else {
+                continue;
+            };
+            let mut pending = vec![PathBuf::new()];
+            while let Some(relative) = pending.pop() {
+                let Ok(entries) = std::fs::read_dir(base.join(&relative)) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with('.') {
+                        continue;
+                    }
+                    let path = relative.join(&name);
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if file_type.is_dir() {
+                        pending.push(path);
+                    } else if file_type.is_file() && found.len() < MAX_TREE_FILES {
+                        let len = entry.metadata().map_or(0, |meta| meta.len());
+                        let len = usize::try_from(len).unwrap_or(usize::MAX);
+                        if let Some(version) = etag(&entry.path(), len) {
+                            found.push(TreeFile {
+                                path: prefix.join(path),
+                                version,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        found.dedup_by(|a, b| a.path == b.path);
+        found
     }
 
     /// Answer a request for a project-relative URL path. 403 for anything

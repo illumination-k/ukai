@@ -74,6 +74,12 @@ impl Workspace {
 pub enum Listing {
     /// Project-relative paths, newest first.
     Reports(Vec<PathBuf>),
+    /// The pod is not running, and these are what the gateway kept of them,
+    /// as they were at `synced` (seconds since the epoch).
+    Saved {
+        paths: Vec<PathBuf>,
+        synced: u64,
+    },
     /// The pod is not running: the agent has to be opened again first.
     NotRunning,
     Failed(String),
@@ -227,8 +233,16 @@ pub fn Follow() -> Element {
 
 async fn read(endpoint: &ReportsEndpoint) -> Listing {
     match endpoint.list().await {
-        Ok(entries) => {
-            Listing::Reports(entries.into_iter().map(|e| PathBuf::from(e.path)).collect())
+        Ok(listing) => {
+            let paths = listing
+                .reports
+                .into_iter()
+                .map(|e| PathBuf::from(e.path))
+                .collect();
+            match listing.synced {
+                Some(synced) => Listing::Saved { paths, synced },
+                None => Listing::Reports(paths),
+            }
         }
         Err(ReportsError::Gone) => Listing::NotRunning,
         Err(error) => Listing::Failed(error.to_string()),

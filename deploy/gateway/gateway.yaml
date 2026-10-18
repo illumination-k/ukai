@@ -101,6 +101,24 @@ spec:
                   name: ukai-surrealdb
                   key: pass
                   optional: true
+            # The copy of the workspaces' reports (rustfs.yaml), or any S3
+            # bucket through the standard `AWS_*` variables.
+            - name: UKAI_REPORTS_BUCKET
+              value: ukai-reports
+            - name: AWS_ENDPOINT
+              value: http://ukai-rustfs:9000
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-rustfs
+                  key: access-key
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-rustfs
+                  key: secret-key
+                  optional: true
           ports:
             - name: http
               containerPort: 8080
