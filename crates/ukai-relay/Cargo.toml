@@ -22,6 +22,9 @@ ukai-acp = { workspace = true }
 ukai-config = { workspace = true }
 ukai-core = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["process", "pthread", "signal"] }
+
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = { workspace = true }
