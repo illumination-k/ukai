@@ -28,6 +28,10 @@ pub const REPORTS_PATH: &str = "/reports";
 /// Path under [`REPORTS_PATH`] holding the files themselves.
 pub const FILES_PATH: &str = "/files";
 
+/// Path under [`REPORTS_PATH`] naming every file of the reports tree,
+/// assets included, for the gateway to keep a copy of.
+pub const TREE_PATH: &str = "/tree";
+
 /// How long a request may take. Generous: the hop is client → gateway → pod,
 /// and a report can be a few megabytes of HTML.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,6 +40,26 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {
     pub reports: Vec<Entry>,
+    /// Set when the workspace is not running and the gateway answers from
+    /// the copy it kept: when that copy was last brought up to date, in
+    /// seconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced: Option<u64>,
+}
+
+/// What a relay answers at [`TREE_PATH`] under [`REPORTS_PATH`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tree {
+    pub files: Vec<TreeEntry>,
+}
+
+/// One file of a [`Tree`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeEntry {
+    /// Relative to the agent's checkout.
+    pub path: String,
+    /// Changes when the file does: its `ETag` when served.
+    pub version: String,
 }
 
 /// One report in a [`Listing`]; newest first, as the relay lists them.
@@ -121,8 +145,9 @@ impl ReportsEndpoint {
         &self.base
     }
 
-    /// Every report of the workspace, newest first.
-    pub async fn list(&self) -> Result<Vec<Entry>, ReportsError> {
+    /// Every report of the workspace, newest first, and whether they come
+    /// from the copy the gateway kept of a workspace that is not running.
+    pub async fn list(&self) -> Result<Listing, ReportsError> {
         let response = self.send(self.client.get(&self.base)).await?;
         let status = response.status().as_u16();
         if status != 200 {
@@ -131,7 +156,6 @@ impl ReportsEndpoint {
         response
             .json::<Listing>()
             .await
-            .map(|listing| listing.reports)
             .map_err(|error| ReportsError::Listing(error.to_string()))
     }
 
@@ -324,6 +348,7 @@ mod tests {
                     modified: None,
                 },
             ],
+            synced: None,
         };
         let json = serde_json::to_string(&listing).unwrap_or_default();
         assert_eq!(serde_json::from_str::<Listing>(&json).ok(), Some(listing));

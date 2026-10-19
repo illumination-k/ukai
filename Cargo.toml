@@ -38,6 +38,7 @@ kube = { version = "4.2", default-features = false, features = ["client", "rustl
 nix = { version = "0.31", default-features = false }
 # zbus on Linux: no libdbus to link.
 notify-rust = { version = "4.18", default-features = false, features = ["z"] }
+object_store = { version = "0.14", default-features = false }
 percent-encoding = "2"
 proptest = "1"
 # No `html` or `getopts`: the app renders the parsed tree itself, never HTML.

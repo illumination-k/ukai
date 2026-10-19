@@ -39,6 +39,7 @@ use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, project_context};
 use crate::remote_reports::{self, Listing, Workspace};
+use crate::schedules::{local_now, when_unix};
 
 const SCHEME: &str = "ukai-report";
 
@@ -526,6 +527,22 @@ pub fn ReportList(project: ProjectId, name: String) -> Element {
                         },
                         Listing::Reports(paths) if paths.is_empty() => rsx! {
                             p { class: "muted hint", "No reports yet." }
+                        },
+                        Listing::Saved { paths, synced } => rsx! {
+                            p {
+                                class: "muted hint",
+                                title: "The workspace is not running; these are the copies the gateway kept.",
+                                "Saved {when_unix(synced as i64, local_now())} · not running"
+                            }
+                            for path in paths {
+                                ReportRow {
+                                    key: "{path.display()}",
+                                    project: project.clone(),
+                                    path: path.clone(),
+                                    source: workspace.source(),
+                                    open: open.clone(),
+                                }
+                            }
                         },
                         Listing::Reports(paths) => rsx! {
                             for path in paths {

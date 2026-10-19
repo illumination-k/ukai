@@ -97,6 +97,12 @@ impl Plan {
         }
     }
 
+    /// What tells this workspace from every other: the hash in its Job's
+    /// name, and what its reports are kept under.
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
     /// The Job's name; deterministic, so two panes opening the same workspace
     /// meet at one pod.
     pub fn job_name(&self) -> String {

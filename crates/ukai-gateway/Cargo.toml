@@ -13,6 +13,7 @@ axum = { workspace = true, features = ["ws"] }
 futures = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+object_store = { workspace = true, features = ["aws"] }
 percent-encoding = { workspace = true }
 # No TLS of its own: the gateway asks for reports from a `ukai-relay` at a
 # pod address inside the cluster.

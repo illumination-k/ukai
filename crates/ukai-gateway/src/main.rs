@@ -13,7 +13,9 @@
 //! `GET /agents/<id>/reports` and `/agents/<id>/reports/files/<path>` read
 //! the reports that workspace's agent wrote, from the `ukai-relay` serving
 //! them in its pod. Same token, same workspace headers; a report request
-//! never starts a pod.
+//! never starts a pod. With a bucket ([`archive`]), the gateway keeps a copy
+//! of every running workspace's reports and answers from it once the pod is
+//! gone.
 //!
 //! `GET /agents/<id>/ports` lists the ports something listens on in that
 //! workspace's pod and the previews its agent asked for, and
@@ -55,6 +57,10 @@
 //! - `UKAI_KNOWLEDGE_USER`, `UKAI_KNOWLEDGE_PASS`: its root user
 //! - `UKAI_GATEWAY_INTERNAL_URL`: where agent pods reach the gateway for the
 //!   knowledge (default `http://ukai-gateway`, the Service in `deploy/gateway`)
+//! - `UKAI_REPORTS_BUCKET`: the S3 bucket keeping a copy of the workspaces'
+//!   reports ([`archive`]), reached as the `AWS_*` variables say
+//!   (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+//!   `AWS_REGION`); without it no copy is kept
 //!
 //! Each agent runs in a Job per workspace, in the gateway's namespace, with
 //! nothing installed cluster-side: no CRD, no PersistentVolumeClaim of its
@@ -79,12 +85,14 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
+mod archive;
 mod cluster;
 mod config;
 mod job;
 mod knowledge;
 mod schedules;
 
+use crate::archive::{Archive, RelaySource};
 use crate::cluster::{Cluster, RelayEndpoint};
 use crate::config::KubernetesAgent;
 use crate::job::{Plan, Runtime};
@@ -106,6 +114,8 @@ struct Gateway {
     knowledge: tokio::sync::OnceCell<Knowledge>,
     /// When each agent pod's workspace last changed notes, for [`POD_WRITES`].
     pod_writes: Mutex<HashMap<String, VecDeque<std::time::Instant>>>,
+    /// The copy of the workspaces' reports, when there is a bucket for it.
+    archive: Option<Arc<Archive>>,
 }
 
 #[tokio::main]
@@ -154,6 +164,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
     let user = cluster.whoami().await?;
     tracing::info!(namespace = cluster.namespace(), %user, %relay_image, ?gateway_url, knowledge = ?store.as_ref().map(|s| &s.url), agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
+    let archive = match env("UKAI_REPORTS_BUCKET") {
+        Some(bucket) => {
+            let archive = Archive::connect(&bucket)
+                .await
+                .map_err(|error| format!("UKAI_REPORTS_BUCKET {bucket}: {error}"))?;
+            tracing::info!(%bucket, "keeping a copy of the workspaces' reports");
+            Some(Arc::new(archive))
+        }
+        None => None,
+    };
     let (schedules, saver) = Scheduler::load(&cluster).await?;
     let gateway = Arc::new(Gateway {
         agents: config.agents,
@@ -168,7 +188,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         keeps_knowledge: store.is_some(),
         knowledge: tokio::sync::OnceCell::new(),
         pod_writes: Mutex::default(),
+        archive,
     });
+    if let Some(archive) = &gateway.archive {
+        tokio::spawn(archive::run(archive.clone(), gateway.cluster.clone()));
+    }
     tokio::spawn(saver.run(gateway.clone()));
     tokio::spawn(schedules::tick(gateway.clone()));
     if let Some(store) = store {
@@ -324,6 +348,20 @@ async fn restart(
         gateway.cluster.namespace(),
         pane.as_deref(),
     );
+    // What the pod holds last goes into the copy before the pod goes.
+    if let Some(archive) = &gateway.archive
+        && let Ok(Some(pod)) = gateway.cluster.serving_pod(&plan).await
+        && let Some(endpoint) = RelayEndpoint::of(&pod)
+    {
+        let client = reqwest::Client::new();
+        let source = RelaySource {
+            client: &client,
+            endpoint: &endpoint,
+        };
+        if let Err(error) = archive.sync(plan.workspace_id(), &source).await {
+            tracing::warn!(agent = %id, %error, "cannot copy the reports before the restart");
+        }
+    }
     match gateway.cluster.stop(&plan).await {
         Ok(()) => {
             tracing::info!(agent = %id, job = %plan.job_name(), "restarting the agent's workspace");
@@ -341,8 +379,10 @@ async fn restart(
 ///
 /// The workspace is resolved exactly as for `/acp`, and the same token is
 /// required, but a report request never starts a pod: it is a read of work
-/// that is already there. A workspace whose pod has idled out is 410, so a
-/// pane can say so instead of waiting out an image pull.
+/// that is already there. A workspace whose pod has idled out is answered
+/// from the copy the gateway kept of it, when there is a bucket for one, and
+/// is 410 otherwise, so a pane can say so instead of waiting out an image
+/// pull.
 async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: Uri) -> Response {
     // The path is read from the URI rather than through `Path`, which cannot
     // serve both routes at once, and so the file part stays percent-encoded
@@ -350,8 +390,18 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
     let Some((id, suffix)) = reports_target(uri.path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let endpoint = match serving_relay(&gateway, &id, &headers).await {
-        Ok(endpoint) => endpoint,
+    let plan = match workspace_plan(&gateway, &id, &headers) {
+        Ok(plan) => plan,
+        Err(refused) => return refused.into_response(),
+    };
+    let endpoint = match running_relay(&gateway, &id, &plan).await {
+        Ok(Some(endpoint)) => endpoint,
+        Ok(None) => {
+            return match &gateway.archive {
+                Some(archive) => from_archive(archive, &id, plan.workspace_id(), suffix).await,
+                None => gone(),
+            };
+        }
         Err(response) => return response,
     };
     match fetch(&endpoint.reports_url(suffix), &endpoint.token).await {
@@ -363,38 +413,90 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
     }
 }
 
-/// The relay of the running pod of the workspace a request asks for,
-/// resolved as for `/acp` and with the same token, or the response saying
-/// why there is none. It never starts a pod: what asks this way reads work
-/// that is already there, and a workspace that idled out is 410.
+/// A report request answered from the copy of a workspace that is not
+/// running: the listing, saying when the copy was taken, or one file. 410
+/// as before when there is no copy to read.
+async fn from_archive(archive: &Archive, id: &str, workspace: &str, suffix: &str) -> Response {
+    let answer = match suffix.strip_prefix(ukai_acp::reports::FILES_PATH) {
+        None => archive
+            .listing(workspace)
+            .await
+            .map(|listing| listing.map(|listing| axum::Json(listing).into_response())),
+        Some(path) => archive.file(workspace, path).await.map(|file| {
+            file.map(|file| {
+                let mut builder = Response::builder()
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+                if let Some(content_type) = file.content_type {
+                    builder = builder.header(header::CONTENT_TYPE, content_type);
+                }
+                if let Some(etag) = file.etag {
+                    builder = builder.header(header::ETAG, etag);
+                }
+                builder
+                    .body(file.body.into())
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            })
+        }),
+    };
+    match answer {
+        Ok(Some(response)) => response,
+        Ok(None) if suffix.is_empty() => gone(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot read the copy of the workspace's reports");
+            StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
+}
+
+/// The workspace a request asks for, resolved as for `/acp` and with the
+/// same token, or the status and message saying why it may not.
+fn workspace_plan(
+    gateway: &Gateway,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<Plan, (StatusCode, &'static str)> {
+    if !authorized(gateway, headers) {
+        return Err((StatusCode::UNAUTHORIZED, ""));
+    }
+    let Some(agent) = gateway.agents.get(id).cloned() else {
+        return Err((StatusCode::NOT_FOUND, ""));
+    };
+    let pane = pane_key(headers).map_err(|problem| (StatusCode::BAD_REQUEST, problem))?;
+    Ok(Plan::new(
+        agent,
+        &gateway.user,
+        gateway.cluster.namespace(),
+        pane.as_deref(),
+    ))
+}
+
+/// The relay of the workspace's running pod; `None` when it has none. It
+/// never starts a pod: what asks this way reads work that is already there.
+async fn running_relay(
+    gateway: &Gateway,
+    id: &str,
+    plan: &Plan,
+) -> Result<Option<RelayEndpoint>, Response> {
+    match gateway.cluster.serving_pod(plan).await {
+        Ok(pod) => Ok(pod.as_ref().and_then(RelayEndpoint::of)),
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot look up the workspace's pod");
+            Err(StatusCode::BAD_GATEWAY.into_response())
+        }
+    }
+}
+
+/// [`running_relay`] of the workspace a request asks for, with a workspace
+/// that is not running being 410.
 async fn serving_relay(
     gateway: &Gateway,
     id: &str,
     headers: &HeaderMap,
 ) -> Result<RelayEndpoint, Response> {
-    if !authorized(gateway, headers) {
-        return Err(StatusCode::UNAUTHORIZED.into_response());
-    }
-    let Some(agent) = gateway.agents.get(id).cloned() else {
-        return Err(StatusCode::NOT_FOUND.into_response());
-    };
-    let pane =
-        pane_key(headers).map_err(|problem| (StatusCode::BAD_REQUEST, problem).into_response())?;
-    let plan = Plan::new(
-        agent,
-        &gateway.user,
-        gateway.cluster.namespace(),
-        pane.as_deref(),
-    );
-    let pod = match gateway.cluster.serving_pod(&plan).await {
-        Ok(Some(pod)) => pod,
-        Ok(None) => return Err(gone()),
-        Err(error) => {
-            tracing::warn!(agent = %id, %error, "cannot look up the workspace's pod");
-            return Err(StatusCode::BAD_GATEWAY.into_response());
-        }
-    };
-    RelayEndpoint::of(&pod).ok_or_else(gone)
+    let plan = workspace_plan(gateway, id, headers).map_err(IntoResponse::into_response)?;
+    running_relay(gateway, id, &plan).await?.ok_or_else(gone)
 }
 
 /// `GET /agents/<id>/ports`: what listens in the workspace's pod and the

@@ -184,6 +184,17 @@ impl Cluster {
         Ok(serving(&job, found))
     }
 
+    /// The relay of every agent pod that is ready, with the workspace it
+    /// works in: what the reports archive copies from.
+    pub async fn ready_relays(&self) -> Result<Vec<(String, RelayEndpoint)>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let found = pods
+            .list(&ListParams::default().labels(&format!("{MANAGED_BY}=ukai")))
+            .await?
+            .items;
+        Ok(ready_relays(&found))
+    }
+
     /// The agent pod whose relay wants `token`: its knowledge scope, and its
     /// workspace. This is how the gateway tells whose knowledge a pod's MCP
     /// server reads and writes, without trusting anything the pod says.
@@ -309,6 +320,19 @@ fn serving(job: &Job, pods: Vec<Pod>) -> Option<Pod> {
     }
     pods.into_iter()
         .find(|pod| pod.metadata.deletion_timestamp.is_none() && pod_state(pod) == PodState::Ready)
+}
+
+/// The ready pods among `pods`, by workspace, with where their relays are.
+fn ready_relays(pods: &[Pod]) -> Vec<(String, RelayEndpoint)> {
+    pods.iter()
+        .filter(|pod| {
+            pod.metadata.deletion_timestamp.is_none() && pod_state(pod) == PodState::Ready
+        })
+        .filter_map(|pod| {
+            let workspace = pod.metadata.labels.as_ref()?.get(WORKSPACE_LABEL)?.clone();
+            Some((workspace, RelayEndpoint::of(pod)?))
+        })
+        .collect()
 }
 
 /// Which agent pod a request came from, as the gateway found it.
@@ -525,6 +549,42 @@ mod tests {
     #[case::stopped(json!({ "phase": "Succeeded" }), PodState::Waiting("Waiting for the stopped pod to be replaced".into()))]
     fn reads_pod_state(#[case] status: serde_json::Value, #[case] expected: PodState) {
         assert_eq!(pod_state(&pod(status)), expected);
+    }
+
+    #[test]
+    fn copies_reports_only_from_ready_pods() {
+        let agent_pod = |name: &str, workspace: Option<&str>, phase: &str, deleting: bool| {
+            let mut metadata = json!({ "name": name });
+            if let Some(workspace) = workspace {
+                metadata["labels"] = json!({ WORKSPACE_LABEL: workspace });
+            }
+            if deleting {
+                metadata["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
+            }
+            serde_json::from_value::<Pod>(json!({
+                "metadata": metadata,
+                "spec": { "containers": [
+                    { "name": "agent", "env": [{ "name": "UKAI_RELAY_TOKEN", "value": "t" }] }
+                ] },
+                "status": {
+                    "phase": phase,
+                    "podIP": "10.0.0.7",
+                    "conditions": [{ "type": "Ready", "status": "True" }]
+                }
+            }))
+            .unwrap_or_default()
+        };
+        let pods = [
+            agent_pod("ready", Some("w1"), "Running", false),
+            agent_pod("starting", Some("w2"), "Pending", false),
+            agent_pod("stopping", Some("w3"), "Running", true),
+            agent_pod("unlabelled", None, "Running", false),
+        ];
+        let found: Vec<_> = ready_relays(&pods)
+            .into_iter()
+            .map(|(workspace, endpoint)| (workspace, endpoint.address))
+            .collect();
+        assert_eq!(found, [("w1".to_owned(), "10.0.0.7:7070".to_owned())]);
     }
 
     #[test]

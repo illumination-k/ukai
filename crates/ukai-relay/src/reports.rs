@@ -9,6 +9,9 @@
 //!   newest first, with each file's modification time.
 //! - `GET /reports/files/<project-relative path>` … one file, with an `ETag`
 //!   that changes when it does.
+//! - `GET /reports/tree` … every file of the reports tree, assets included,
+//!   with its `ETag`: what the gateway copies to keep the reports readable
+//!   once the pod is gone.
 //!
 //! Both are confined by [`ReportTree`]: only files inside a `reports.dirs`
 //! entry are served, after resolving symlinks, so a report's relative assets
@@ -24,7 +27,7 @@ use axum::extract::State;
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use ukai_acp::reports::{Entry, FILES_PATH, Listing, REPORTS_PATH};
+use ukai_acp::reports::{Entry, FILES_PATH, Listing, REPORTS_PATH, TREE_PATH, Tree, TreeEntry};
 use ukai_core::report::ReportTree;
 
 /// The relay's working directory: the checkout the agent works in.
@@ -36,6 +39,7 @@ pub fn router(root: PathBuf) -> Router {
     Router::new()
         .route(REPORTS_PATH, get(listing))
         .route(&format!("{REPORTS_PATH}{FILES_PATH}/{{*path}}"), get(file))
+        .route(&format!("{REPORTS_PATH}{TREE_PATH}"), get(tree_files))
         .with_state(Root(root))
 }
 
@@ -54,7 +58,28 @@ async fn listing(State(Root(root)): State<Root>) -> Response {
             modified: seconds(listed.modified),
         })
         .collect();
-    axum::Json(Listing { reports }).into_response()
+    axum::Json(Listing {
+        reports,
+        synced: None,
+    })
+    .into_response()
+}
+
+/// Every file of the reports tree, for the gateway to copy. Nothing when
+/// the configuration cannot be read, as for the listing.
+async fn tree_files(State(Root(root)): State<Root>) -> Response {
+    let files = tree(&root)
+        .map(|tree| {
+            tree.files()
+                .into_iter()
+                .map(|file| TreeEntry {
+                    path: file.path.to_string_lossy().into_owned(),
+                    version: file.version,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    axum::Json(Tree { files }).into_response()
 }
 
 /// One file of the reports tree. The path is taken from the URI as it
@@ -190,6 +215,21 @@ mod tests {
                 .iter()
                 .all(|e| e.modified.is_some_and(|m| m > 0)),
             "{listing:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn names_every_file_of_the_tree_with_its_validator() {
+        let root = checkout(r#"["reports"]"#);
+        let (status, _, body) = get(&root, "/reports/tree").await;
+        assert_eq!(status, 200);
+        let tree: Tree = serde_json::from_slice(&body).unwrap_or_default();
+        let paths: Vec<_> = tree.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["reports/img/plot.png", "reports/run 1.html"]);
+        let (_, headers, _) = get(&root, "/reports/files/reports/img/plot.png").await;
+        assert_eq!(
+            header(&headers, "etag"),
+            Some(format!("\"{}\"", tree.files[0].version))
         );
     }
 

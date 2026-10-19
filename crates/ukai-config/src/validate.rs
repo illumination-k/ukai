@@ -4,6 +4,7 @@
 
 use std::path::{Component, PathBuf};
 
+use crate::layered::REPORT_DIRS_ENV;
 use crate::schema::Config;
 
 /// One problem with a configuration. Validation collects all of them rather
@@ -14,6 +15,8 @@ pub enum Problem {
     UnknownAgent { context: String, agent: String },
     #[error("reports.dirs: `{}` is not inside the project", .0.display())]
     ReportDirOutsideProject(PathBuf),
+    #[error("{REPORT_DIRS_ENV}: `{}` is not inside the project", .0.display())]
+    EnvReportDirOutsideProject(PathBuf),
     #[error("reports.globs: `{glob}`: {message}")]
     InvalidGlob { glob: String, message: String },
     #[error("keybindings: set them in the user config.toml, not in a project's ukai.toml")]
@@ -47,10 +50,7 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         .reports
         .dirs
         .iter()
-        .filter(|dir| {
-            !dir.components()
-                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-        })
+        .filter(|dir| !inside_project(dir))
         .map(|dir| Problem::ReportDirOutsideProject(dir.clone()));
     let bad_globs = config.reports.globs.iter().filter_map(|glob| {
         globset::Glob::new(glob)
@@ -73,4 +73,11 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         .chain(bad_globs)
         .chain(bad_language)
         .collect()
+}
+
+/// Whether a report directory names a place inside the project: relative,
+/// and without `..`.
+pub(crate) fn inside_project(dir: &std::path::Path) -> bool {
+    dir.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
