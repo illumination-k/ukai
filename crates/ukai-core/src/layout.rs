@@ -27,6 +27,33 @@ pub enum Direction {
     Vertical,
 }
 
+/// Where a moved pane goes beside the one it is dropped on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    fn direction(self) -> Direction {
+        match self {
+            Side::Left | Side::Right => Direction::Horizontal,
+            Side::Top | Side::Bottom => Direction::Vertical,
+        }
+    }
+
+    /// Whether the moved pane goes after the target in display order.
+    fn after(self) -> bool {
+        matches!(self, Side::Right | Side::Bottom)
+    }
+}
+
+/// The smallest share of the two panes beside a dragged boundary that a
+/// resize leaves either of them.
+pub const MIN_SHARE: f32 = 0.05;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Node {
@@ -269,7 +296,7 @@ impl Layout {
         let tab = self.tab_of(pane)?;
         let new = self.alloc();
         let root = &mut self.tabs[tab].root;
-        root.split(pane, direction, new);
+        root.insert_beside(pane, new, direction, true);
         normalize_in_place(root);
         self.active = tab;
         self.focused = new;
@@ -297,6 +324,96 @@ impl Layout {
         if self.focused == pane {
             self.focused = order[if position == 0 { 1 } else { position - 1 }];
         }
+        true
+    }
+
+    /// Move the boundary between children `index` and `index + 1` of the
+    /// split at `path` (child indices from the active tab's root), giving the
+    /// first of them `share` of the space the two have together, clamped to
+    /// [`MIN_SHARE`]. Returns whether there was such a boundary.
+    pub fn resize(&mut self, path: &[usize], index: usize, share: f32) -> bool {
+        if !share.is_finite() {
+            return false;
+        }
+        let Some(Node::Split { sizes, .. }) = self.tabs[self.active].root.at_mut(path) else {
+            return false;
+        };
+        if index + 1 >= sizes.len() {
+            return false;
+        }
+        let share = share.clamp(MIN_SHARE, 1.0 - MIN_SHARE);
+        let total = sizes[index] + sizes[index + 1];
+        sizes[index] = total * share;
+        sizes[index + 1] = total * (1.0 - share);
+        true
+    }
+
+    /// Move `pane` to `side` of `target`, which may be in another tab, and
+    /// focus it there. A tab the pane leaves empty is closed. Returns whether
+    /// both panes exist and differ.
+    pub fn move_pane(&mut self, pane: PaneId, target: PaneId, side: Side) -> bool {
+        if pane == target || self.tab_of(target).is_none() || self.detach(pane).is_none() {
+            return false;
+        }
+        let Some(tab) = self.tab_of(target) else {
+            return false;
+        };
+        let root = &mut self.tabs[tab].root;
+        root.insert_beside(target, pane, side.direction(), side.after());
+        normalize_in_place(root);
+        self.focus(pane);
+        true
+    }
+
+    /// Exchange the places of two panes, which may be in different tabs, and
+    /// focus `pane` in its new place. Returns whether both exist and differ.
+    pub fn swap_panes(&mut self, pane: PaneId, other: PaneId) -> bool {
+        if pane == other || self.tab_of(pane).is_none() || self.tab_of(other).is_none() {
+            return false;
+        }
+        for tab in &mut self.tabs {
+            tab.root.swap(pane, other);
+        }
+        self.focus(pane);
+        true
+    }
+
+    /// Move `pane` to the right edge of tab `index`, or into a tab of its own
+    /// after the others when `index` is `None`, and focus it. Returns whether
+    /// the pane and tab exist.
+    pub fn move_to_tab(&mut self, pane: PaneId, index: Option<usize>) -> bool {
+        let Some(from) = self.tab_of(pane) else {
+            return false;
+        };
+        let Some(index) = index else {
+            self.detach(pane);
+            self.tabs.push(Tab {
+                root: Node::Pane(pane),
+            });
+            self.focus(pane);
+            return true;
+        };
+        if index >= self.tabs.len() {
+            return false;
+        }
+        if from == index {
+            self.focus(pane);
+            return true;
+        }
+        // Detaching closes a tab the pane was alone in, shifting later ones.
+        let index = match self.detach(pane) {
+            Some(Some(closed)) if closed < index => index - 1,
+            _ => index,
+        };
+        let root = &mut self.tabs[index].root;
+        let taken = std::mem::replace(root, Node::Pane(pane));
+        *root = Node::Split {
+            direction: Direction::Horizontal,
+            children: vec![taken, Node::Pane(pane)],
+            sizes: vec![1.0, 1.0],
+        };
+        normalize_in_place(root);
+        self.focus(pane);
         true
     }
 
@@ -354,6 +471,24 @@ impl Layout {
         Ok(())
     }
 
+    /// Take `pane` out of its tree, keeping its content, and close the tab if
+    /// that leaves it empty. `None` if the pane does not exist, else the index
+    /// the closed tab had, if any. Focus is left for the caller to place.
+    fn detach(&mut self, pane: PaneId) -> Option<Option<usize>> {
+        let tab = self.tab_of(pane)?;
+        let root = &mut self.tabs[tab].root;
+        if *root == Node::Pane(pane) {
+            self.tabs.remove(tab);
+            if self.active > tab || self.active == self.tabs.len() {
+                self.active = self.active.saturating_sub(1);
+            }
+            return Some(Some(tab));
+        }
+        root.remove(pane);
+        normalize_in_place(root);
+        Some(None)
+    }
+
     fn tab_of(&self, pane: PaneId) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.root.contains(pane))
     }
@@ -364,6 +499,22 @@ impl Layout {
         self.contents.insert(id, PaneContent::Empty);
         id
     }
+}
+
+/// Where children `index` and `index + 1` of a split with `sizes` lie, for
+/// dragging the boundary between them: the offset of the first from the
+/// split's start and the length of both together, in a split `extent` long
+/// with a divider `gap` long between each two children. Then
+/// `(pointer - offset) / length` is the share [`Layout::resize`] takes.
+pub fn boundary_span(sizes: &[f32], index: usize, extent: f64, gap: f64) -> Option<(f64, f64)> {
+    if index + 1 >= sizes.len() {
+        return None;
+    }
+    let total: f64 = sizes.iter().map(|s| f64::from(*s)).sum();
+    let space = (extent - gap * (sizes.len() - 1) as f64).max(0.0);
+    let length = |sizes: &[f32]| sizes.iter().map(|s| f64::from(*s)).sum::<f64>() / total * space;
+    let offset = length(&sizes[..index]) + gap * index as f64;
+    Some((offset, length(&sizes[index..index + 2]) + gap))
 }
 
 /// `index + step` modulo `len` (which is at least 1).
@@ -423,12 +574,32 @@ impl Node {
         children.iter().try_for_each(|c| c.check(Some(*direction)))
     }
 
-    fn split(&mut self, target: PaneId, direction: Direction, new: PaneId) -> bool {
+    /// The node at `path`, child indices from this one.
+    fn at_mut(&mut self, path: &[usize]) -> Option<&mut Node> {
+        match path.split_first() {
+            None => Some(self),
+            Some((first, rest)) => match self {
+                Node::Pane(_) => None,
+                Node::Split { children, .. } => children.get_mut(*first)?.at_mut(rest),
+            },
+        }
+    }
+
+    /// Put `new` beside `target` in `direction`, after it or before it. The
+    /// two share the space `target` had.
+    fn insert_beside(
+        &mut self,
+        target: PaneId,
+        new: PaneId,
+        direction: Direction,
+        after: bool,
+    ) -> bool {
         match self {
             Node::Pane(id) if *id == target => {
+                let pair = if after { [target, new] } else { [new, target] };
                 *self = Node::Split {
                     direction,
-                    children: vec![Node::Pane(target), Node::Pane(new)],
+                    children: pair.map(Node::Pane).into(),
                     sizes: vec![1.0, 1.0],
                 };
                 true
@@ -439,7 +610,7 @@ impl Node {
                 children,
                 sizes,
             } => {
-                // Splitting along the parent's own direction adds a sibling
+                // Inserting along the parent's own direction adds a sibling
                 // instead of nesting a one-way split inside it.
                 if *own == direction
                     && let Some(index) = children
@@ -448,12 +619,25 @@ impl Node {
                 {
                     let half = sizes[index] / 2.0;
                     sizes[index] = half;
-                    sizes.insert(index + 1, half);
-                    children.insert(index + 1, Node::Pane(new));
+                    let at = if after { index + 1 } else { index };
+                    sizes.insert(at, half);
+                    children.insert(at, Node::Pane(new));
                     return true;
                 }
-                children.iter_mut().any(|c| c.split(target, direction, new))
+                children
+                    .iter_mut()
+                    .any(|c| c.insert_beside(target, new, direction, after))
             }
+        }
+    }
+
+    /// Exchange the leaves `a` and `b`, wherever they are in this tree.
+    fn swap(&mut self, a: PaneId, b: PaneId) {
+        match self {
+            Node::Pane(id) if *id == a => *id = b,
+            Node::Pane(id) if *id == b => *id = a,
+            Node::Pane(_) => {}
+            Node::Split { children, .. } => children.iter_mut().for_each(|c| c.swap(a, b)),
         }
     }
 

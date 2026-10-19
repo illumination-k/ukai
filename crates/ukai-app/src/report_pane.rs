@@ -143,14 +143,11 @@ pub fn ReportView(
     source: ReportSource,
 ) -> Element {
     let app = use_context::<AppSignals>();
+    let covered = use_memo(move || app.covered());
     let opened = open_source(app, &project, &path, &source);
     match opened {
         Ok(source) => rsx! {
-            ReportSurface {
-                key: "{pane}-{source.key()}",
-                source,
-                covered: app.palette,
-            }
+            ReportSurface { key: "{pane}-{source.key()}", source, covered }
         },
         Err(error) => rsx! {
             div { class: "pane-body report-error",
@@ -200,7 +197,7 @@ fn open_source(
 /// The element the child web view covers. While `covered` is set something
 /// in the DOM is drawn over the pane, so the view hides.
 #[component]
-fn ReportSurface(source: Source, covered: Signal<bool>) -> Element {
+fn ReportSurface(source: Source, covered: Memo<bool>) -> Element {
     let ChildView {
         view,
         mut host,

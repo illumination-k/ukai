@@ -146,6 +146,164 @@ fn closing_an_earlier_tab_keeps_the_active_one() {
     assert_eq!(layout.focused(), third);
 }
 
+#[rstest]
+#[case::first_child(&[], 0, 0.25, vec![0.5, 1.5, 2.0])]
+#[case::clamped_low(&[], 1, 0.0, vec![1.0, 0.15, 2.85])]
+#[case::clamped_high(&[], 1, 2.0, vec![1.0, 2.85, 0.15])]
+fn resize_moves_one_boundary(
+    #[case] path: &[usize],
+    #[case] index: usize,
+    #[case] share: f32,
+    #[case] expected: Vec<f32>,
+) {
+    let mut layout = Layout::default();
+    layout.tabs[0].root = sized(H, vec![p(0), p(1), p(2)], vec![1.0, 1.0, 2.0]);
+    layout.next_id = 3;
+    layout
+        .contents
+        .extend([(1, PaneContent::Empty), (2, PaneContent::Empty)]);
+    assert!(layout.resize(path, index, share));
+    let Node::Split { sizes, .. } = &layout.active_tab().root else {
+        panic!("not a split");
+    };
+    for (size, want) in sizes.iter().zip(&expected) {
+        assert!((size - want).abs() < 1e-5, "{sizes:?} != {expected:?}");
+    }
+}
+
+#[rstest]
+#[case::no_split(&[0], 0)]
+#[case::last_child(&[], 1)]
+#[case::past_the_tree(&[5], 0)]
+fn resize_ignores_what_is_not_a_boundary(#[case] path: &[usize], #[case] index: usize) {
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    let before = layout.clone();
+    assert!(!layout.resize(path, index, 0.3));
+    assert_eq!(layout, before);
+}
+
+#[rstest]
+#[case::first(0, Some((0.0, 201.0)))]
+#[case::second(1, Some((101.0, 301.0)))]
+#[case::past_the_end(2, None)]
+fn boundary_span_measures_the_pair(#[case] index: usize, #[case] expected: Option<(f64, f64)>) {
+    // 402 px with two 1 px dividers leaves 400 px for sizes 1:1:2.
+    assert_eq!(boundary_span(&[1.0, 1.0, 2.0], index, 402.0, 1.0), expected);
+}
+
+#[test]
+fn resize_reaches_nested_splits() {
+    // H[0, V[1, 2]]
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.split(1, V);
+    assert!(layout.resize(&[1], 0, 0.75));
+    assert_eq!(
+        layout.active_tab().root,
+        split(H, vec![p(0), sized(V, vec![p(1), p(2)], vec![1.5, 0.5])])
+    );
+}
+
+#[rstest]
+#[case::left(Side::Left, split(H, vec![p(2), p(0), p(1)]))]
+#[case::right(Side::Right, split(H, vec![p(0), p(2), p(1)]))]
+#[case::top(Side::Top, split(H, vec![split(V, vec![p(2), p(0)]), p(1)]))]
+#[case::bottom(Side::Bottom, split(H, vec![split(V, vec![p(0), p(2)]), p(1)]))]
+fn move_pane_places_it_beside_the_target(#[case] side: Side, #[case] expected: Node) {
+    // H[0, V[1, 2]] -- move 2 beside 0 --> 1 is left alone on the right.
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.split(1, V);
+    layout.resize(&[], 0, 0.5);
+    assert!(layout.move_pane(2, 0, side));
+    let mut root = layout.active_tab().root.clone();
+    // Compare shapes; sizes are checked by the property test.
+    equalize(&mut root);
+    assert_eq!(root, expected);
+    assert_eq!(layout.focused(), 2);
+}
+
+fn equalize(node: &mut Node) {
+    if let Node::Split {
+        children, sizes, ..
+    } = node
+    {
+        sizes.iter_mut().for_each(|s| *s = 1.0);
+        children.iter_mut().for_each(equalize);
+    }
+}
+
+#[test]
+fn move_pane_across_tabs_closes_the_tab_it_empties() {
+    let mut layout = Layout::default();
+    let other = layout.new_tab();
+    layout.select_tab(0);
+    assert!(layout.move_pane(0, other, Side::Right));
+    assert_eq!(layout.tabs().len(), 1);
+    assert_eq!(layout.active_tab().root, split(H, vec![p(other), p(0)]));
+    assert_eq!(layout.focused(), 0);
+}
+
+#[rstest]
+#[case::onto_itself(0, 0)]
+#[case::missing_target(0, 9)]
+#[case::missing_pane(9, 0)]
+fn move_pane_refuses_what_cannot_move(#[case] pane: PaneId, #[case] target: PaneId) {
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    let before = layout.clone();
+    assert!(!layout.move_pane(pane, target, Side::Left));
+    assert!(!layout.swap_panes(pane, target));
+    assert_eq!(layout, before);
+}
+
+#[test]
+fn swap_exchanges_places_across_tabs() {
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    let other = layout.new_tab();
+    assert!(layout.swap_panes(0, other));
+    assert_eq!(layout.tabs()[0].root, split(H, vec![p(other), p(1)]));
+    assert_eq!(layout.tabs()[1].root, p(0));
+    assert_eq!(layout.active(), 1);
+    assert_eq!(layout.focused(), 0);
+}
+
+#[test]
+fn move_to_tab_appends_on_the_right() {
+    let mut layout = Layout::default();
+    layout.split(0, V);
+    let other = layout.new_tab();
+    assert!(layout.move_to_tab(1, Some(1)));
+    assert_eq!(layout.tabs()[0].root, p(0));
+    assert_eq!(layout.tabs()[1].root, split(H, vec![p(other), p(1)]));
+    assert_eq!(layout.active(), 1);
+    assert_eq!(layout.focused(), 1);
+}
+
+#[test]
+fn move_to_a_later_tab_counts_the_tab_it_empties() {
+    let mut layout = Layout::default();
+    let second = layout.new_tab();
+    let third = layout.new_tab();
+    assert!(layout.move_to_tab(0, Some(2)));
+    assert_eq!(layout.tabs().len(), 2);
+    assert_eq!(layout.tabs()[0].root, p(second));
+    assert_eq!(layout.tabs()[1].root, split(H, vec![p(third), p(0)]));
+}
+
+#[test]
+fn move_to_a_new_tab() {
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    assert!(layout.move_to_tab(0, None));
+    assert_eq!(layout.tabs().len(), 2);
+    assert_eq!(layout.tabs()[0].root, p(1));
+    assert_eq!(layout.tabs()[1].root, p(0));
+    assert_eq!(layout.active(), 1);
+}
+
 #[derive(Debug, Clone)]
 enum Op {
     NewTab,
@@ -154,6 +312,19 @@ enum Op {
     Split(usize, bool),
     Close(usize),
     Focus(usize),
+    Resize(Vec<usize>, usize, f32),
+    Move(usize, usize, Side),
+    Swap(usize, usize),
+    MoveToTab(usize, Option<usize>),
+}
+
+fn side() -> impl Strategy<Value = Side> {
+    prop_oneof![
+        Just(Side::Left),
+        Just(Side::Right),
+        Just(Side::Top),
+        Just(Side::Bottom),
+    ]
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -164,6 +335,15 @@ fn op() -> impl Strategy<Value = Op> {
         (0..16usize, any::<bool>()).prop_map(|(i, h)| Op::Split(i, h)),
         (0..16usize).prop_map(Op::Close),
         (0..16usize).prop_map(Op::Focus),
+        (
+            prop::collection::vec(0..4usize, 0..3),
+            0..4usize,
+            -0.5..1.5f32
+        )
+            .prop_map(|(path, i, share)| Op::Resize(path, i, share)),
+        (0..16usize, 0..16usize, side()).prop_map(|(a, b, s)| Op::Move(a, b, s)),
+        (0..16usize, 0..16usize).prop_map(|(a, b)| Op::Swap(a, b)),
+        (0..16usize, prop::option::of(0..4usize)).prop_map(|(a, t)| Op::MoveToTab(a, t)),
     ]
 }
 
@@ -212,6 +392,21 @@ proptest! {
                 Op::Focus(i) => {
                     let pane = nth_pane(&layout, i);
                     layout.focus(pane);
+                    prop_assert_eq!(layout.focused(), pane);
+                }
+                Op::Resize(path, i, share) => { layout.resize(&path, i, share); }
+                Op::Move(a, b, side) => {
+                    let (pane, target) = (nth_pane(&layout, a), nth_pane(&layout, b));
+                    prop_assert_eq!(layout.move_pane(pane, target, side), pane != target);
+                }
+                Op::Swap(a, b) => {
+                    let (pane, other) = (nth_pane(&layout, a), nth_pane(&layout, b));
+                    prop_assert_eq!(layout.swap_panes(pane, other), pane != other);
+                }
+                Op::MoveToTab(a, tab) => {
+                    let pane = nth_pane(&layout, a);
+                    let tab = tab.filter(|t| *t < layout.tabs().len());
+                    prop_assert!(layout.move_to_tab(pane, tab));
                     prop_assert_eq!(layout.focused(), pane);
                 }
             }

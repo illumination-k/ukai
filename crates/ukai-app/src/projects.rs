@@ -10,6 +10,7 @@ use ukai_config::Config;
 use ukai_core::{Layout, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
+use crate::layout::Drag;
 use crate::ports::PortListings;
 use crate::remote_reports::Listings;
 
@@ -41,12 +42,22 @@ pub struct AppSignals {
     pub ports: PortListings,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
+    /// A pane boundary or pane the user is dragging.
+    pub drag: Signal<Option<Drag>>,
     /// The names of the gateway schedules the app has listed, for pane titles.
     pub schedule_names: Signal<HashMap<String, String>>,
     /// Bumped after a schedule changes, so its listings read it again.
     pub schedule_revision: Signal<u64>,
     /// Bumped after a note changes, so the knowledge listings read it again.
     pub knowledge_revision: Signal<u64>,
+}
+
+impl AppSignals {
+    /// Whether something of the DOM is drawn over the panes, so the native
+    /// views of reports and browser panes hide.
+    pub fn covered(&self) -> bool {
+        (self.palette)() || self.drag.read().as_ref().is_some_and(Drag::covers)
+    }
 }
 
 /// What a session needs from its project.

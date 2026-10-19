@@ -34,7 +34,7 @@ pub struct ChildView {
 /// the element has a place. The first `build` is the one used: key the
 /// component by what it shows.
 pub fn use_child_view(
-    covered: Signal<bool>,
+    covered: Memo<bool>,
     build: impl Fn(Rect, &Window) -> dioxus::desktop::wry::Result<WebView> + 'static,
 ) -> ChildView {
     let view = use_hook(|| Rc::new(RefCell::new(None::<WebView>)));

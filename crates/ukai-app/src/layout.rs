@@ -3,13 +3,18 @@
 //! agents of several projects side by side.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 use std::collections::HashMap;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
-use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource};
+use ukai_core::{
+    Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource, Side,
+    boundary_span,
+};
 
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
@@ -21,6 +26,104 @@ use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
+
+/// The width of the divider between two children of a split, in CSS pixels;
+/// matches `.divider` in `main.css`.
+const DIVIDER: f64 = 1.0;
+
+/// How far the pointer goes with a pane header held before it is a drag
+/// rather than a click, in CSS pixels.
+const DRAG_THRESHOLD: f64 = 4.0;
+
+/// Something the user is dragging in the pane area.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Drag {
+    /// The boundary between children `index` and `index + 1` of the split at
+    /// `path` in the active tab, which lie from `start` for `length` CSS
+    /// pixels along `direction` in window coordinates.
+    Boundary {
+        path: Vec<usize>,
+        index: usize,
+        direction: Direction,
+        start: f64,
+        length: f64,
+    },
+    /// A pane held by its header, pressed at `from`; `moved` once the
+    /// pointer went far enough to be a drag, when drop targets show.
+    Pane {
+        pane: PaneId,
+        from: (f64, f64),
+        moved: bool,
+    },
+}
+
+impl Drag {
+    /// Whether the drag draws over the panes, so their native views hide.
+    pub fn covers(&self) -> bool {
+        match self {
+            Drag::Boundary { .. } => true,
+            Drag::Pane { moved, .. } => *moved,
+        }
+    }
+
+    /// The pane being moved, once it is a drag.
+    fn moving(&self) -> Option<PaneId> {
+        match self {
+            Drag::Pane {
+                pane, moved: true, ..
+            } => Some(*pane),
+            _ => None,
+        }
+    }
+}
+
+/// Follow the pointer of a drag: move the boundary being dragged, or turn a
+/// held pane header into a drag once it has moved far enough. A pointer
+/// released outside the window ends the drag at the next move.
+fn drag_move(app: AppSignals, event: &MouseEvent) {
+    let mut drag = app.drag;
+    let Some(current) = drag.peek().clone() else {
+        return;
+    };
+    if event.held_buttons().is_empty() {
+        drag.set(None);
+        return;
+    }
+    let point = event.client_coordinates();
+    match current {
+        Drag::Boundary {
+            path,
+            index,
+            direction,
+            start,
+            length,
+        } => {
+            let at = match direction {
+                Direction::Horizontal => point.x,
+                Direction::Vertical => point.y,
+            };
+            if length > 0.0 {
+                let share = ((at - start) / length) as f32;
+                let mut layout = app.layout;
+                layout.write().resize(&path, index, share);
+            }
+        }
+        Drag::Pane {
+            pane,
+            from,
+            moved: false,
+        } => {
+            if (point.x - from.0).hypot(point.y - from.1) >= DRAG_THRESHOLD {
+                drag.set(Some(Drag::Pane {
+                    pane,
+                    from,
+                    moved: true,
+                }));
+            }
+        }
+        Drag::Pane { .. } => {}
+    }
+}
 
 /// Open `agent` of `project` in `pane` and start its session. A gateway
 /// agent gets a workspace of the pane's own: `scope`, else the agent's default.
@@ -189,12 +292,43 @@ fn tab_state(sessions: Sessions, panes: &[PaneId]) -> Option<&'static str> {
 #[component]
 pub fn Workbench() -> Element {
     let app = use_context::<AppSignals>();
+    let mut drag = app.drag;
     let root = app.layout.read().active_tab().root.clone();
+    let (class, overlay) = match &*drag.read() {
+        None => ("workbench", None),
+        Some(Drag::Boundary { direction, .. }) => (
+            "workbench dragging",
+            Some(match direction {
+                Direction::Horizontal => "drag-overlay horizontal",
+                Direction::Vertical => "drag-overlay vertical",
+            }),
+        ),
+        Some(Drag::Pane { moved, .. }) => (
+            if *moved {
+                "workbench dragging moving"
+            } else {
+                "workbench"
+            },
+            None,
+        ),
+    };
     rsx! {
-        div { class: "workbench",
+        div {
+            class,
+            onmousemove: move |event| drag_move(app, &event),
+            // Drop targets handle the release first; whatever it was over,
+            // the drag ends here.
+            onmouseup: move |_| {
+                if drag.peek().is_some() {
+                    drag.set(None);
+                }
+            },
             TabBar {}
             div { class: "panes",
-                NodeView { node: root }
+                NodeView { node: root, path: Vec::new() }
+            }
+            if let Some(overlay) = overlay {
+                div { class: overlay }
             }
         }
     }
@@ -205,6 +339,7 @@ fn TabBar() -> Element {
     let app = use_context::<AppSignals>();
     let shortcuts = use_context::<Shortcuts>();
     let mut layout = app.layout;
+    let moving = app.drag.read().as_ref().and_then(Drag::moving);
     let (tabs, active) = {
         let current = layout.read();
         let projects = app.projects.read();
@@ -243,6 +378,11 @@ fn TabBar() -> Element {
                         (false, false) => "tab",
                     },
                     onclick: move |_| layout.write().select_tab(index),
+                    onmouseup: move |_| {
+                        if let Some(pane) = moving {
+                            layout.write().move_to_tab(pane, Some(index));
+                        }
+                    },
                     if let Some(state) = state {
                         span { class: "dot {state}" }
                     }
@@ -263,9 +403,14 @@ fn TabBar() -> Element {
             }
             button {
                 class: "icon new-tab",
-                title: shortcuts.title("New tab", Action::NewTab),
+                title: if moving.is_some() { "Move to a new tab".to_owned() } else { shortcuts.title("New tab", Action::NewTab) },
                 onclick: move |_| {
                     layout.write().new_tab();
+                },
+                onmouseup: move |_| {
+                    if let Some(pane) = moving {
+                        layout.write().move_to_tab(pane, None);
+                    }
                 },
                 Svg { icon: Icon::Plus }
             }
@@ -273,8 +418,10 @@ fn TabBar() -> Element {
     }
 }
 
+/// A node of the active tab's tree at `path`, child indices from its root.
 #[component]
-fn NodeView(node: Node) -> Element {
+fn NodeView(node: Node, path: Vec<usize>) -> Element {
+    let mut host = use_signal(|| None::<Rc<MountedData>>);
     match node {
         Node::Pane(pane) => rsx! {
             PaneView { key: "{pane}", pane }
@@ -288,15 +435,94 @@ fn NodeView(node: Node) -> Element {
                 Direction::Horizontal => "split horizontal",
                 Direction::Vertical => "split vertical",
             };
+            let last = children.len() - 1;
             rsx! {
-                div { class,
-                    for (child, size) in children.into_iter().zip(sizes) {
+                div {
+                    class,
+                    onmounted: move |event| host.set(Some(event.data())),
+                    for (index, (child, size)) in children.into_iter().zip(sizes.iter().copied()).enumerate() {
                         div { class: "split-child", style: "flex: {size} 1 0",
-                            NodeView { node: child }
+                            NodeView {
+                                node: child,
+                                path: path.iter().copied().chain([index]).collect::<Vec<_>>(),
+                            }
+                        }
+                        if index < last {
+                            Divider {
+                                path: path.clone(),
+                                index,
+                                direction,
+                                sizes: sizes.clone(),
+                                host,
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/// The boundary after child `index` of the split at `path`: drag it to
+/// resize the two children beside it, double-click it to make them equal.
+#[component]
+fn Divider(
+    path: Vec<usize>,
+    index: usize,
+    direction: Direction,
+    sizes: Vec<f32>,
+    host: Signal<Option<Rc<MountedData>>>,
+) -> Element {
+    let app = use_context::<AppSignals>();
+    let mut drag = app.drag;
+    let mut layout = app.layout;
+    rsx! {
+        div {
+            class: "divider",
+            onmousedown: {
+                let path = path.clone();
+                move |event: MouseEvent| {
+                    if event.trigger_button() != Some(MouseButton::Primary) {
+                        return;
+                    }
+                    // Keep the press from selecting text or focusing a pane.
+                    event.prevent_default();
+                    event.stop_propagation();
+                    let Some(element) = host.peek().clone() else {
+                        return;
+                    };
+                    let path = path.clone();
+                    let sizes = sizes.clone();
+                    spawn(async move {
+                        let Ok(rect) = element.get_client_rect().await else {
+                            return;
+                        };
+                        let (origin, extent) = match direction {
+                            Direction::Horizontal => (rect.origin.x, rect.size.width),
+                            Direction::Vertical => (rect.origin.y, rect.size.height),
+                        };
+                        if let Some((offset, length)) = boundary_span(
+                            &sizes,
+                            index,
+                            extent,
+                            DIVIDER,
+                        ) {
+                            drag.set(
+                                Some(Drag::Boundary {
+                                    path,
+                                    index,
+                                    direction,
+                                    start: origin + offset,
+                                    length,
+                                }),
+                            );
+                        }
+                    });
+                }
+            },
+            ondoubleclick: move |_| {
+                layout.write().resize(&path, index, 0.5);
+            },
         }
     }
 }
@@ -325,17 +551,42 @@ fn PaneView(pane: PaneId) -> Element {
     };
     let unread = is_unread(app.sessions, pane);
     let is_agent = status.is_some();
+    let mut drag = app.drag;
+    let moving = drag.read().as_ref().and_then(Drag::moving);
+    let class = match (focused, moving == Some(pane)) {
+        (_, true) => "pane moving",
+        (true, false) => "pane focused",
+        (false, false) => "pane",
+    };
 
     rsx! {
         section {
-            class: if focused { "pane focused" } else { "pane" },
+            class,
             onmousedown: move |_| {
                 if layout.peek().focused() != pane {
                     layout.write().focus(pane);
                 }
                 mark_read(app.sessions, pane);
             },
+            if let Some(moving) = moving.filter(|moving| *moving != pane) {
+                DropZones { pane: moving, target: pane }
+            }
             header {
+                title: "Drag to move this pane",
+                onmousedown: move |event: MouseEvent| {
+                    if event.trigger_button() == Some(MouseButton::Primary) {
+                        // Keep a drag from selecting the text it passes over.
+                        event.prevent_default();
+                        let point = event.client_coordinates();
+                        drag.set(
+                            Some(Drag::Pane {
+                                pane,
+                                from: (point.x, point.y),
+                                moved: false,
+                            }),
+                        );
+                    }
+                },
                 if let Some((state, _, _)) = &status {
                     span { class: "dot {state}" }
                 }
@@ -424,6 +675,56 @@ fn PaneView(pane: PaneId) -> Element {
                         source,
                     }
                 },
+            }
+        }
+    }
+}
+
+/// Where a dragged pane can go on `target`: beside it on one of its four
+/// sides, or in its place (the two swap). Each edge strip previews the half
+/// the pane would take.
+#[component]
+fn DropZones(pane: PaneId, target: PaneId) -> Element {
+    let app = use_context::<AppSignals>();
+    let mut layout = app.layout;
+    let mut over = use_signal(|| None::<Option<Side>>);
+    let zones = [
+        ("left", Some(Side::Left)),
+        ("right", Some(Side::Right)),
+        ("top", Some(Side::Top)),
+        ("bottom", Some(Side::Bottom)),
+        ("center", None),
+    ];
+    let preview = over().map(|side| match side {
+        Some(Side::Left) => "drop-preview left",
+        Some(Side::Right) => "drop-preview right",
+        Some(Side::Top) => "drop-preview top",
+        Some(Side::Bottom) => "drop-preview bottom",
+        None => "drop-preview center",
+    });
+    rsx! {
+        div { class: "drop-zones",
+            if let Some(preview) = preview {
+                div { class: preview }
+            }
+            for (name, side) in zones {
+                div {
+                    key: "{name}",
+                    class: "drop-zone {name}",
+                    onmouseenter: move |_| over.set(Some(side)),
+                    onmouseleave: move |_| {
+                        if over.peek().as_ref() == Some(&side) {
+                            over.set(None);
+                        }
+                    },
+                    onmouseup: move |_| {
+                        let mut layout = layout.write();
+                        match side {
+                            Some(side) => layout.move_pane(pane, target, side),
+                            None => layout.swap_panes(pane, target),
+                        };
+                    },
+                }
             }
         }
     }
