@@ -2,6 +2,7 @@
 //! tested headless. `ukai-app` wraps these types in signals and renders them.
 
 pub mod attachment;
+pub mod browser;
 pub mod config;
 pub mod keymap;
 pub mod knowledge;

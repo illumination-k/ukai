@@ -41,7 +41,7 @@ impl Workspace {
     /// The workspace a pane's agent works in, with a shared one normalized
     /// to `None`: the gateway ignores the key in that case, so keeping it
     /// would show the same reports once per pane.
-    fn of(project: &ProjectId, agent: &str, workspace: Option<&PaneWorkspace>) -> Self {
+    pub fn of(project: &ProjectId, agent: &str, workspace: Option<&PaneWorkspace>) -> Self {
         Self {
             project: project.clone(),
             agent: agent.to_owned(),
@@ -91,7 +91,7 @@ pub fn endpoint(
 }
 
 /// How `workspace`'s agent is declared right now.
-fn declaration(
+pub fn declaration(
     configs: &HashMap<ProjectId, Result<Config, String>>,
     workspace: &Workspace,
 ) -> Result<AgentSpec, String> {
@@ -113,36 +113,46 @@ fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<ReportsEndpoint, S
         .ok_or_else(|| format!("agent `{}` serves no reports", workspace.agent))
 }
 
-/// The endpoints [`Follow`] polls through, kept between rounds so a listing
-/// reuses its connection instead of building a client — and its TLS
-/// configuration — every few seconds. An agent whose declaration changed,
-/// because the project was reloaded, is resolved again.
-#[derive(Default)]
-struct Endpoints(HashMap<Workspace, (AgentSpec, Result<ReportsEndpoint, String>)>);
+/// The endpoints a poller such as [`Follow`] reads through, kept between
+/// rounds so a listing reuses its connection instead of building a client —
+/// and its TLS configuration — every few seconds. An agent whose
+/// declaration changed, because the project was reloaded, is resolved again
+/// with `resolve`.
+pub struct Endpoints<E> {
+    known: HashMap<Workspace, (AgentSpec, Result<E, String>)>,
+    resolve: fn(&AgentSpec, &Workspace) -> Result<E, String>,
+}
 
-impl Endpoints {
-    fn get(
-        &mut self,
-        configs: &HashMap<ProjectId, Result<Config, String>>,
-        workspace: &Workspace,
-    ) -> Result<ReportsEndpoint, String> {
-        let spec = declaration(configs, workspace)?;
-        let known = self
-            .0
-            .get(workspace)
-            .is_some_and(|(declared, _)| *declared == spec);
-        if !known {
-            let endpoint = resolve(&spec, workspace);
-            self.0.insert(workspace.clone(), (spec, endpoint));
-        }
-        match self.0.get(workspace) {
-            Some((_, endpoint)) => endpoint.clone(),
-            None => Err("this agent's reports cannot be read".to_owned()),
+impl<E: Clone> Endpoints<E> {
+    pub fn new(resolve: fn(&AgentSpec, &Workspace) -> Result<E, String>) -> Self {
+        Self {
+            known: HashMap::new(),
+            resolve,
         }
     }
 
-    fn keep(&mut self, wanted: &[Workspace]) {
-        self.0.retain(|workspace, _| wanted.contains(workspace));
+    pub fn get(
+        &mut self,
+        configs: &HashMap<ProjectId, Result<Config, String>>,
+        workspace: &Workspace,
+    ) -> Result<E, String> {
+        let spec = declaration(configs, workspace)?;
+        let known = self
+            .known
+            .get(workspace)
+            .is_some_and(|(declared, _)| *declared == spec);
+        if !known {
+            let endpoint = (self.resolve)(&spec, workspace);
+            self.known.insert(workspace.clone(), (spec, endpoint));
+        }
+        match self.known.get(workspace) {
+            Some((_, endpoint)) => endpoint.clone(),
+            None => Err("this agent's workspace cannot be reached".to_owned()),
+        }
+    }
+
+    pub fn keep(&mut self, wanted: &[Workspace]) {
+        self.known.retain(|workspace, _| wanted.contains(workspace));
     }
 }
 
@@ -185,7 +195,7 @@ pub fn Follow() -> Element {
     let app = use_context::<AppSignals>();
     let mut listings = app.reports;
     use_future(move || async move {
-        let mut endpoints = Endpoints::default();
+        let mut endpoints = Endpoints::new(resolve);
         loop {
             let wanted = {
                 let layout = app.layout.peek();
@@ -387,7 +397,7 @@ mod tests {
         let project = projects.add(std::path::Path::new("/work/ukai"));
         let workspace = Workspace::of(&project, "claude", None);
         let mut configs = HashMap::from([(project.clone(), config(&[("claude", gateway())]))]);
-        let mut endpoints = Endpoints::default();
+        let mut endpoints = Endpoints::new(resolve);
         let first = endpoints.get(&configs, &workspace);
         assert_eq!(
             first.as_ref().map(ReportsEndpoint::base).ok(),
@@ -413,6 +423,6 @@ mod tests {
 
         // Nothing is kept for a workspace no pane works in.
         endpoints.keep(&[]);
-        assert!(endpoints.0.is_empty());
+        assert!(endpoints.known.is_empty());
     }
 }

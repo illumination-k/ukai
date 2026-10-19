@@ -13,8 +13,10 @@ use ukai_core::{Direction, Layout, Node, PaneContent, PaneId, ProjectId, Project
 
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
+use crate::browser_pane::BrowserView;
 use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
+use crate::ports::{PortPrompt, open_browser};
 use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
@@ -151,6 +153,15 @@ pub fn pane_label(
             );
             (Some(project_name(project)), file)
         }
+        Some(PaneContent::Browser {
+            project,
+            port,
+            path,
+            source,
+        }) => (
+            Some(project_name(project)),
+            ukai_core::browser::label(source.agent().unwrap_or("localhost"), *port, path),
+        ),
         Some(PaneContent::Schedule {
             project, schedule, ..
         }) => (
@@ -404,6 +415,15 @@ fn PaneView(pane: PaneId) -> Element {
                         source,
                     }
                 },
+                PaneContent::Browser { project, port, path, source } => rsx! {
+                    BrowserView {
+                        pane,
+                        project,
+                        port,
+                        path,
+                        source,
+                    }
+                },
             }
         }
     }
@@ -415,6 +435,7 @@ fn PaneView(pane: PaneId) -> Element {
 fn Picker(pane: PaneId) -> Element {
     let app = use_context::<AppSignals>();
     let mut chosen = use_signal(|| app.projects.peek().selected().map(|p| p.id.clone()));
+    let mut prompting = use_signal(|| false);
     let projects: Vec<(ProjectId, String)> = app
         .projects
         .read()
@@ -497,12 +518,35 @@ fn Picker(pane: PaneId) -> Element {
                         },
                     }
                     if let Some(project) = current {
-                        button {
-                            class: "outline open-file",
-                            title: "Show an HTML report or image from this project",
-                            onclick: move |_| pick_report(app, Some(pane), project.clone()),
-                            Svg { icon: Icon::Document }
-                            "Open report or image…"
+                        div { class: "open-other",
+                            button {
+                                class: "outline open-file",
+                                title: "Show an HTML report or image from this project",
+                                onclick: {
+                                    let project = project.clone();
+                                    move |_| pick_report(app, Some(pane), project.clone())
+                                },
+                                Svg { icon: Icon::Document }
+                                "Open report or image…"
+                            }
+                            button {
+                                class: "outline open-file",
+                                title: "Show a page served on a port of this machine",
+                                onclick: move |_| prompting.toggle(),
+                                Svg { icon: Icon::Globe }
+                                "Open a local port…"
+                            }
+                        }
+                        if prompting() {
+                            PortPrompt {
+                                on_open: {
+                                    let project = project.clone();
+                                    move |(port, path): (u16, String)| {
+                                        open_browser(app, pane, &project, port, path, ReportSource::Project);
+                                    }
+                                },
+                                on_cancel: move |()| prompting.set(false),
+                            }
                         }
                     }
                 }

@@ -10,6 +10,11 @@
 //! report can load. The `list_reports` tool shows what the user can open
 //! right now.
 //!
+//! With a previews file from the relay, the `open_preview` tool lets the
+//! agent ask the user to look at a server it runs in the pod: the relay lists
+//! what is recorded there (`crate::ports`), and the app opens it in a pane
+//! through a tunnel.
+//!
 //! In a gateway's pod it also hands the agent the knowledge the gateway
 //! keeps for the project (`ukai_acp::knowledge`): a project `gateway.toml`
 //! names, whose repositories share it, or else the agent's repository: the notes so far in
@@ -22,7 +27,7 @@
 
 use std::future::Future;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -39,6 +44,7 @@ pub const SERVER_NAME: &str = "ukai";
 pub const SUBCOMMAND: &str = "mcp";
 
 const LIST_REPORTS: &str = "list_reports";
+const OPEN_PREVIEW: &str = "open_preview";
 const LIST_KNOWLEDGE: &str = "list_knowledge";
 const READ_KNOWLEDGE: &str = "read_knowledge";
 const WRITE_KNOWLEDGE: &str = "write_knowledge";
@@ -102,6 +108,9 @@ pub struct Session {
     changes: std::cell::Cell<usize>,
     /// The commit the checkout at a root is at, recorded with each write.
     head: fn(&Path) -> Option<String>,
+    /// Where `open_preview` records what the agent asks to show, for the
+    /// relay to list; without it the tool is not offered.
+    previews: Option<PathBuf>,
 }
 
 impl Default for Session {
@@ -115,7 +124,15 @@ impl Session {
         Self {
             changes: std::cell::Cell::new(0),
             head,
+            previews: None,
         }
+    }
+
+    /// Offer `open_preview`, recording into `file`.
+    #[must_use]
+    pub fn with_previews(mut self, file: PathBuf) -> Self {
+        self.previews = Some(file);
+        self
     }
 }
 
@@ -149,13 +166,22 @@ pub struct Gateway {
 /// The ACP `mcpServers` entry that starts this server for the checkout at
 /// `root`, with `program` being the relay binary. With `gateway`, it also
 /// serves the knowledge kept there; the token goes in the environment, not
-/// the arguments, so it stays out of `ps`.
-pub fn server_entry(program: &Path, root: &Path, gateway: Option<&Gateway>) -> Value {
+/// the arguments, so it stays out of `ps`. With `previews`, the agent can
+/// ask for its servers to be shown, recorded in that file.
+pub fn server_entry(
+    program: &Path,
+    root: &Path,
+    gateway: Option<&Gateway>,
+    previews: Option<&Path>,
+) -> Value {
     let mut args = vec![
         json!(SUBCOMMAND),
         json!("--root"),
         json!(root.to_string_lossy()),
     ];
+    if let Some(previews) = previews {
+        args.extend([json!("--previews"), json!(previews.to_string_lossy())]);
+    }
     let mut env = Vec::new();
     if let Some(gateway) = gateway {
         args.extend([json!("--gateway"), json!(gateway.url)]);
@@ -170,11 +196,19 @@ pub fn server_entry(program: &Path, root: &Path, gateway: Option<&Gateway>) -> V
 }
 
 /// Serve MCP on stdin/stdout for the checkout at `root` until stdin closes,
-/// with the knowledge at `notes` when there is a gateway to keep it.
-pub async fn serve(root: &Path, notes: Option<KnowledgeEndpoint>) -> io::Result<()> {
+/// with the knowledge at `notes` when there is a gateway to keep it, and
+/// previews recorded in `previews` when the relay reads them.
+pub async fn serve(
+    root: &Path,
+    notes: Option<KnowledgeEndpoint>,
+    previews: Option<PathBuf>,
+) -> io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
-    let session = Session::default();
+    let mut session = Session::default();
+    if let Some(previews) = previews {
+        session = session.with_previews(previews);
+    }
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -231,21 +265,25 @@ pub async fn handle<N: Notes>(
                     "protocolVersion": version,
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": instructions(root, known.as_ref())
+                    "instructions": instructions(root, known.as_ref(), session.previews.is_some())
                 }),
             )
         }
         "ping" => result(id, json!({})),
-        "tools/list" => result(id, json!({ "tools": tools(notes.is_some()) })),
+        "tools/list" => result(
+            id,
+            json!({ "tools": tools(notes.is_some(), session.previews.is_some()) }),
+        ),
         "tools/call" => {
             let name = message.pointer("/params/name").and_then(Value::as_str);
             let arguments = message
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(Value::Null);
-            let outcome = match (name, notes) {
-                (Some(LIST_REPORTS), _) => list_reports(root),
-                (Some(tool), Some(notes)) => {
+            let outcome = match (name, notes, &session.previews) {
+                (Some(LIST_REPORTS), _, _) => list_reports(root),
+                (Some(OPEN_PREVIEW), _, Some(previews)) => open_preview(previews, &arguments),
+                (Some(tool), Some(notes), _) => {
                     match call_knowledge(root, notes, session, tool, &arguments).await {
                         Some(outcome) => outcome,
                         None => return Some(error(id, -32602, "unknown tool")),
@@ -266,8 +304,9 @@ pub async fn handle<N: Notes>(
     })
 }
 
-/// The tools on offer: the knowledge ones only with a gateway to keep it.
-fn tools(knowledge: bool) -> Vec<Value> {
+/// The tools on offer: the knowledge ones only with a gateway to keep it,
+/// `open_preview` only with a relay to list the previews.
+fn tools(knowledge: bool, previews: bool) -> Vec<Value> {
     let name = json!({
         "type": "string",
         "description": "The note's name: lowercase letters, digits, and `-`, like `release-process`."
@@ -278,6 +317,33 @@ fn tools(knowledge: bool) -> Vec<Value> {
         "inputSchema": { "type": "object", "properties": {} },
         "annotations": { "readOnlyHint": true }
     })];
+    if previews {
+        tools.push(json!({
+            "name": OPEN_PREVIEW,
+            "description": "Show the user a server you run here — a web app's dev server, a docs site — in a ukai pane next to this conversation. They cannot reach this machine's ports otherwise. Call it once the server is listening.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "port": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                        "description": "The TCP port the server listens on here."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Where to start, from the server's root: `/`, `/docs/?q=1`. Defaults to `/`."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "A few words saying what it is, like `Storybook`."
+                    }
+                },
+                "required": ["port"]
+            },
+            "annotations": { "destructiveHint": false, "idempotentHint": false }
+        }));
+    }
     if knowledge {
         tools.extend([
             json!({
@@ -518,10 +584,12 @@ fn knowledge_index(notes: &[NoteSummary]) -> String {
 }
 
 /// What the agent is told about ukai, from the checkout's `ukai.toml` as it
-/// is now and, in a gateway's pod, the notes `known` so far.
+/// is now and, in a gateway's pod, the notes `known` so far; with
+/// `previews`, how to show the user a server.
 pub fn instructions(
     root: &Path,
     known: Option<&Result<Vec<NoteSummary>, KnowledgeError>>,
+    previews: bool,
 ) -> String {
     let mut text = String::from(
         "The user is following this session in ukai, a desktop client for ACP agents. \
@@ -547,6 +615,18 @@ pub fn instructions(
     text.push_str(&format!(
         "\nThe `{LIST_REPORTS}` tool lists the reports the user can open right now."
     ));
+    if previews {
+        text.push_str(&format!(
+            "\n\nPreviews: the user cannot reach the ports of this machine. When you start a \
+             server they should look at — a web app's dev server, a docs site, a component \
+             gallery — run it in the background so the turn can end, and once it listens \
+             call `{OPEN_PREVIEW}` with its port: ukai opens it in a pane next to this \
+             conversation, tunnelled to the user's machine, where they can use and reload \
+             it. Binding to `127.0.0.1` is enough; the browser asks for `127.0.0.1:<port>`, \
+             so a server that checks the Host header must allow that. Do not try to open a \
+             browser yourself."
+        ));
+    }
     if let Some(known) = known {
         text.push_str(&knowledge_rules(known));
     }
@@ -618,6 +698,42 @@ fn report_rules(reports: &Reports) -> String {
          - A report's scripts must not declare a top-level `ipc` with `const` or `let`; the \
          viewer already defines it.\n"
     )
+}
+
+/// Record a preview for the relay to list, and say whether anything
+/// listens on its port yet.
+fn open_preview(previews: &Path, arguments: &Value) -> Result<String, String> {
+    let port = arguments
+        .get("port")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port > 0)
+        .ok_or_else(|| "`port` must be a TCP port, 1 to 65535.".to_owned())?;
+    let path = arguments.get("path").and_then(Value::as_str).unwrap_or("/");
+    let path = ukai_acp::ports::preview_path(path).ok_or_else(|| {
+        format!("`path` must be a path on the server, starting with `/`, not `{path}`.")
+    })?;
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(|title| title.chars().take(80).collect());
+    crate::ports::record_preview(previews, port, path.clone(), title)
+        .map_err(|error| format!("The preview could not be recorded: {error}"))?;
+    let mut text = format!(
+        "Asked ukai to show port {port} at `{path}` in a pane. If the user is not watching \
+         now, they find it under Ports in the sidebar."
+    );
+    let listening =
+        crate::ports::scan().map(|ports| ports.iter().any(|listening| listening.port == port));
+    if listening == Some(false) {
+        text.push_str(&format!(
+            " Nothing listens on port {port} yet, so the pane shows an error until something \
+             does and the user reloads it."
+        ));
+    }
+    Ok(text)
 }
 
 fn list_reports(root: &Path) -> Result<String, String> {

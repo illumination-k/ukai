@@ -10,6 +10,7 @@ use ukai_config::Config;
 use ukai_core::{Layout, PaneContent, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
+use crate::ports::PortListings;
 use crate::remote_reports::Listings;
 
 /// Locations resolved at startup.
@@ -35,6 +36,9 @@ pub struct AppSignals {
     /// What each gateway workspace last listed, kept by
     /// [`crate::remote_reports::Follow`].
     pub reports: Listings,
+    /// What each gateway workspace last listed of its ports, kept by
+    /// [`crate::ports::FollowPorts`].
+    pub ports: PortListings,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
     /// The names of the gateway schedules the app has listed, for pane titles.

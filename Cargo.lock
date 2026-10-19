@@ -9785,6 +9785,7 @@ dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-http",
  "base64 0.23.1",
+ "futures",
  "reqwest 0.13.5",
  "rstest",
  "security-framework",
@@ -9793,6 +9794,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "ukai-config",
 ]
@@ -9890,6 +9892,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tower",
  "tracing",
  "tracing-subscriber",

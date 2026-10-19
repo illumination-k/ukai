@@ -74,15 +74,15 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate          | kind      | 役割                                                                                                                                                                                                                                                                                                            |
-| -------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                            |
-| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。UI に依存しない。                                                                                                                                                                              |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`）。UI フレームワークに依存しない。 |
-| `ukai-voice`   | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                     |
-| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                           |
-| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                 |
-| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                          |
+| crate          | kind      | 役割                                                                                                                                                                                                                                                                                                                                                              |
+| -------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                              |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。UI に依存しない。                                                                                                                    |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`）。UI フレームワークに依存しない。 |
+| `ukai-voice`   | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                       |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                             |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                   |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                            |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -240,6 +240,9 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   空なら `ukai.toml` への足し方を教える。ツールは `list_reports`（ユーザーが今開けるレポート）と、gateway の
   Pod ではナレッジ（後述「ナレッジ」）の 4 つ。ukai の機能をエージェントに知らせるときはここを育てる。
   手元の stdio エージェントにはまだ渡していない。
+- 同じく `/ports` で Pod の中で listen しているポートとエージェントが頼んだプレビューを、`/forward/<port>` で
+  そのポートへの TCP 接続 1 本を WebSocket で出す（`ports`。後述「ブラウザ pane とポート」）。MCP サーバーには
+  `--previews <ファイル>` を渡し、`open_preview` ツールが頼んだプレビューをそのファイルに記録する。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
 - クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
 
@@ -257,6 +260,9 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
   すでにある仕事を読むだけなので、動いている Pod がなければ 410 を返してクライアントにそう言わせる
   （イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
+- ポートは `GET /agents/<id>/ports`（一覧）と `GET /agents/<id>/forward/<port>`（WebSocket）で中継する。
+  ワークスペースの決め方・トークン・Pod を起こさないことはレポートと同じ。forward はクライアントを upgrade する
+  前に relay へつなぎ、relay の 502（何も listen していない）はそのまま返す。
 - スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
 - プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を `/agents/<id>/knowledge` と、Pod 向けの
   `/workspace/knowledge` で持つ。
@@ -568,7 +574,8 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 
 ## UI
 
-- 左: サイドバー（プロジェクトごとのエージェント一覧と接続状態、起動できるエージェント、レポート一覧）。
+- 左: サイドバー（プロジェクトごとのエージェント一覧と接続状態、起動できるエージェント、レポート一覧、
+  gateway ワークスペースのポート一覧）。
 - 中央: タブバーと pane 木。各 pane はヘッダ（タイトル・状態・分割/閉じるボタン）を持つ。
 - `mod+k`: パレット。開いている pane へ移動（フォーカス中のものを除く）、全プロジェクトのエージェントを開く、
   全プロジェクトのレポートと gateway ワークスペースのレポートを開く、レイアウト操作（新規タブ・分割・閉じる・プロジェクトを開く）を 1 つの
@@ -682,12 +689,72 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - `ukai-core` の状態遷移は `fn apply(state, event) -> state` 形式の純粋関数にし、ユニットテストとプロパティテストで固める。
 - ログは `tracing`。ファイル（`~/.local/state/ukai/ukai.log`）と stderr に出す。
 
+## ブラウザ pane とポート
+
+エージェントが立てた dev server（Web アプリ、ドキュメント、コンポーネントカタログ）をチャットの横で見る。
+pane の中身は `browser { project, port, path, source }`。`source` はレポートと同じ `ReportSource` で、`project`
+（既定）なら手元のポート、`agent { agent, workspace }` なら gateway エージェントのワークスペースのポート。
+
+### 手元のポート
+
+`http://localhost:<port><path>` をそのまま開く（`::1` だけで listen する dev server もあるので `127.0.0.1` では
+なく `localhost`）。サイドバーの「Ports」の「+」か空 pane の「Open a local port…」で `5173` や
+`localhost:3000/docs` を打つ（`ukai_core::browser::parse_target`。手元の名前しか受けない）。
+
+### ワークスペースのポート（トンネル）
+
+Pod の中のポートには手元から届かない。HTTP をパスのプレフィックスで中継すると、dev server の絶対パスや
+HMR の WebSocket が壊れるので、kubectl の port-forward と同じく **TCP をそのまま運ぶ**:
+
+```
+browser pane ──▶ 127.0.0.1:<port>（ukai_acp::ports::Tunnel）
+                   │ 受けた TCP 接続 1 本ごとに WebSocket 1 本（binary フレーム）
+                   ▼
+   ukai-gateway  /agents/<id>/forward/<port>   （ワークスペースとトークンは /acp と同じ）
+                   ▼
+   ukai-relay    /forward/<port>  ──TCP──▶ Pod 内の localhost:<port>
+```
+
+- トンネルは pane が表示している間だけ開き、`127.0.0.1` だけで listen する。ポートは Pod 側と同じ番号が空いて
+  いればそれ（オリジンが変わらないので、ストレージや OAuth のリダイレクト先が保たれる）、なければ任意。
+  `SO_REUSEADDR` は付けない（macOS では `*:<port>` の既存サーバーの横に bind でき、`127.0.0.1` への接続を
+  奪ってしまうため）。web view も `127.0.0.1` を開く（`localhost` だと `::1` の別のサーバーに当たりうる）。
+- WebSocket の upgrade は reqwest で行う（エージェントのヘッダと TLS 設定をそのまま使う。IAP の背後でも通る）。
+  gateway は中継中クライアントに 20 秒ごとに Ping を送るので、静かな接続もプロキシに切られない。
+- relay は Pod の中から `localhost` につなぐので、`127.0.0.1` だけで listen する dev server にも届く。
+- 届かないとき（Pod が止まっている 410、何も listen していない 502）は、トンネルがその接続に理由を書いた
+  HTTP 応答を返す（browser pane にただのリセットを見せないため）。
+
+### 一覧とプレビュー
+
+- relay の `/ports` は `/proc/net/tcp*` の LISTEN を読み（Linux だけ）、`/proc/<pid>/fd` からプロセス名を添える。
+  relay 自身のポートは除く。
+- エージェントは Pod のポートが見えないことも、ukai が開けることも知らない。そこで relay の MCP サーバーの
+  `instructions` に伝え、`open_preview(port, path, title)` ツールを出す。記録は relay の一時ディレクトリの
+  JSON Lines ファイル（relay の起動時に空にする）で、`/ports` が最新 20 件を返す。`path` はオリジンに足すだけの
+  パスに限る（`ukai_acp::ports::preview_path`）。
+- アプリ（`ukai-app/src/ports.rs`）は開いている gateway エージェント pane のワークスペースの一覧を 3 秒ごとに
+  読み、サイドバーの「Ports」に出す（クリックで browser pane）。前回より新しいプレビューは、そのポートの
+  browser pane があればそこで、なければエージェントの pane の右に開く。フォーカスは動かさない。初めて読んだ
+  ワークスペースのプレビューは開かない（起動し直すたびに全部開かないため。`ukai_core::browser::new_previews`）。
+
+### 描画
+
+レポートと同じく **IPC ハンドラを持たない子 WebView**（`ukai-app/src/child_view.rs` を共有）で、`incognito`。
+違うのは、ページが信頼できないことは同じでも行き先を制限しないところ: `http(s)` へのナビゲーションは pane の中で
+進み、それ以外のスキームと新しいウィンドウは既定のブラウザに渡す。CSP も付けない（応答はアプリが作らない）。
+pane の上部に戻る・進む・再読込・アドレス（オリジン上のパス。Enter で移動）・外部ブラウザで開くを置く。
+子 WebView はタブの切り替えで作り直すので、ページの状態（ログインなど）はそこで失われる。
+
 ## Security
 
 - `fs/*` はプロジェクトルート配下に正規化後のパスで制限。シンボリックリンク経由の脱出も拒否。
 - 認証情報は環境変数かキーチェーンの参照のみ。設定ファイル・state ファイル・ログに値を書かない（ヘッダ値はログでマスク）。
 - HTTP エージェントは `https://` / `wss://` を既定とし、平文は `localhost` 以外で警告。
 - HTML レポートは前述の IPC を持たない子 WebView + 配信範囲の制限 + CSP。
+- browser pane も IPC を持たない子 WebView。トンネルは `127.0.0.1` だけで listen し、pane を閉じると止まる
+  （開いている間は手元の他のプロセスからも使える。kubectl の port-forward と同じ）。relay の `/forward` は
+  トークンが要り、Pod の中の `localhost` にしかつながない。
 
 ## Milestones
 
@@ -697,12 +764,16 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 | 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                                              |
 | 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                                        |
 | 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、音声入力、gateway のスケジュール（コマンドと prompt、済み）。リサイズ |
-| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、ACP コンテンツからのレポート                                                                                                                 |
+| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、browser pane と gateway ワークスペースのポートへのトンネル・`open_preview`（済み）、ACP コンテンツからのレポート                             |
 | 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                             |
 
 ## Open questions
 
 - ナレッジを手元の stdio エージェントにも渡すか（今は gateway の Pod だけ）。渡すなら置き場所が要る。
+- `open_preview` を手元の stdio エージェントにも渡すか（relay の MCP サーバーを手元でも足すことになる）。
+  手元のポートの一覧も今はない（macOS には `/proc` がなく、マシン全体の listen は雑音が多い）。
+- browser pane の子 WebView を保存領域ありにするか（タブを切り替えてもログインが残る）。macOS では既定の
+  データストアがアプリの web view と共有になるので、分けるなら `data_store_identifier`（macOS 14+）が要る。
 - 認証: RFD は認証を別ページに切り出している。OAuth 系のクラウドエージェントをどう扱うか（ブラウザで
   ログインしてトークンを受け取るフロー）を Phase 2 で決める。
 - ACP v2（`unstable_protocol_v2`）をいつ追うか。`SessionEvent` 境界で吸収できる前提だが要確認。

@@ -3,6 +3,8 @@
 mod agent_pane;
 mod alert;
 mod app;
+mod browser_pane;
+mod child_view;
 mod clipboard;
 mod icons;
 mod knowledge;
@@ -10,6 +12,7 @@ mod layout;
 mod markdown;
 mod palette;
 mod persist;
+mod ports;
 mod projects;
 mod remote_reports;
 mod report_pane;

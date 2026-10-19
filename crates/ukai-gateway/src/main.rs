@@ -15,6 +15,12 @@
 //! them in its pod. Same token, same workspace headers; a report request
 //! never starts a pod.
 //!
+//! `GET /agents/<id>/ports` lists the ports something listens on in that
+//! workspace's pod and the previews its agent asked for, and
+//! `GET /agents/<id>/forward/<port>` upgrades to a WebSocket carrying one TCP
+//! connection to that port in the pod, both through the pod's `ukai-relay`.
+//! Like reports, neither starts a pod.
+//!
 //! `POST /agents/<id>/restart` stops that workspace's pod, so the next
 //! connection starts a fresh one, e.g. to pick up a newer agent release.
 //! Every session in the workspace ends with it.
@@ -175,6 +181,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/agents/{id}/restart", post(restart))
         .route("/agents/{id}/reports", get(reports))
         .route("/agents/{id}/reports/files/{*path}", get(reports))
+        .route("/agents/{id}/ports", get(ports))
+        .route("/agents/{id}/forward/{port}", get(forward))
         .route(
             "/agents/{id}/schedules",
             get(list_schedules).post(create_schedule),
@@ -336,22 +344,42 @@ async fn restart(
 /// that is already there. A workspace whose pod has idled out is 410, so a
 /// pane can say so instead of waiting out an image pull.
 async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: Uri) -> Response {
-    if !authorized(&gateway, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     // The path is read from the URI rather than through `Path`, which cannot
     // serve both routes at once, and so the file part stays percent-encoded
     // for the relay to decode exactly once.
     let Some((id, suffix)) = reports_target(uri.path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(agent) = gateway.agents.get(&id).cloned() else {
-        return StatusCode::NOT_FOUND.into_response();
+    let endpoint = match serving_relay(&gateway, &id, &headers).await {
+        Ok(endpoint) => endpoint,
+        Err(response) => return response,
     };
-    let pane = match pane_key(&headers) {
-        Ok(pane) => pane,
-        Err(problem) => return (StatusCode::BAD_REQUEST, problem).into_response(),
+    match fetch(&endpoint.reports_url(suffix), &endpoint.token).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot read the workspace's reports");
+            StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
+}
+
+/// The relay of the running pod of the workspace a request asks for,
+/// resolved as for `/acp` and with the same token, or the response saying
+/// why there is none. It never starts a pod: what asks this way reads work
+/// that is already there, and a workspace that idled out is 410.
+async fn serving_relay(
+    gateway: &Gateway,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<RelayEndpoint, Response> {
+    if !authorized(gateway, headers) {
+        return Err(StatusCode::UNAUTHORIZED.into_response());
+    }
+    let Some(agent) = gateway.agents.get(id).cloned() else {
+        return Err(StatusCode::NOT_FOUND.into_response());
     };
+    let pane =
+        pane_key(headers).map_err(|problem| (StatusCode::BAD_REQUEST, problem).into_response())?;
     let plan = Plan::new(
         agent,
         &gateway.user,
@@ -360,22 +388,68 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
     );
     let pod = match gateway.cluster.serving_pod(&plan).await {
         Ok(Some(pod)) => pod,
-        Ok(None) => return gone(),
+        Ok(None) => return Err(gone()),
         Err(error) => {
             tracing::warn!(agent = %id, %error, "cannot look up the workspace's pod");
-            return StatusCode::BAD_GATEWAY.into_response();
+            return Err(StatusCode::BAD_GATEWAY.into_response());
         }
     };
-    let Some(endpoint) = RelayEndpoint::of(&pod) else {
-        return gone();
+    RelayEndpoint::of(&pod).ok_or_else(gone)
+}
+
+/// `GET /agents/<id>/ports`: what listens in the workspace's pod and the
+/// previews its agent asked for, from the pod's relay.
+async fn ports(
+    State(gateway): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let endpoint = match serving_relay(&gateway, &id, &headers).await {
+        Ok(endpoint) => endpoint,
+        Err(response) => return response,
     };
-    match fetch(&endpoint, suffix).await {
+    match fetch(&endpoint.ports_url(), &endpoint.token).await {
         Ok(response) => response,
         Err(error) => {
-            tracing::warn!(agent = %id, %error, "cannot read the workspace's reports");
+            tracing::warn!(agent = %id, %error, "cannot list the workspace's ports");
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
+}
+
+/// `GET /agents/<id>/forward/<port>`: one TCP connection to `port` in the
+/// workspace's pod, as a WebSocket. The relay is reached before the client
+/// is upgraded, so a port nothing listens on is the relay's 502 rather than
+/// a socket that closes at once.
+async fn forward(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, port)): Path<(String, u16)>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let endpoint = match serving_relay(&gateway, &id, &headers).await {
+        Ok(endpoint) => endpoint,
+        Err(response) => return response,
+    };
+    let upstream = match connect_relay_url(&endpoint.forward_url(port), &endpoint.token).await {
+        Ok(upstream) => upstream,
+        Err(tungstenite::Error::Http(response)) => {
+            return StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY)
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(agent = %id, port, %error, "cannot reach the workspace's relay");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    upgrade.on_upgrade(move |socket| async move {
+        let (client_tx, client_rx) = socket.split();
+        let (relay_tx, relay_rx) = upstream.split();
+        if let Err(error) = pump(client_tx, client_rx, relay_tx, relay_rx).await {
+            tracing::debug!(agent = %id, port, %error, "a forwarded connection ended with an error");
+        }
+    })
 }
 
 /// The agent a report request names and the part of it the relay serves
@@ -410,12 +484,12 @@ fn gone() -> Response {
         .into_response()
 }
 
-/// Read one report response from the pod's relay and pass it on, with the
+/// Read one response from the pod's relay at `url` and pass it on, with the
 /// headers a web view needs to render it and nothing else.
-async fn fetch(endpoint: &RelayEndpoint, suffix: &str) -> Result<Response, BoxError> {
+async fn fetch(url: &str, token: &str) -> Result<Response, BoxError> {
     let response = reqwest::Client::new()
-        .get(endpoint.reports_url(suffix))
-        .bearer_auth(&endpoint.token)
+        .get(url)
+        .bearer_auth(token)
         .timeout(REPORT_TIMEOUT)
         .send()
         .await?;
@@ -443,7 +517,7 @@ async fn fetch(endpoint: &RelayEndpoint, suffix: &str) -> Result<Response, BoxEr
     Ok(builder.body(body.into())?)
 }
 
-/// How long the gateway waits on the pod for one report.
+/// How long the gateway waits on the pod for one report or listing.
 const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Answers for one agent's schedules: `Err` is the response when the
@@ -965,11 +1039,17 @@ async fn connect_relay(pod: &Pod) -> Result<Upstream, BoxError> {
 }
 
 async fn connect_relay_at(endpoint: &RelayEndpoint) -> Result<Upstream, BoxError> {
-    let mut request = endpoint.acp_url().as_str().into_client_request()?;
-    request.headers_mut().insert(
-        header::AUTHORIZATION,
-        format!("Bearer {}", endpoint.token).parse()?,
-    );
+    Ok(connect_relay_url(&endpoint.acp_url(), &endpoint.token).await?)
+}
+
+async fn connect_relay_url(url: &str, token: &str) -> Result<Upstream, tungstenite::Error> {
+    let mut request = url.into_client_request()?;
+    let authorization = format!("Bearer {token}")
+        .parse()
+        .map_err(|_| tungstenite::Error::Url(tungstenite::error::UrlError::NoHostName))?;
+    request
+        .headers_mut()
+        .insert(header::AUTHORIZATION, authorization);
     let (upstream, _) = tokio_tungstenite::connect_async(request).await?;
     Ok(upstream)
 }
