@@ -141,7 +141,7 @@ fn BrowserSurface(
         view,
         mut host,
         failure,
-    } = use_child_view(app.palette, {
+    } = use_child_view(use_memo(move || app.covered()), {
         let start = format!("{origin}{path}");
         move |bounds, window| build(&start, bounds, window)
     });

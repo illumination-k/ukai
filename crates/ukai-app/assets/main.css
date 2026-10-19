@@ -629,12 +629,155 @@ button.new-tab {
   min-height: 0;
 }
 
-.split.horizontal > .split-child + .split-child {
-  border-left: 1px solid var(--divider);
+/* 1px wide (`DIVIDER` in layout.rs), with a wider grip laid over the panes. */
+.divider {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  background: var(--divider);
 }
 
-.split.vertical > .split-child + .split-child {
-  border-top: 1px solid var(--divider);
+.split.horizontal > .divider {
+  width: 1px;
+  cursor: col-resize;
+}
+
+.split.vertical > .divider {
+  height: 1px;
+  cursor: row-resize;
+}
+
+.divider::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+
+.split.horizontal > .divider::after {
+  inset: 0 -3px;
+}
+
+.split.vertical > .divider::after {
+  inset: -3px 0;
+}
+
+.divider:hover {
+  background: var(--muted-fg);
+}
+
+.workbench.dragging {
+  user-select: none;
+}
+
+/* Over everything while a boundary is dragged, so the pointer is followed
+   wherever it goes. */
+.drag-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+}
+
+.drag-overlay.horizontal {
+  cursor: col-resize;
+}
+
+.drag-overlay.vertical {
+  cursor: row-resize;
+}
+
+.pane > header {
+  cursor: grab;
+  user-select: none;
+}
+
+.pane > header button {
+  cursor: default;
+}
+
+.workbench.moving,
+.workbench.moving .pane > header {
+  cursor: grabbing;
+}
+
+.pane.moving {
+  opacity: 0.5;
+}
+
+.drop-zones {
+  position: absolute;
+  z-index: 50;
+  inset: 0;
+}
+
+.drop-zone {
+  position: absolute;
+}
+
+.drop-zone.left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 25%;
+}
+
+.drop-zone.right {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 25%;
+}
+
+.drop-zone.top {
+  top: 0;
+  right: 25%;
+  left: 25%;
+  height: 25%;
+}
+
+.drop-zone.bottom {
+  right: 25%;
+  bottom: 0;
+  left: 25%;
+  height: 25%;
+}
+
+.drop-zone.center {
+  inset: 25%;
+}
+
+.drop-preview {
+  position: absolute;
+  border: 2px solid var(--fg);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  pointer-events: none;
+}
+
+.drop-preview.left {
+  inset: 4px 50% 4px 4px;
+}
+
+.drop-preview.right {
+  inset: 4px 4px 4px 50%;
+}
+
+.drop-preview.top {
+  inset: 4px 4px 50% 4px;
+}
+
+.drop-preview.bottom {
+  inset: 50% 4px 4px 4px;
+}
+
+.drop-preview.center {
+  inset: 4px;
+  border-style: dashed;
+}
+
+.workbench.moving .tab:hover,
+.workbench.moving .new-tab:hover {
+  outline: 2px solid var(--fg);
+  outline-offset: -2px;
 }
 
 .pane {

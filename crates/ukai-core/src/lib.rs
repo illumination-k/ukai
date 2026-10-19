@@ -17,7 +17,9 @@ pub mod slash;
 pub mod state;
 mod transcript;
 
-pub use layout::{Direction, Layout, Node, PaneContent, PaneId, ReportSource, Tab};
+pub use layout::{
+    Direction, Layout, Node, PaneContent, PaneId, ReportSource, Side, Tab, boundary_span,
+};
 pub use project::{Project, ProjectId, Projects};
 pub use transcript::{
     Alert, Entry, History, Queued, Status, Transcript, session_label, updated_label, usage_label,

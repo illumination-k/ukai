@@ -51,6 +51,7 @@ pub fn App() -> Element {
             reports: Signal::new(HashMap::new()),
             ports: Signal::new(HashMap::new()),
             palette: Signal::new(false),
+            drag: Signal::new(None),
             schedule_names: Signal::new(HashMap::new()),
             schedule_revision: Signal::new(0),
             knowledge_revision: Signal::new(0),
