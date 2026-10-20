@@ -140,6 +140,8 @@ pub enum RestoreOutcome {
     Resumed,
     /// The agent can neither load nor resume, so a new session was created.
     Unsupported,
+    /// The agent does not have the session any more, so a new one was created.
+    Missing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -656,7 +658,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                 .resume
                 .is_some();
             let setup = async {
-                Ok(match restore {
+                let restored = match &restore {
                     Some(id) if can_load => {
                         // History arrives as session/update notifications before
                         // the response; user turns are only forwarded meanwhile.
@@ -666,29 +668,35 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                             .block_task()
                             .await;
                         replaying.store(false, Ordering::SeqCst);
-                        let loaded = loaded?;
-                        (SessionId::new(id), RestoreOutcome::Replayed, loaded.config_options)
+                        Some(loaded.map(|loaded| {
+                            (SessionId::new(id.clone()), RestoreOutcome::Replayed, loaded.config_options)
+                        }))
                     }
-                    Some(id) if can_resume => {
-                        let resumed = cx
-                            .send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
+                    Some(id) if can_resume => Some(
+                        cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
                             .block_task()
-                            .await?;
-                        (SessionId::new(id), RestoreOutcome::Resumed, resumed.config_options)
+                            .await
+                            .map(|resumed| {
+                                (SessionId::new(id.clone()), RestoreOutcome::Resumed, resumed.config_options)
+                            }),
+                    ),
+                    _ => None,
+                };
+                let outcome = match restored {
+                    Some(Ok(restored)) => return Ok(restored),
+                    // The agent no longer keeps it, e.g. its pod's disk is new.
+                    Some(Err(e)) if e.code == agent_client_protocol::ErrorCode::ResourceNotFound => {
+                        RestoreOutcome::Missing
                     }
-                    restore => {
-                        let session = cx
-                            .send_request(NewSessionRequest::new(cwd.clone()))
-                            .block_task()
-                            .await?;
-                        let outcome = if restore.is_some() {
-                            RestoreOutcome::Unsupported
-                        } else {
-                            RestoreOutcome::Fresh
-                        };
-                        (session.session_id, outcome, session.config_options)
-                    }
-                })
+                    Some(Err(e)) => return Err(e),
+                    None if restore.is_some() => RestoreOutcome::Unsupported,
+                    None => RestoreOutcome::Fresh,
+                };
+                let session = cx
+                    .send_request(NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await?;
+                Ok((session.session_id, outcome, session.config_options))
             };
             let (session_id, restore, config) = progressing(&last_progress, setup).await?;
             let prompt = &init.agent_capabilities.prompt_capabilities;

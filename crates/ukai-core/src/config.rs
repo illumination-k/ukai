@@ -107,7 +107,9 @@ impl ApplyDefaults {
                 restore, config, ..
             } => {
                 self.queue = match restore {
-                    RestoreOutcome::Fresh | RestoreOutcome::Unsupported => self.defaults.queue(),
+                    RestoreOutcome::Fresh
+                    | RestoreOutcome::Unsupported
+                    | RestoreOutcome::Missing => self.defaults.queue(),
                     RestoreOutcome::Replayed | RestoreOutcome::Resumed => Vec::new(),
                 };
                 self.next(config)
@@ -247,6 +249,7 @@ mod tests {
     #[rstest]
     #[case::fresh(RestoreOutcome::Fresh, set("model", "opus"))]
     #[case::not_restorable(RestoreOutcome::Unsupported, set("model", "opus"))]
+    #[case::missing(RestoreOutcome::Missing, set("model", "opus"))]
     #[case::replayed(RestoreOutcome::Replayed, None)]
     #[case::resumed(RestoreOutcome::Resumed, None)]
     fn applies_only_to_new_sessions(

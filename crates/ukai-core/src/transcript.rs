@@ -320,6 +320,9 @@ impl Transcript {
                     RestoreOutcome::Unsupported => {
                         Some("this agent cannot restore sessions; started a new one")
                     }
+                    RestoreOutcome::Missing => {
+                        Some("the agent no longer has this session; started a new one")
+                    }
                 };
                 if let Some(text) = notice {
                     self.entries.push(Entry::Notice {
@@ -642,6 +645,7 @@ mod tests {
     #[rstest]
     #[case::resumed(RestoreOutcome::Resumed)]
     #[case::unsupported(RestoreOutcome::Unsupported)]
+    #[case::missing(RestoreOutcome::Missing)]
     fn lossy_restores_leave_a_notice(#[case] restore: RestoreOutcome) {
         let transcript = folded([ready(None, restore)]);
         assert!(matches!(

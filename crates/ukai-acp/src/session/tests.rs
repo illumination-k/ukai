@@ -20,6 +20,8 @@ use tempfile::TempDir;
 use super::*;
 
 const SESSION: &str = "mock-session";
+/// A session the mock no longer has: loading or resuming it is not found.
+const GONE: &str = "gone";
 
 /// Which ways of continuing an earlier session the mock advertises.
 #[derive(Debug, Clone, Copy, Default)]
@@ -44,7 +46,8 @@ struct Caps {
 ///
 /// A steer outside a `wait` turn answers `promptRequired`.
 ///
-/// `session/load` replays one user and one agent message before answering.
+/// `session/load` replays one user and one agent message before answering;
+/// it and `session/resume` answer [`GONE`] with "resource not found".
 /// `session/list` answers two sessions in `cwd`, one page each.
 /// Every session starts with [`mock_config`]'s settings; setting one answers
 /// with it changed, and an unknown one fails.
@@ -94,6 +97,11 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
         )
         .on_receive_request(
             async |request: LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                if *request.session_id.0 == *GONE {
+                    return responder.respond_with_error(
+                        agent_client_protocol::Error::resource_not_found(Some(GONE.into())),
+                    );
+                }
                 for update in [
                     SessionUpdate::UserMessageChunk(ContentChunk::new("earlier question".into())),
                     SessionUpdate::AgentMessageChunk(ContentChunk::new("earlier answer".into())),
@@ -124,7 +132,12 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |_: ResumeSessionRequest, responder, _cx| {
+            async |request: ResumeSessionRequest, responder, _cx| {
+                if *request.session_id.0 == *GONE {
+                    return responder.respond_with_error(
+                        agent_client_protocol::Error::resource_not_found(Some(GONE.into())),
+                    );
+                }
                 responder.respond(ResumeSessionResponse::new().config_options(mock_config(None)))
             },
             agent_client_protocol::on_receive_request!(),
@@ -839,6 +852,16 @@ async fn falls_back_when_load_is_unavailable(
 ) {
     let (mut harness, events) = Harness::connect(caps, Some("earlier")).await;
     assert_eq!(events, vec![ready(session_id, outcome)]);
+    assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
+}
+
+#[rstest::rstest]
+#[case::load(Caps { load: true, ..Caps::default() })]
+#[case::resume(Caps { resume: true, ..Caps::default() })]
+#[tokio::test]
+async fn starts_a_new_session_when_the_agent_lost_the_old_one(#[case] caps: Caps) {
+    let (mut harness, events) = Harness::connect(caps, Some(GONE)).await;
+    assert_eq!(events, vec![ready(SESSION, RestoreOutcome::Missing)]);
     assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
 }
 
