@@ -88,6 +88,16 @@ fn agents_on_different_repositories_share_a_named_project() {
     "knowledge = \"My Project\"",
     Problem::InvalidKnowledgeScope { context: "agents.k.knowledge".into(), value: "My Project".into() }
 )]
+#[case::managed_by_label(
+    IMAGE,
+    "labels = { \"app.kubernetes.io/managed-by\" = \"me\" }",
+    Problem::ReservedLabel { context: "agents.k.labels".into(), key: "app.kubernetes.io/managed-by".into() }
+)]
+#[case::ukai_label(
+    IMAGE,
+    "labels = { \"ukai.dev/workspace\" = \"mine\" }",
+    Problem::ReservedLabel { context: "agents.k.labels".into(), key: "ukai.dev/workspace".into() }
+)]
 fn reports_kubernetes_problem(#[case] image: &str, #[case] extra: &str, #[case] expected: Problem) {
     assert_eq!(problems(&kubernetes(image, extra)), vec![expected]);
 }
@@ -108,8 +118,9 @@ fn reports_every_kubernetes_problem() {
         idle_timeout = "soon"
         workspace = { git = "", snapshot_interval = "1d", github_token = "/key" }
         knowledge = ""
+        labels = { "ukai.dev/workspace" = "mine" }
     "#;
-    assert_eq!(problems(src).len(), 7);
+    assert_eq!(problems(src).len(), 8);
 }
 
 #[rstest]

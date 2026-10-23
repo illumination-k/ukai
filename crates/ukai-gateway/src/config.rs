@@ -32,7 +32,8 @@ pub struct KubernetesAgent {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Plain environment of the agent container.
+    /// Plain environment of the agent container. Values may refer to
+    /// `$(POD_NAMESPACE)`, which the gateway sets first.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Agent environment from Secrets, as `<secret>/<key>`.
@@ -49,6 +50,10 @@ pub struct KubernetesAgent {
     pub mounts: Vec<Mount>,
     #[serde(default)]
     pub resources: Resources,
+    /// Labels of the pod and its Job, on top of the gateway's own, e.g. one
+    /// an admission webhook injects credentials by.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
     /// How long the pod outlives its last agent process, e.g. `"30m"`.
     #[serde(default = "KubernetesAgent::default_idle_timeout")]
     pub idle_timeout: String,
@@ -129,7 +134,7 @@ pub struct Mount {
     pub read_only: bool,
 }
 
-/// Requests of the agent container; the memory request is also its limit.
+/// Requests of the agent container, and its memory limit.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
@@ -137,6 +142,8 @@ pub struct Resources {
     pub cpu: String,
     #[serde(default = "Resources::default_memory")]
     pub memory: String,
+    /// The memory limit; the memory request when absent.
+    pub memory_limit: Option<String>,
 }
 
 impl Resources {
@@ -154,6 +161,7 @@ impl Default for Resources {
         Self {
             cpu: Self::default_cpu(),
             memory: Self::default_memory(),
+            memory_limit: None,
         }
     }
 }
@@ -193,6 +201,8 @@ pub enum Problem {
         "{context}: `{value}` is not a project name: lowercase letters, digits, and `-`, `_`, `.`, `/`"
     )]
     InvalidKnowledgeScope { context: String, value: String },
+    #[error("{context}: label `{key}` is the gateway's own")]
+    ReservedLabel { context: String, key: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -277,6 +287,14 @@ fn validate(context: &str, agent: &KubernetesAgent, problems: &mut Vec<Problem>)
             context: format!("{context}.knowledge"),
             value: scope.clone(),
         });
+    }
+    for key in agent.labels.keys() {
+        if key == crate::job::MANAGED_BY || key.starts_with("ukai.dev/") {
+            problems.push(Problem::ReservedLabel {
+                context: format!("{context}.labels"),
+                key: key.clone(),
+            });
+        }
     }
     for (index, mount) in agent.mounts.iter().enumerate() {
         if !(mount.path.starts_with('/') || mount.path.starts_with("~/")) {
