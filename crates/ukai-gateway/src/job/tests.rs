@@ -333,3 +333,48 @@ fn the_pod_can_reach_the_knowledge_of_its_repository() {
         Some(&json!("plekti"))
     );
 }
+
+#[test]
+fn the_agents_labels_join_the_gateways() {
+    let job = json(&plan(r#"labels = { "example.com/inject-config" = "" }"#));
+    // On the pod, which is what admission webhooks see.
+    let labels = &job["spec"]["template"]["metadata"]["labels"];
+    assert_eq!(labels["example.com/inject-config"], "");
+    assert_eq!(labels[MANAGED_BY], "ukai");
+    assert!(labels[WORKSPACE_LABEL].is_string());
+    assert_eq!(job["metadata"]["labels"], *labels);
+}
+
+#[test]
+fn the_agents_env_can_refer_to_its_namespace() {
+    let job = json(&plan(
+        r#"env = { CACHE = "http://cache/$(POD_NAMESPACE)" }"#,
+    ));
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    assert_eq!(
+        agent["env"][0],
+        json!({
+            "name": "POD_NAMESPACE",
+            "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } }
+        })
+    );
+    assert!(env_names(agent).contains(&"CACHE"));
+}
+
+#[rstest]
+#[case::limit_is_the_request("resources = { cpu = \"4\", memory = \"8Gi\" }", "8Gi")]
+#[case::limit_of_its_own(
+    "resources = { cpu = \"4\", memory = \"8Gi\", memory_limit = \"16Gi\" }",
+    "16Gi"
+)]
+fn the_agent_gets_its_resources(#[case] extra: &str, #[case] limit: &str) {
+    let job = json(&plan(extra));
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    assert_eq!(
+        agent["resources"],
+        json!({
+            "requests": { "cpu": "4", "memory": "8Gi" },
+            "limits": { "memory": limit }
+        })
+    );
+}

@@ -21,9 +21,9 @@ use crate::config::{KubernetesAgent, parse_duration, parse_secret_ref};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource, ExecAction,
-    HTTPGetAction, PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    Probe, ResourceRequirements, SeccompProfile, SecretKeySelector, SecurityContext, Volume,
-    VolumeMount,
+    HTTPGetAction, ObjectFieldSelector, PersistentVolumeClaimVolumeSource, PodSecurityContext,
+    PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile, SecretKeySelector,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -117,11 +117,14 @@ impl Plan {
             .unwrap_or_else(|| format!("refs/ukai/wip/{}", self.workspace_id))
     }
 
+    /// The labels of the Job and its pod: the agent's, then the gateway's.
     pub fn labels(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        let mut labels = self.agent.labels.clone();
+        labels.extend([
             (MANAGED_BY.to_owned(), "ukai".to_owned()),
             (WORKSPACE_LABEL.to_owned(), self.workspace_id.clone()),
-        ])
+        ]);
+        labels
     }
 }
 
@@ -183,6 +186,18 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
     workspace_env.extend(github_token.clone());
 
     let mut agent_env = vec![
+        // First, so that the agent's `env` can refer to it.
+        EnvVar {
+            name: "POD_NAMESPACE".to_owned(),
+            value: None,
+            value_from: Some(EnvVarSource {
+                field_ref: Some(ObjectFieldSelector {
+                    field_path: "metadata.namespace".to_owned(),
+                    api_version: None,
+                }),
+                ..EnvVarSource::default()
+            }),
+        },
         env("HOME", &agent.home),
         env("UKAI_IDLE_TIMEOUT", &seconds(&agent.idle_timeout, 1800)),
         env("UKAI_SNAPSHOT_TRIGGER", "/workspace/.ukai/snapshot"),
@@ -325,7 +340,11 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         resources: Some(resources(
             &agent.resources.cpu,
             &agent.resources.memory,
-            &agent.resources.memory,
+            agent
+                .resources
+                .memory_limit
+                .as_deref()
+                .unwrap_or(&agent.resources.memory),
         )),
         security_context: Some(container_security()),
         volume_mounts: Some(agent_mounts),

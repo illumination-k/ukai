@@ -250,7 +250,10 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 ### `ukai-gateway`
 
 - namespace に 1 つ（`Recreate` の Deployment）。`gateway.toml` の `[agents.<id>]`（イメージ、コマンド、リポジトリ、
-  Secret 参照、既存 PVC の mount、リソース、`idle_timeout`）を `GET /agents/<id>/acp` の WebSocket で出す。
+  Secret 参照、既存 PVC の mount、リソース、Pod のラベル、`idle_timeout`）を `GET /agents/<id>/acp` の WebSocket で出す。
+- エージェントのコンテナの環境変数は downward API の `POD_NAMESPACE` から始め、`env` の値が `$(POD_NAMESPACE)` を
+  参照できるようにする。`labels` は Pod と Job に付く（ラベルを見て認証情報を注入する admission webhook 向け）。
+  `app.kubernetes.io/managed-by` と `ukai.dev/` は gateway が Pod を探すのに使うので書けない。
 - 接続が来たらそのワークスペースの Job を確保して Pod の ready を待ち、Pod 内の relay に中継する。
   待つ間はクライアントに `_ukai/progress`（状況が変わるたび）と `_ukai/heartbeat`（20 秒ごと）を送り、
   クライアントからのメッセージは溜めておく。中継が始まってからは 20 秒ごとにクライアントへ WebSocket の

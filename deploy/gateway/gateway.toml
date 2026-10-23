@@ -16,3 +16,9 @@ workspace = { git = "https://github.com/org/repo.git" }
 # Report directories on top of the checkout's `[reports] dirs`, relative to
 # its root and separated by `:`, for a repository whose ukai.toml declares none.
 # env = { UKAI_REPORT_DIRS = "reports" }
+# Values may refer to `$(POD_NAMESPACE)`, which the gateway sets.
+# env = { CACHE_URL = "http://cache.example.svc/$(POD_NAMESPACE)" }
+# Labels of the pod, on top of the gateway's, e.g. one a webhook acts on.
+# labels = { "example.com/inject" = "" }
+# The memory limit is the request unless `memory_limit` is set.
+# resources = { cpu = "4", memory = "8Gi", memory_limit = "16Gi" }
