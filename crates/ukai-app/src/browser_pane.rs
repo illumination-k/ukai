@@ -13,6 +13,7 @@
 //! only links that are not web pages, and new windows, leave for the
 //! default browser.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use ukai_acp::ports::preview_path;
 use ukai_acp::{PaneWorkspace, Tunnel};
 use ukai_core::{PaneId, ProjectId, ReportSource};
 
-use crate::child_view::{ChildView, use_child_view};
+use crate::child_view::{ChildView, View, use_child_view};
 use crate::icons::{Icon, Svg};
 use crate::ports;
 use crate::projects::AppSignals;
@@ -137,13 +138,15 @@ fn BrowserSurface(
     let app = use_context::<AppSignals>();
     // Held only to keep the tunnel open as long as this is mounted.
     let _tunnel = tunnel;
+    let committed = use_hook(|| Rc::new(Cell::new(false)));
     let ChildView {
         view,
         mut host,
         failure,
     } = use_child_view(use_memo(move || app.covered()), {
         let start = format!("{origin}{path}");
-        move |bounds, window| build(&start, bounds, window)
+        let committed = committed.clone();
+        move |bounds, window| build(&start, &committed, bounds, window)
     });
     let mut address = use_signal(|| path.clone());
     let mut editing = use_signal(|| false);
@@ -152,17 +155,15 @@ fn BrowserSurface(
     use_future({
         let view = view.clone();
         let origin = origin.clone();
+        let committed = committed.clone();
         move || {
             let view = view.clone();
             let origin = origin.clone();
+            let committed = committed.clone();
             async move {
                 loop {
                     tokio::time::sleep(FOLLOW).await;
-                    let url = view
-                        .borrow()
-                        .as_ref()
-                        .and_then(|webview| webview.url().ok());
-                    if let Some(url) = url
+                    if let Some(url) = page_url(&view, &committed)
                         && !*editing.peek()
                     {
                         let shown = shown_address(&origin, &url);
@@ -201,11 +202,7 @@ fn BrowserSurface(
         let view = view.clone();
         let origin = origin.clone();
         move || {
-            let url = view
-                .borrow()
-                .as_ref()
-                .and_then(|webview| webview.url().ok())
-                .unwrap_or_else(|| origin.clone());
+            let url = page_url(&view, &committed).unwrap_or_else(|| origin.clone());
             open_external(&url);
         }
     };
@@ -274,14 +271,18 @@ fn BrowserSurface(
     }
 }
 
-/// A child web view of `window` showing `url`, with no IPC handler.
+/// A child web view of `window` showing `url`, with no IPC handler. It sets
+/// `committed` once a page has started loading in it.
 fn build(
     url: &str,
+    committed: &Rc<Cell<bool>>,
     bounds: Rect,
     window: &dioxus::desktop::tao::window::Window,
 ) -> dioxus::desktop::wry::Result<WebView> {
+    let committed = committed.clone();
     WebViewBuilder::new()
         .with_url(url)
+        .with_on_page_load_handler(move |_, _| committed.set(true))
         .with_bounds(bounds)
         .with_incognito(true)
         .with_devtools(true)
@@ -291,6 +292,16 @@ fn build(
             NewWindowResponse::Deny
         })
         .build_as_child(window)
+}
+
+/// The address of the page in `view`, once one has `committed`. Before that
+/// WebKit has none, and wry's `url` unwraps it: a first load that fails, as
+/// through a tunnel to a port nothing serves, would panic the app.
+fn page_url(view: &View, committed: &Cell<bool>) -> Option<String> {
+    if !committed.get() {
+        return None;
+    }
+    view.borrow().as_ref()?.url().ok()
 }
 
 /// Web pages load in place, wherever they are; anything else (`mailto:`, an
