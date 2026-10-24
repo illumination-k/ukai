@@ -233,12 +233,16 @@ impl Layout {
         self.contents.iter().map(|(id, content)| (*id, content))
     }
 
-    /// The pane whose content `wanted` picks that is nearest the user: the
+    /// The pane that `wanted` picks, by its id and content, that is nearest
+    /// the user: the
     /// focused one, else one in the active tab, else one in another, in
     /// display order. For showing something where the like of it already is,
     /// instead of opening a pane each time.
-    pub fn nearest(&self, wanted: impl Fn(&PaneContent) -> bool) -> Option<PaneId> {
-        let matches = |pane: &PaneId| self.content(*pane).is_some_and(&wanted);
+    pub fn nearest(&self, wanted: impl Fn(PaneId, &PaneContent) -> bool) -> Option<PaneId> {
+        let matches = |pane: &PaneId| {
+            self.content(*pane)
+                .is_some_and(|content| wanted(*pane, content))
+        };
         let active = self.active_tab();
         std::iter::once(self.focused)
             .chain(active.root.panes())

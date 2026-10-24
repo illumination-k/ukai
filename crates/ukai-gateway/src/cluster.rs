@@ -195,6 +195,17 @@ impl Cluster {
         Ok(ready_relays(&found))
     }
 
+    /// The addresses of every agent pod, running or not: what
+    /// `access::guard` keeps off the person's side.
+    pub async fn agent_pod_addresses(&self) -> Result<std::collections::HashSet<std::net::IpAddr>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let found = pods
+            .list(&ListParams::default().labels(&format!("{MANAGED_BY}=ukai")))
+            .await?
+            .items;
+        Ok(pod_addresses(&found))
+    }
+
     /// The agent pod whose relay wants `token`: its knowledge scope, and its
     /// workspace. This is how the gateway tells whose knowledge a pod's MCP
     /// server reads and writes, without trusting anything the pod says.
@@ -206,7 +217,9 @@ impl Cluster {
             .items;
         Ok(found
             .iter()
-            .find(|pod| relay_token(pod).is_some_and(|wanted| same_secret(wanted, token)))
+            .find(|pod| {
+                relay_token(pod).is_some_and(|wanted| ukai_core::secret::same_secret(wanted, token))
+            })
             .and_then(|pod| {
                 let annotations = pod.metadata.annotations.as_ref()?;
                 // A pod from before scopes were annotated has its repository.
@@ -398,17 +411,6 @@ fn relay_token(pod: &Pod) -> Option<&str> {
         .as_deref()
 }
 
-/// Whether `presented` is `secret`, taking as long for every `presented` of
-/// the same length.
-pub fn same_secret(secret: &str, presented: &str) -> bool {
-    presented.len() == secret.len()
-        && presented
-            .bytes()
-            .zip(secret.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
-}
-
 /// 128 random bits, hex: the relay's token for one Job.
 pub fn token() -> Result<String> {
     let mut bytes = [0u8; 16];
@@ -493,6 +495,23 @@ fn is_running_unstarted(container: &ContainerStatus) -> bool {
         .as_ref()
         .is_some_and(|s| s.running.is_some())
         && container.started != Some(true)
+}
+
+/// Every address `pods` have: what a request from one of them comes from.
+fn pod_addresses(pods: &[Pod]) -> std::collections::HashSet<std::net::IpAddr> {
+    pods.iter()
+        .filter_map(|pod| pod.status.as_ref())
+        .flat_map(|status| {
+            status
+                .pod_ips
+                .iter()
+                .flatten()
+                .map(|ip| ip.ip.clone())
+                .chain(status.pod_ip.clone())
+        })
+        .filter_map(|ip| ip.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
+        .collect()
 }
 
 #[cfg(test)]

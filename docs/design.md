@@ -391,8 +391,8 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
   `Put` / `Delete` / `Revisions` / `Approve` / `Reject`。どれもエージェントの id を名指し、スコープはその
   エージェントの `gateway.toml` での宣言で決まる。トークンは `/acp` と同じ。サイドバーの「Knowledge」に、スコープを共有する gateway エージェントをまとめて並べ、ノートの pane で Markdown
   として読み、編集し、削除する。ノートはすでにある、保存済みのノートの pane（フォーカス中、今のタブ、
-  ほかのタブの順）に開き直すので、ノートを開くたびに pane は増えない。書きかけの新しいノートの pane
-  は上書きしない。開いている pane はノートを読み直し続け、編集中に版が進んだら保存は拒否されるので、
+  ほかのタブの順）に開き直すので、ノートを開くたびに pane は増えない。下書き（新しいノートか、保存して
+  いない編集）のある pane は上書きしない。開いている pane はノートを読み直し続け、編集中に版が進んだら保存は拒否されるので、
   そう出して「自分の版で置き換える」を選ばせる。
 - Pod から: relay の MCP サーバー（`ukai-relay mcp --gateway <url>`）が `WorkspaceKnowledge` を呼ぶ。
   認証は relay のトークンで、gateway は同じトークンを持つ Pod を探し、Job を作るときに付けた注釈
@@ -415,7 +415,9 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
   使い方には、ほかのノートが使っているタグを付けること、一部のタスクでしか要らないものはオンデマンドに
   すること、調べ直す前にタグで探すことも入れる。`read_knowledge` は承認済みの
   revision を（なければ最新を「レビューされていない」と明示して）revision、書き手、commit を付けて返す。
-  承認済みより新しい revision があればそう言い、`revision` を指定すれば最新も読める。
+  承認済みより新しい revision があればそう言い、`revision` を指定すれば最新も読める。`write_knowledge` で
+  `tags` や `on_demand` を省くと、置き換えるノートの今の値が残る（直すたびに付け直させると、付け忘れた
+  版を人が承認したとき、オンデマンドのノートが全セッションに出てしまうため）。型の違う値は捨てずに拒否する。
 - これらは LLM エージェントの記憶についての研究（自己生成の知識は選別しないと効かない、記憶汚染は
   少数の書き込みで成立する、全体の書き直しは詳細を失う）を踏まえている。コード位置の引用と使用前の検証、
   全文検索は次の段階。
@@ -833,6 +835,12 @@ pane の上部に戻る・進む・再読込・アドレス（オリジン上の
 - HTML レポートは前述の IPC を持たない子 WebView + 配信範囲の制限 + CSP。
 - `ukai-knowledge` は gateway が名乗らせた呼び手を信じるので、gateway と共有するトークンと NetworkPolicy で
   gateway 以外を入れない。
+- エージェントの Pod も（自分のナレッジのために）gateway に届く。Pod は gateway のトークンを持たないが、
+  トークンのない gateway（IAP の背後で `Authorization` が IAP のもの）では人の要求と区別できないので、
+  gateway は送り元がエージェントの Pod（`app.kubernetes.io/managed-by=ukai` の Pod の IP）なら、
+  `WorkspaceKnowledge` と `/health` のほかはトークンがあっても 403 で断る（`access::guard`）。Pod の IP は
+  1 秒より古ければ引き直す。Pod の IP はエージェントが動く前（relay のコピーと clone の間）からあるので、
+  その鮮度で足りる。一覧が引けなければ断る。
 - browser pane も IPC を持たない子 WebView。トンネルは `127.0.0.1` だけで listen し、pane を閉じると止まる
   （開いている間は手元の他のプロセスからも使える。kubectl の port-forward と同じ）。relay の `/forward` は
   トークンが要り、Pod の中の `localhost` にしかつながない。

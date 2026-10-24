@@ -58,8 +58,8 @@ fn refresh(app: AppSignals) {
 
 /// Show a note (or a new one, with `note` `None`): focus the pane that
 /// already shows it, else replace the note in the nearest pane showing one,
-/// else open it where [`launch_target`] puts it. A pane with a new note
-/// being written is left alone, so its draft is not lost.
+/// else open it where [`launch_target`] puts it. A pane with a draft, a new
+/// note or an edit not saved yet, is left alone, so the draft is not lost.
 pub fn open_note(app: AppSignals, project: &ProjectId, agent: &str, note: Option<String>) {
     let mut layout = app.layout;
     let shown = note.as_ref().and_then(|name| {
@@ -72,9 +72,11 @@ pub fn open_note(app: AppSignals, project: &ProjectId, agent: &str, note: Option
         layout.write().focus(pane);
         return;
     }
-    let reused = layout
-        .peek()
-        .nearest(|content| matches!(content, PaneContent::Note { note: Some(_), .. }));
+    let editing = app.editing_notes.peek();
+    let reused = layout.peek().nearest(|pane, content| {
+        matches!(content, PaneContent::Note { note: Some(_), .. }) && !editing.contains(&pane)
+    });
+    drop(editing);
     if let Some(pane) = reused.or_else(|| launch_target(app)) {
         let mut layout = layout.write();
         layout.set_content(
@@ -479,6 +481,22 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                 0,
             )
         })
+    });
+    // Tell `open_note` whether this pane holds a draft.
+    use_effect(move || {
+        let drafting = draft.read().is_some();
+        let mut editing = app.editing_notes;
+        if editing.peek().contains(&pane) != drafting {
+            if drafting {
+                editing.write().insert(pane);
+            } else {
+                editing.write().remove(&pane);
+            }
+        }
+    });
+    use_drop(move || {
+        let mut editing = app.editing_notes;
+        editing.write().remove(&pane);
     });
     // The note's history, once asked for.
     let mut history = use_signal(|| None::<Result<Vec<Revision>, String>>);

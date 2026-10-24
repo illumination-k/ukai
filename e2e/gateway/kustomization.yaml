@@ -14,3 +14,14 @@ configMapGenerator:
     behavior: replace
     files:
       - gateway.toml
+patches:
+  # What the gateway decides about each request, for when a check fails.
+  - target:
+      kind: Deployment
+      name: ukai-gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: RUST_LOG
+          value: ukai_gateway=debug

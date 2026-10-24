@@ -14,9 +14,8 @@ use ukai_proto::gateway::v1::schedule_change::Outcome as Change;
 
 use crate::archive::RelaySource;
 use crate::cluster::RelayEndpoint;
-use crate::config::KubernetesAgent;
 use crate::job::Plan;
-use crate::{Gateway, schedules};
+use crate::{Gateway, access, schedules};
 
 /// How long the relay may take to list its pod's ports.
 const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -30,62 +29,25 @@ impl Api {
     /// Refuse a request without the gateway's token.
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
         let headers = request.metadata().clone().into_headers();
-        if crate::authorized(&self.gateway, &headers) {
-            Ok(())
-        } else {
-            Err(Status::unauthenticated(
-                "the gateway's token is missing or wrong",
-            ))
-        }
-    }
-
-    fn agent(&self, id: &str) -> Result<&KubernetesAgent, Status> {
-        self.gateway
-            .agents
-            .get(id)
-            .ok_or_else(|| Status::not_found(format!("the gateway has no agent `{id}`")))
+        Ok(access::authorize(&self.gateway, &headers)?)
     }
 
     /// The workspace of `agent` a request names, as for its `/acp`.
     fn plan(&self, agent: &str, workspace: Option<gw::Workspace>) -> Result<Plan, Status> {
-        let agent = self.agent(agent)?.clone();
-        let pane = pane(workspace.unwrap_or_default())?;
-        Ok(Plan::new(
-            agent,
-            &self.gateway.user,
-            self.gateway.cluster.namespace(),
-            pane.as_deref(),
-        ))
+        let pane = access::pane_of(workspace)?;
+        Ok(access::plan(&self.gateway, agent, pane.as_deref())?)
     }
 
     /// The relay of the workspace's running pod; FAILED_PRECONDITION when
     /// it has none, since nothing here starts one.
     async fn running_relay(&self, plan: &Plan) -> Result<RelayEndpoint, Status> {
-        let pod = self
-            .gateway
-            .cluster
-            .serving_pod(plan)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "cannot look up the workspace's pod");
-                Status::unavailable("cannot look up the workspace's pod")
-            })?;
-        pod.as_ref().and_then(RelayEndpoint::of).ok_or_else(|| {
-            Status::failed_precondition(
-                "the agent's workspace is not running; open the agent to start it",
-            )
-        })
-    }
-}
-
-/// The pane key of a `pod` workspace; `None` for the shared one.
-fn pane(workspace: gw::Workspace) -> Result<Option<String>, Status> {
-    match workspace.scope() {
-        gw::WorkspaceScope::Shared => Ok(None),
-        gw::WorkspaceScope::Pod if crate::valid_pane_key(&workspace.key) => Ok(Some(workspace.key)),
-        gw::WorkspaceScope::Pod => Err(Status::invalid_argument(
-            "a pod workspace's key is 1-64 letters, digits, `-`, or `_`",
-        )),
+        access::running_relay(&self.gateway, plan)
+            .await?
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "the agent's workspace is not running; open the agent to start it",
+                )
+            })
     }
 }
 
@@ -114,9 +76,8 @@ impl gw::agents_server::Agents for Api {
             && let Ok(Some(pod)) = gateway.cluster.serving_pod(&plan).await
             && let Some(endpoint) = RelayEndpoint::of(&pod)
         {
-            let client = reqwest::Client::new();
             let source = RelaySource {
-                client: &client,
+                client: &gateway.http,
                 endpoint: &endpoint,
             };
             if let Err(error) = archive.sync(plan.workspace_id(), &source).await {
@@ -147,7 +108,8 @@ impl gw::ports_server::Ports for Api {
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
         let listing = async {
-            reqwest::Client::new()
+            self.gateway
+                .http
                 .get(relay.ports_url())
                 .bearer_auth(&relay.token)
                 .timeout(LIST_TIMEOUT)
@@ -203,7 +165,7 @@ impl Api {
         agent: &str,
     ) -> Result<&schedules::Scheduler, Status> {
         self.authorize(request)?;
-        self.agent(agent)?;
+        access::agent(&self.gateway, agent)?;
         Ok(&self.gateway.schedules)
     }
 }
@@ -304,30 +266,9 @@ impl gw::schedules_server::Schedules for Api {
 
 #[cfg(test)]
 mod tests {
-    use rstest::rstest;
     use tonic::Code;
 
     use super::*;
-
-    #[rstest]
-    #[case::shared(gw::WorkspaceScope::Shared, "ignored", Ok(None))]
-    #[case::pod(gw::WorkspaceScope::Pod, "pane-1_a", Ok(Some("pane-1_a")))]
-    #[case::pod_without_key(gw::WorkspaceScope::Pod, "", Err(Code::InvalidArgument))]
-    #[case::pod_bad_key(gw::WorkspaceScope::Pod, "a/b", Err(Code::InvalidArgument))]
-    fn a_request_names_its_workspace(
-        #[case] scope: gw::WorkspaceScope,
-        #[case] key: &str,
-        #[case] expected: Result<Option<&str>, Code>,
-    ) {
-        let workspace = gw::Workspace {
-            scope: scope.into(),
-            key: key.into(),
-        };
-        assert_eq!(
-            pane(workspace).map_err(|s| s.code()),
-            expected.map(|key| key.map(str::to_owned))
-        );
-    }
 
     #[test]
     fn a_change_is_saved_refused_or_not_found() {
