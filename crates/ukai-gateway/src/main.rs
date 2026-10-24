@@ -34,18 +34,13 @@
 //! `GET <schedule>/runs` lists its recent runs, and `POST <schedule>/run` and
 //! `<schedule>/stop` start and stop one now.
 //!
-//! `/agents/<id>/knowledge` is the knowledge of the agent's scope (its
-//! project in `gateway.toml`, else its repository): notes kept outside the
-//! repositories, by `ukai-knowledge`, which the gateway asks over gRPC
-//! ([`knowledge`]) on behalf of whoever it finds is asking. `GET` lists them; `GET`, `PUT`, and
-//! `DELETE ?revision=<n>` on `<it>/<name>` read, write, and remove one, a
-//! change being refused with 409 when the note is no longer at the revision
-//! the writer read; `GET <name>/revisions` is its history, and
-//! `POST <name>/approve?revision=<n>` approves what an agent wrote and
-//! `POST <name>/reject?revision=<n>` takes it back. Agent pods reach
-//! the same, with a cap on how many changes each makes, at
-//! `/workspace/knowledge` with their relay's token instead of the gateway's,
-//! which names the scope of the pod it belongs to and no other.
+//! `ukai.gateway.v1.Knowledge` (gRPC and gRPC-Web, on the same port) is the
+//! knowledge of an agent's scope (its project in `gateway.toml`, else its
+//! repository): notes kept outside the repositories by `ukai-knowledge`,
+//! which the gateway asks on behalf of whoever it finds is asking
+//! ([`knowledge`]). Agent pods reach their own scope's at
+//! `WorkspaceKnowledge`, with their relay's token instead of the gateway's;
+//! they cannot review.
 //!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
@@ -76,7 +71,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -99,9 +94,8 @@ use crate::archive::{Archive, RelaySource};
 use crate::cluster::{Cluster, RelayEndpoint};
 use crate::config::KubernetesAgent;
 use crate::job::{Plan, Runtime};
-use crate::knowledge::{Caller, KnowledgeClient, KnowledgeError};
+use crate::knowledge::KnowledgeClient;
 use crate::schedules::Scheduler;
-use ukai_core::knowledge::{Conflict, Editor, Listing, NoteWrite};
 use ukai_core::schedule::{ScheduleSpec, Trigger};
 
 struct Gateway {
@@ -227,42 +221,37 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "/agents/{id}/schedules/{schedule}/stop",
             post(stop_schedule),
         )
-        .route("/agents/{id}/knowledge", get(agent_notes))
-        .route(
-            "/agents/{id}/knowledge/{name}",
-            get(agent_note)
-                .put(put_agent_note)
-                .delete(delete_agent_note),
-        )
-        .route(
-            "/agents/{id}/knowledge/{name}/revisions",
-            get(agent_note_revisions),
-        )
-        // Review is a person's: there is no route for it under /workspace.
-        .route(
-            "/agents/{id}/knowledge/{name}/approve",
-            post(approve_agent_note),
-        )
-        .route(
-            "/agents/{id}/knowledge/{name}/reject",
-            post(reject_agent_note),
-        )
-        .route("/workspace/knowledge", get(workspace_notes))
-        .route(
-            "/workspace/knowledge/{name}",
-            get(workspace_note)
-                .put(put_workspace_note)
-                .delete(delete_workspace_note),
-        )
-        .route(
-            "/workspace/knowledge/{name}/revisions",
-            get(workspace_note_revisions),
-        )
-        .with_state(gateway);
+        .with_state(gateway.clone())
+        .merge(grpc(gateway))
+        // The gRPC routes come with a fallback answering every other path
+        // with UNIMPLEMENTED as HTTP 200; a path nothing serves is a 404.
+        .fallback(|| async { StatusCode::NOT_FOUND });
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(%listen, "serving");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// The gateway's gRPC services, each answering gRPC and gRPC-Web on the
+/// same port as everything else: the app speaks gRPC-Web, which passes
+/// HTTP/1.1 proxies such as IAP.
+fn grpc(gateway: Arc<Gateway>) -> Router {
+    use tonic_web::GrpcWebLayer;
+    use tower::Layer;
+    use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
+    use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
+
+    let web = GrpcWebLayer::new();
+    tonic::service::Routes::new(web.layer(KnowledgeServer::new(knowledge::ClientKnowledge {
+        gateway: gateway.clone(),
+    })))
+    .add_service(
+        web.layer(WorkspaceKnowledgeServer::new(knowledge::PodKnowledge {
+            gateway,
+        })),
+    )
+    .prepare()
+    .into_axum_router()
 }
 
 fn authorized(gateway: &Gateway, headers: &HeaderMap) -> bool {
@@ -742,253 +731,6 @@ async fn stop_schedule(
         Ok(schedules) => found(schedules.stop(&id, &schedule)),
         Err(status) => status.into_response(),
     }
-}
-
-/// The scope whose knowledge a client asks for through `agent`, or the
-/// status when it may not.
-fn client_caller(
-    gateway: &Gateway,
-    headers: &HeaderMap,
-    agent: &str,
-) -> Result<Caller, StatusCode> {
-    if !authorized(gateway, headers) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    let agent = gateway.agents.get(agent).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Caller {
-        scope: agent.knowledge_scope(),
-        editor: Editor::User,
-        workspace: None,
-    })
-}
-
-/// The agent pod whose relay token the request carries, or the response
-/// when it carries none that the gateway knows.
-async fn workspace_caller(gateway: &Gateway, headers: &HeaderMap) -> Result<Caller, StatusCode> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| !token.is_empty())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    match gateway.cluster.pod_of(token).await {
-        Ok(Some(pod)) => Ok(Caller {
-            scope: pod.scope,
-            editor: Editor::Agent,
-            workspace: Some(pod.workspace),
-        }),
-        Ok(None) => Err(StatusCode::UNAUTHORIZED),
-        Err(error) => {
-            tracing::warn!(%error, "cannot look up the pod asking for knowledge");
-            Err(StatusCode::BAD_GATEWAY)
-        }
-    }
-}
-
-/// `ukai-knowledge`, or why there is none to ask.
-fn knowledge_of(gateway: &Gateway) -> Result<&KnowledgeClient, (StatusCode, &'static str)> {
-    gateway.knowledge.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "this gateway keeps no knowledge: set UKAI_KNOWLEDGE_URL and UKAI_KNOWLEDGE_TOKEN",
-    ))
-}
-
-/// The response to a failed knowledge request.
-fn knowledge_failed(error: KnowledgeError) -> Response {
-    match error {
-        KnowledgeError::Refused(problems) => refused(problems),
-        KnowledgeError::NotFound => StatusCode::NOT_FOUND.into_response(),
-        KnowledgeError::Conflict(current) => (
-            StatusCode::CONFLICT,
-            axum::Json(Conflict { current: *current }),
-        )
-            .into_response(),
-        error @ KnowledgeError::TooMany => {
-            (StatusCode::TOO_MANY_REQUESTS, error.to_string()).into_response()
-        }
-        KnowledgeError::Forbidden => StatusCode::FORBIDDEN.into_response(),
-        KnowledgeError::Unavailable(why) => (StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
-        error @ KnowledgeError::Failed(_) => {
-            tracing::warn!(%error, "knowledge request failed");
-            StatusCode::BAD_GATEWAY.into_response()
-        }
-    }
-}
-
-/// What can be asked of one scope's knowledge.
-enum Ask {
-    List,
-    Read(String),
-    Revisions(String),
-    Write(String, NoteWrite),
-    Delete(String, u64),
-    Approve(String, u64),
-    Reject(String, u64),
-}
-
-async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask) -> Response {
-    let caller = match caller {
-        Ok(caller) => caller,
-        Err(status) => return status.into_response(),
-    };
-    let knowledge = match knowledge_of(gateway) {
-        Ok(knowledge) => knowledge,
-        Err(unavailable) => return unavailable.into_response(),
-    };
-    let json = |value: serde_json::Value| axum::Json(value).into_response();
-    let result = match ask {
-        Ask::List => knowledge.list(&caller).await.map(|notes| {
-            axum::Json(Listing {
-                scope: caller.scope.clone(),
-                notes,
-            })
-            .into_response()
-        }),
-        Ask::Read(name) => knowledge.get(&caller, &name).await.map(found),
-        Ask::Revisions(name) => knowledge
-            .revisions(&caller, &name)
-            .await
-            .map(|revisions| found((!revisions.is_empty()).then_some(revisions))),
-        Ask::Write(name, write) => knowledge
-            .put(&caller, &name, write)
-            .await
-            .map(|note| axum::Json(note).into_response()),
-        Ask::Delete(name, revision) => knowledge
-            .delete(&caller, &name, revision)
-            .await
-            .map(|()| json(json!({}))),
-        // The knowledge service refuses an agent's review too; refuse it
-        // here first, before it is asked.
-        Ask::Approve(..) | Ask::Reject(..) if caller.editor != Editor::User => {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-        Ask::Approve(name, revision) => knowledge
-            .approve(&caller, &name, revision)
-            .await
-            .map(|note| axum::Json(note).into_response()),
-        Ask::Reject(name, revision) => knowledge
-            .reject(&caller, &name, revision)
-            .await
-            .map(|note| axum::Json(note).into_response()),
-    };
-    result.unwrap_or_else(knowledge_failed)
-}
-
-/// `?revision=<n>` on a delete or a review: the revision the person or
-/// agent read.
-#[derive(serde::Deserialize)]
-struct RevisionQuery {
-    revision: u64,
-}
-
-async fn agent_notes(
-    State(gateway): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::List).await
-}
-
-async fn agent_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, name)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::Read(name)).await
-}
-
-async fn agent_note_revisions(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, name)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::Revisions(name)).await
-}
-
-async fn put_agent_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, name)): Path<(String, String)>,
-    headers: HeaderMap,
-    axum::Json(write): axum::Json<NoteWrite>,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::Write(name, write)).await
-}
-
-async fn delete_agent_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, name)): Path<(String, String)>,
-    Query(query): Query<RevisionQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::Delete(name, query.revision)).await
-}
-
-async fn approve_agent_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, name)): Path<(String, String)>,
-    Query(query): Query<RevisionQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::Approve(name, query.revision)).await
-}
-
-async fn reject_agent_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, name)): Path<(String, String)>,
-    Query(query): Query<RevisionQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = client_caller(&gateway, &headers, &id);
-    answer(&gateway, caller, Ask::Reject(name, query.revision)).await
-}
-
-async fn workspace_notes(State(gateway): State<Arc<Gateway>>, headers: HeaderMap) -> Response {
-    let caller = workspace_caller(&gateway, &headers).await;
-    answer(&gateway, caller, Ask::List).await
-}
-
-async fn workspace_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = workspace_caller(&gateway, &headers).await;
-    answer(&gateway, caller, Ask::Read(name)).await
-}
-
-async fn workspace_note_revisions(
-    State(gateway): State<Arc<Gateway>>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = workspace_caller(&gateway, &headers).await;
-    answer(&gateway, caller, Ask::Revisions(name)).await
-}
-
-async fn put_workspace_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-    axum::Json(write): axum::Json<NoteWrite>,
-) -> Response {
-    let caller = workspace_caller(&gateway, &headers).await;
-    answer(&gateway, caller, Ask::Write(name, write)).await
-}
-
-async fn delete_workspace_note(
-    State(gateway): State<Arc<Gateway>>,
-    Path(name): Path<String>,
-    Query(query): Query<RevisionQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let caller = workspace_caller(&gateway, &headers).await;
-    answer(&gateway, caller, Ask::Delete(name, query.revision)).await
 }
 
 /// The pane key when the client asks for a pod of the pane's own.

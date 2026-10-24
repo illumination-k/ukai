@@ -15,8 +15,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 pub use ukai_acp::knowledge::{
-    Approved, ApprovedSummary, Conflict, Editor, Listing, Note, NoteSpec, NoteSummary, NoteWrite,
-    Provenance, Revision,
+    Approved, ApprovedSummary, Editor, Listing, Note, NoteSpec, NoteSummary, NoteWrite, Provenance,
+    Revision,
 };
 
 /// Longest name: short enough for a ConfigMap name and a tool argument.
