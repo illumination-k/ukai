@@ -170,9 +170,10 @@ pub async fn running_relay(
 }
 
 /// How old the list of agent pod addresses may be before an address not in
-/// it is looked up again. A pod's address is in the list from when its
-/// sandbox starts, long before its agent can send anything (the relay is
-/// copied in and the checkout cloned first), so a list this fresh has it.
+/// it is looked up again. A pod's address is in the list once the kubelet
+/// reports it, a moment after the pod's sandbox starts and long before its
+/// agent can send anything (the relay is copied in and the checkout cloned
+/// first), so a list this fresh has it.
 const AGENT_PODS_FRESH: Duration = Duration::from_secs(1);
 
 /// The addresses of the agent pods, listed again when one that is not among

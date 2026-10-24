@@ -117,13 +117,16 @@ probe as-agent-named-knowledge "$knowledge,$agent" ukai-surrealdb 8000 blocked
 
 # Whether the gateway refuses a pod with `labels` that asks what a person
 # asks, even with the gateway's token: `refused` (403) or `answered` (any
-# other status). No answer at all fails the probe.
+# other status). No answer at all fails the probe. The pod waits before it
+# asks, as an agent does (its relay is copied in and its checkout cloned
+# first): the gateway knows a pod by the address its status reports, which
+# the kubelet reports a moment after the pod starts.
 asks_as_person() {
 	local name=$1 labels=$2 expected=$3 status outcome
 	# shellcheck disable=SC2016 # $TOKEN is the pod's, expanded there.
 	status=$(k run "$name" --image=busybox:1.37 --restart=Never --rm -i --quiet \
 		--pod-running-timeout=2m ${labels:+--labels="$labels"} --env="TOKEN=$gateway_token" \
-		--command -- sh -c 'wget -S -O /dev/null --header "Authorization: Bearer $TOKEN" http://ukai-gateway/agents/e2e/reports 2>&1 | grep -m1 "HTTP/"' 2>/dev/null || true)
+		--command -- sh -c 'sleep 5; wget -S -O /dev/null --header "Authorization: Bearer $TOKEN" http://ukai-gateway/agents/e2e/reports 2>&1 | grep -m1 "HTTP/"' 2>/dev/null || true)
 	case "$status" in
 	*" 403 "*) outcome=refused ;;
 	*HTTP/*) outcome=answered ;;
