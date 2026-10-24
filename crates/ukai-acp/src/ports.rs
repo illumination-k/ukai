@@ -4,7 +4,8 @@
 //! user cannot reach it. The relay in the pod lists what listens there and
 //! carries a TCP connection to one of those ports over a WebSocket; the
 //! gateway passes both through per workspace, as it does reports. This is
-//! the client side: [`PortsEndpoint`] reads the listing, and a [`Tunnel`]
+//! the client side: [`PortsEndpoint`] reads the listing (the gateway's
+//! `ukai.gateway.v1.Ports`, gRPC-Web; see `crate::grpc`), and a [`Tunnel`]
 //! listens on this machine and carries each connection it accepts to the
 //! port in the pod, so a browser pane sees an ordinary `127.0.0.1` origin —
 //! absolute paths and a dev server's hot-reload socket work as they do
@@ -28,11 +29,14 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use ukai_config::{AgentSpec, Source};
+use ukai_proto::gateway::v1 as gw;
+use ukai_proto::gateway::v1::ports_client::PortsClient;
 
+use crate::grpc::{self, Channel};
 use crate::reports::endpoint_base;
 use crate::{PaneWorkspace, ResolveError, header_map, workspace_headers};
 
-/// Suffix of an agent's ACP endpoint that lists its workspace's ports.
+/// Where a relay lists what listens in its pod (JSON, for the gateway).
 pub const PORTS_PATH: &str = "/ports";
 
 /// Suffix of an agent's ACP endpoint under which `/<port>` upgrades to a
@@ -109,24 +113,99 @@ pub enum PortsError {
     Status(u16),
     #[error("the gateway sent a listing that cannot be read: {0}")]
     Listing(String),
+    #[error("the gateway refused: {0}")]
+    Failed(String),
+}
+
+impl From<tonic::Status> for PortsError {
+    fn from(status: tonic::Status) -> Self {
+        match grpc::Failure::from(status) {
+            grpc::Failure::Unreachable(why) => Self::Unreachable(why),
+            grpc::Failure::NotRunning => Self::Gone,
+            grpc::Failure::NotFound => Self::Failed("the gateway has no such agent".to_owned()),
+            grpc::Failure::Denied(why) | grpc::Failure::Failed(why) => Self::Failed(why),
+            grpc::Failure::TooMany => Self::Failed("too many requests".to_owned()),
+        }
+    }
+}
+
+impl From<PortListing> for gw::PortListing {
+    fn from(listing: PortListing) -> Self {
+        Self {
+            ports: listing
+                .ports
+                .into_iter()
+                .map(|port| gw::ListeningPort {
+                    port: port.port.into(),
+                    process: port.process,
+                })
+                .collect(),
+            previews: listing
+                .previews
+                .into_iter()
+                .map(|preview| gw::Preview {
+                    port: preview.port.into(),
+                    path: preview.path,
+                    title: preview.title,
+                    at: preview.at,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<gw::PortListing> for PortListing {
+    type Error = PortsError;
+
+    fn try_from(listing: gw::PortListing) -> Result<Self, PortsError> {
+        let port = |port: u32| {
+            u16::try_from(port).map_err(|_| PortsError::Listing(format!("{port} is not a port")))
+        };
+        Ok(Self {
+            ports: listing
+                .ports
+                .into_iter()
+                .map(|listening| {
+                    Ok(ListeningPort {
+                        port: port(listening.port)?,
+                        process: listening.process,
+                    })
+                })
+                .collect::<Result<_, PortsError>>()?,
+            previews: listing
+                .previews
+                .into_iter()
+                .map(|preview| {
+                    Ok(Preview {
+                        port: port(preview.port)?,
+                        path: preview.path,
+                        title: preview.title,
+                        at: preview.at,
+                    })
+                })
+                .collect::<Result<_, PortsError>>()?,
+        })
+    }
 }
 
 /// Where one workspace's ports are listed and reached: a gateway agent's
 /// endpoint with the agent's headers and the pane's workspace among them.
 #[derive(Debug, Clone)]
 pub struct PortsEndpoint {
-    client: reqwest::Client,
+    channel: Channel,
+    root: String,
+    agent: String,
+    workspace: gw::Workspace,
     /// For upgrades: no total timeout, which would cut a tunnelled
     /// connection that outlives it.
     forward: reqwest::Client,
-    base: String,
     forward_base: String,
 }
 
 impl PartialEq for PortsEndpoint {
     /// Two endpoints are the same when they reach the same workspace.
     fn eq(&self, other: &Self) -> bool {
-        self.base == other.base
+        (&self.root, &self.agent, &self.workspace) == (&other.root, &other.agent, &other.workspace)
     }
 }
 
@@ -147,49 +226,44 @@ impl PortsEndpoint {
             return Ok(None);
         };
         let url = ukai_config::interpolate(url, lookup)?;
-        let (Some(base), Some(forward_base)) = (
-            endpoint_base(&url, PORTS_PATH),
-            endpoint_base(&url, FORWARD_PATH),
-        ) else {
+        let (Some((root, agent)), Some(forward_base)) =
+            (grpc::agent_root(&url), endpoint_base(&url, FORWARD_PATH))
+        else {
             return Ok(None);
         };
+        let client = reqwest::Client::builder()
+            .default_headers(header_map(headers, &[], lookup)?)
+            .timeout(TIMEOUT)
+            .build()
+            .map_err(|error| ResolveError::Client(error.to_string()))?;
+        // The upgrade is not RPC: it names the workspace as `/acp` does.
         let extra = workspace_headers(workspace, *default_scope);
-        let headers = header_map(headers, &extra, lookup)?;
-        let build = |builder: reqwest::ClientBuilder| {
-            builder
-                .default_headers(headers.clone())
-                .build()
-                .map_err(|error| ResolveError::Client(error.to_string()))
-        };
+        let forward = reqwest::Client::builder()
+            .default_headers(header_map(headers, &extra, lookup)?)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .map_err(|error| ResolveError::Client(error.to_string()))?;
         Ok(Some(Self {
-            client: build(reqwest::Client::builder().timeout(TIMEOUT))?,
-            forward: build(reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT))?,
-            base,
+            channel: grpc::channel(client, root.clone()),
+            root,
+            agent,
+            workspace: grpc::workspace(workspace, *default_scope),
+            forward,
             forward_base,
         }))
     }
 
-    /// The listing URL, which also identifies the workspace.
-    pub fn base(&self) -> &str {
-        &self.base
-    }
-
     /// What listens in the workspace, and the previews asked for so far.
     pub async fn list(&self) -> Result<PortListing, PortsError> {
-        let response = self
-            .client
-            .get(&self.base)
-            .send()
-            .await
-            .map_err(|error| PortsError::Unreachable(error.to_string()))?;
-        let status = response.status().as_u16();
-        if status != 200 {
-            return Err(failure(status));
-        }
-        response
-            .json::<PortListing>()
-            .await
-            .map_err(|error| PortsError::Listing(error.to_string()))
+        let request = gw::ListPortsRequest {
+            agent: self.agent.clone(),
+            workspace: Some(self.workspace.clone()),
+        };
+        let listing = PortsClient::new(self.channel.clone())
+            .list(request)
+            .await?
+            .into_inner();
+        listing.try_into()
     }
 
     fn forward_url(&self, port: u16) -> String {
@@ -420,7 +494,10 @@ mod tests {
     #[test]
     fn derives_the_ports_endpoints() {
         let endpoint = endpoint("wss://gw.example.com/agents/a/acp");
-        assert_eq!(endpoint.base(), "https://gw.example.com/agents/a/ports");
+        assert_eq!(
+            (endpoint.root.as_str(), endpoint.agent.as_str()),
+            ("https://gw.example.com", "a")
+        );
         assert_eq!(
             endpoint.forward_url(5173),
             "https://gw.example.com/agents/a/forward/5173"

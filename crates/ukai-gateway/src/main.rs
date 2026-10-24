@@ -17,22 +17,18 @@
 //! of every running workspace's reports and answers from it once the pod is
 //! gone.
 //!
-//! `GET /agents/<id>/ports` lists the ports something listens on in that
-//! workspace's pod and the previews its agent asked for, and
-//! `GET /agents/<id>/forward/<port>` upgrades to a WebSocket carrying one TCP
-//! connection to that port in the pod, both through the pod's `ukai-relay`.
-//! Like reports, neither starts a pod.
+//! `GET /agents/<id>/forward/<port>` upgrades to a WebSocket carrying one
+//! TCP connection to a port in that workspace's pod, through the pod's
+//! `ukai-relay`. Like reports, it never starts a pod.
 //!
-//! `POST /agents/<id>/restart` stops that workspace's pod, so the next
-//! connection starts a fresh one, e.g. to pick up a newer agent release.
-//! Every session in the workspace ends with it.
-//!
-//! `/agents/<id>/schedules` keeps the agent's [`schedules`]: commands and
-//! prompts the gateway runs on a cron pattern, in a workspace of each
-//! schedule's own. `GET` lists them and `POST` adds one; `GET`, `PUT`, and
-//! `DELETE` on `<it>/<schedule>` read, change, and remove one;
-//! `GET <schedule>/runs` lists its recent runs, and `POST <schedule>/run` and
-//! `<schedule>/stop` start and stop one now.
+//! The rest is request and answer, served as gRPC and gRPC-Web on the same
+//! port ([`api`], `ukai.gateway.v1`): `Agents` lists the agents and restarts
+//! a workspace (stopping its pod, so the next connection starts a fresh
+//! one, e.g. to pick up a newer agent release); `Ports` lists what listens
+//! in a workspace's pod and the previews its agent asked for; `Schedules`
+//! keeps the agent's [`schedules`], commands and prompts the gateway runs on
+//! a cron pattern, in a workspace of each schedule's own. These name the
+//! workspace in the request rather than in headers.
 //!
 //! `ukai.gateway.v1.Knowledge` (gRPC and gRPC-Web, on the same port) is the
 //! knowledge of an agent's scope (its project in `gateway.toml`, else its
@@ -74,7 +70,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
@@ -83,6 +79,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
+mod api;
 mod archive;
 mod cluster;
 mod config;
@@ -90,13 +87,12 @@ mod job;
 mod knowledge;
 mod schedules;
 
-use crate::archive::{Archive, RelaySource};
+use crate::archive::Archive;
 use crate::cluster::{Cluster, RelayEndpoint};
 use crate::config::KubernetesAgent;
 use crate::job::{Plan, Runtime};
 use crate::knowledge::KnowledgeClient;
 use crate::schedules::Scheduler;
-use ukai_core::schedule::{ScheduleSpec, Trigger};
 
 struct Gateway {
     agents: BTreeMap<String, KubernetesAgent>,
@@ -198,29 +194,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(schedules::tick(gateway.clone()));
     let router = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/agents", get(list))
         .route("/agents/{id}/acp", get(connect))
-        .route("/agents/{id}/restart", post(restart))
         .route("/agents/{id}/reports", get(reports))
         .route("/agents/{id}/reports/files/{*path}", get(reports))
-        .route("/agents/{id}/ports", get(ports))
         .route("/agents/{id}/forward/{port}", get(forward))
-        .route(
-            "/agents/{id}/schedules",
-            get(list_schedules).post(create_schedule),
-        )
-        .route(
-            "/agents/{id}/schedules/{schedule}",
-            get(get_schedule)
-                .put(update_schedule)
-                .delete(delete_schedule),
-        )
-        .route("/agents/{id}/schedules/{schedule}/runs", get(schedule_runs))
-        .route("/agents/{id}/schedules/{schedule}/run", post(run_schedule))
-        .route(
-            "/agents/{id}/schedules/{schedule}/stop",
-            post(stop_schedule),
-        )
         .with_state(gateway.clone())
         .merge(grpc(gateway));
     let listener = tokio::net::TcpListener::bind(&listen).await?;
@@ -235,10 +212,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn grpc(gateway: Arc<Gateway>) -> Router {
     use tonic_web::GrpcWebLayer;
     use tower::Layer;
+    use ukai_proto::gateway::v1::agents_server::AgentsServer;
     use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
+    use ukai_proto::gateway::v1::ports_server::PortsServer;
+    use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
 
     let web = GrpcWebLayer::new();
+    let api = api::Api {
+        gateway: gateway.clone(),
+    };
     tonic::service::Routes::new(web.layer(KnowledgeServer::new(knowledge::ClientKnowledge {
         gateway: gateway.clone(),
     })))
@@ -247,6 +230,9 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
             gateway,
         })),
     )
+    .add_service(web.layer(AgentsServer::new(api.clone())))
+    .add_service(web.layer(PortsServer::new(api.clone())))
+    .add_service(web.layer(SchedulesServer::new(api)))
     .prepare()
     .into_axum_router()
 }
@@ -260,13 +246,6 @@ fn authorized(gateway: &Gateway, headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|presented| cluster::same_secret(token, presented))
-}
-
-async fn list(State(gateway): State<Arc<Gateway>>, headers: HeaderMap) -> Response {
-    if !authorized(&gateway, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    axum::Json(gateway.agents.keys().collect::<Vec<_>>()).into_response()
 }
 
 async fn connect(
@@ -296,55 +275,6 @@ async fn connect(
             tracing::warn!(agent = %id, %error, "connection ended with an error");
         }
     })
-}
-
-/// `POST /agents/<id>/restart`: stop the workspace's pod, resolved as for
-/// `/acp`. The next connection starts a new one.
-async fn restart(
-    State(gateway): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if !authorized(&gateway, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(agent) = gateway.agents.get(&id).cloned() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let pane = match pane_key(&headers) {
-        Ok(pane) => pane,
-        Err(problem) => return (StatusCode::BAD_REQUEST, problem).into_response(),
-    };
-    let plan = Plan::new(
-        agent,
-        &gateway.user,
-        gateway.cluster.namespace(),
-        pane.as_deref(),
-    );
-    // What the pod holds last goes into the copy before the pod goes.
-    if let Some(archive) = &gateway.archive
-        && let Ok(Some(pod)) = gateway.cluster.serving_pod(&plan).await
-        && let Some(endpoint) = RelayEndpoint::of(&pod)
-    {
-        let client = reqwest::Client::new();
-        let source = RelaySource {
-            client: &client,
-            endpoint: &endpoint,
-        };
-        if let Err(error) = archive.sync(plan.workspace_id(), &source).await {
-            tracing::warn!(agent = %id, %error, "cannot copy the reports before the restart");
-        }
-    }
-    match gateway.cluster.stop(&plan).await {
-        Ok(()) => {
-            tracing::info!(agent = %id, job = %plan.job_name(), "restarting the agent's workspace");
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(error) => {
-            tracing::warn!(agent = %id, %error, "cannot stop the workspace's pod");
-            StatusCode::BAD_GATEWAY.into_response()
-        }
-    }
 }
 
 /// `GET /agents/<id>/reports[/files/<path>]`: what the agent wrote in the
@@ -472,26 +402,6 @@ async fn serving_relay(
     running_relay(gateway, id, &plan).await?.ok_or_else(gone)
 }
 
-/// `GET /agents/<id>/ports`: what listens in the workspace's pod and the
-/// previews its agent asked for, from the pod's relay.
-async fn ports(
-    State(gateway): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let endpoint = match serving_relay(&gateway, &id, &headers).await {
-        Ok(endpoint) => endpoint,
-        Err(response) => return response,
-    };
-    match fetch(&endpoint.ports_url(), &endpoint.token).await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!(agent = %id, %error, "cannot list the workspace's ports");
-            StatusCode::BAD_GATEWAY.into_response()
-        }
-    }
-}
-
 /// `GET /agents/<id>/forward/<port>`: one TCP connection to `port` in the
 /// workspace's pod, as a WebSocket. The relay is reached before the client
 /// is upgraded, so a port nothing listens on is the relay's 502 rather than
@@ -595,139 +505,14 @@ async fn fetch(url: &str, token: &str) -> Result<Response, BoxError> {
 /// How long the gateway waits on the pod for one report or listing.
 const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Answers for one agent's schedules: `Err` is the response when the
-/// request is not authorized or names no agent of the gateway's.
-fn schedules_of<'g>(
-    gateway: &'g Gateway,
-    headers: &HeaderMap,
-    agent: &str,
-) -> Result<&'g Scheduler, StatusCode> {
-    if !authorized(gateway, headers) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    if !gateway.agents.contains_key(agent) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    Ok(&gateway.schedules)
-}
-
-fn refused(problems: Vec<String>) -> Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
-        axum::Json(json!({ "problems": problems })),
-    )
-        .into_response()
-}
-
-fn found<T: serde::Serialize>(value: Option<T>) -> Response {
-    match value {
-        Some(value) => axum::Json(value).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-async fn list_schedules(
-    State(gateway): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => axum::Json(schedules.list(&id)).into_response(),
-        Err(status) => status.into_response(),
-    }
-}
-
-async fn create_schedule(
-    State(gateway): State<Arc<Gateway>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    axum::Json(spec): axum::Json<ScheduleSpec>,
-) -> Response {
-    let schedules = match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => schedules,
-        Err(status) => return status.into_response(),
-    };
-    match schedules.create(&id, spec) {
-        Ok(info) => (StatusCode::CREATED, axum::Json(info)).into_response(),
-        Err(problems) => refused(problems),
-    }
-}
-
-async fn get_schedule(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, schedule)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => found(schedules.info(&id, &schedule)),
-        Err(status) => status.into_response(),
-    }
-}
-
-async fn update_schedule(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, schedule)): Path<(String, String)>,
-    headers: HeaderMap,
-    axum::Json(spec): axum::Json<ScheduleSpec>,
-) -> Response {
-    let schedules = match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => schedules,
-        Err(status) => return status.into_response(),
-    };
-    match schedules.update(&id, &schedule, spec) {
-        Ok(info) => found(info),
-        Err(problems) => refused(problems),
-    }
-}
-
-async fn delete_schedule(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, schedule)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => found(schedules.delete(&id, &schedule).then(|| json!({}))),
-        Err(status) => status.into_response(),
-    }
-}
-
-async fn schedule_runs(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, schedule)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => found(schedules.runs(&id, &schedule)),
-        Err(status) => status.into_response(),
-    }
-}
-
-/// Start a run now. One already going is not an error: the answer shows it.
-async fn run_schedule(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, schedule)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let schedules = match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => schedules,
-        Err(status) => return status.into_response(),
-    };
-    if schedules.info(&id, &schedule).is_none() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    schedules::fire(&gateway, &schedule, Trigger::Manual);
-    found(gateway.schedules.info(&id, &schedule))
-}
-
-async fn stop_schedule(
-    State(gateway): State<Arc<Gateway>>,
-    Path((id, schedule)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    match schedules_of(&gateway, &headers, &id) {
-        Ok(schedules) => found(schedules.stop(&id, &schedule)),
-        Err(status) => status.into_response(),
-    }
+/// Whether `key` can name a pane's own workspace: 1-64 letters, digits,
+/// `-`, or `_`.
+fn valid_pane_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The pane key when the client asks for a pod of the pane's own.
@@ -737,12 +522,7 @@ fn pane_key(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
         None | Some("shared") => Ok(None),
         Some("pod") => {
             let key = header("ukai-workspace").ok_or("scope `pod` needs a Ukai-Workspace key")?;
-            let valid = !key.is_empty()
-                && key.len() <= 64
-                && key
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-            if valid {
+            if valid_pane_key(key) {
                 Ok(Some(key.to_owned()))
             } else {
                 Err("Ukai-Workspace must be 1-64 letters, digits, `-`, or `_`")

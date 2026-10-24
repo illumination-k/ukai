@@ -1,0 +1,29 @@
+// The gateway's agents and their workspaces.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+
+// With the gateway's token.
+service Agents {
+  // The agents in `gateway.toml`, by id.
+  rpc List(ListAgentsRequest) returns (ListAgentsResponse);
+  // Stop a workspace's pod, after copying its reports when there is a
+  // bucket for them; the next connection starts a fresh one. A workspace
+  // with no pod is left as it is.
+  rpc Restart(RestartRequest) returns (RestartResponse);
+}
+
+message ListAgentsRequest {}
+
+message ListAgentsResponse {
+  repeated string agents = 1;
+}
+
+message RestartRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+}
+
+message RestartResponse {}

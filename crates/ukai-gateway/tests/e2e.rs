@@ -275,3 +275,147 @@ async fn the_gateway_answers_its_tokens_only() {
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(old.status().as_u16(), 404);
 }
+
+/// The e2e agent as the app declares it, with `token`.
+fn agent_spec(token: &str) -> AgentSpec {
+    let url = env("UKAI_E2E_GATEWAY").replacen("http", "ws", 1);
+    AgentSpec::Gateway {
+        url: format!("{url}/agents/{AGENT}/acp"),
+        headers: BTreeMap::from([("Authorization".to_owned(), format!("Bearer {token}"))]),
+        workspace: WorkspaceScope::Pod,
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn schedules_are_kept_through_the_gateway() {
+    use ukai_acp::schedules::{ScheduleSpec, SchedulesEndpoint, SchedulesError, Task};
+
+    let token = env("UKAI_E2E_GATEWAY_TOKEN");
+    let schedules = SchedulesEndpoint::resolve(&agent_spec(&token), |_, _| None)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has schedules"));
+    // Disabled, so the gateway never fires it during the test.
+    let spec = ScheduleSpec {
+        name: fresh("nightly"),
+        cron: "0 3 * * *".into(),
+        utc_offset_minutes: 540,
+        task: Task::Command {
+            command: "true".into(),
+        },
+        enabled: false,
+    };
+    let created = schedules
+        .create(&spec)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let id = created.schedule.id.clone();
+    assert_eq!(created.schedule.agent, AGENT);
+    assert_eq!(created.schedule.spec, spec);
+    let listed = schedules.list().await.unwrap_or_else(|e| panic!("{e}"));
+    assert!(listed.iter().any(|info| info.schedule.id == id));
+
+    let renamed = ScheduleSpec {
+        task: Task::Prompt {
+            prompt: "triage".into(),
+        },
+        ..spec.clone()
+    };
+    let updated = schedules
+        .update(&id, &renamed)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(updated.schedule.spec.task, renamed.task);
+    let bad = ScheduleSpec {
+        cron: "not a pattern".into(),
+        ..spec.clone()
+    };
+    let refused = schedules.update(&id, &bad).await;
+    assert!(
+        matches!(refused, Err(SchedulesError::Refused(_))),
+        "{refused:?}"
+    );
+    assert_eq!(schedules.runs(&id).await.ok(), Some(Vec::new()));
+    assert!(schedules.stop(&id).await.is_ok());
+
+    schedules
+        .delete(&id)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(matches!(
+        schedules.get(&id).await,
+        Err(SchedulesError::NotFound)
+    ));
+
+    let denied = SchedulesEndpoint::resolve(&agent_spec("nope"), |_, _| None)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has schedules"))
+        .list()
+        .await;
+    assert!(
+        matches!(denied, Err(SchedulesError::Denied(_))),
+        "{denied:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn a_workspace_that_is_not_running_is_left_alone() {
+    use ukai_acp::PaneWorkspace;
+    use ukai_acp::ports::{PortsEndpoint, PortsError};
+    use ukai_acp::updates::RestartEndpoint;
+
+    let token = env("UKAI_E2E_GATEWAY_TOKEN");
+    let pane = PaneWorkspace {
+        key: fresh("pane"),
+        scope: WorkspaceScope::Pod,
+    };
+    let ports = PortsEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has ports"))
+        .list()
+        .await;
+    assert!(matches!(ports, Err(PortsError::Gone)), "{ports:?}");
+    // Restarting a workspace with no pod leaves it without one.
+    RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent restarts"))
+        .restart()
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let still = PortsEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has ports"))
+        .list()
+        .await;
+    assert!(matches!(still, Err(PortsError::Gone)), "{still:?}");
+}
+
+/// Plain gRPC over h2c, which the gateway answers next to gRPC-Web.
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn the_gateway_answers_plain_grpc_too() {
+    use ukai_proto::gateway::v1::agents_client::AgentsClient;
+
+    let mut agents = AgentsClient::connect(env("UKAI_E2E_GATEWAY"))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let mut request = tonic::Request::new(ukai_proto::gateway::v1::ListAgentsRequest {});
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", env("UKAI_E2E_GATEWAY_TOKEN"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let listed = agents
+        .list(request)
+        .await
+        .unwrap_or_else(|status| panic!("{status:?}"))
+        .into_inner();
+    assert_eq!(listed.agents, [AGENT]);
+    let anonymous = agents
+        .list(ukai_proto::gateway::v1::ListAgentsRequest {})
+        .await
+        .map(drop);
+    assert_eq!(anonymous.map_err(|s| s.code()), Err(Code::Unauthenticated));
+}

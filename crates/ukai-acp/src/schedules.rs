@@ -1,5 +1,6 @@
-//! Schedules a gateway runs for one of its agents: the wire types, and the
-//! client side of `/agents/<id>/schedules`.
+//! Schedules a gateway runs for one of its agents: the types, and the
+//! client side of the gateway's `ukai.gateway.v1.Schedules` (gRPC-Web, see
+//! `crate::grpc`; [`wire`] for the conversions).
 //!
 //! A schedule runs a shell command in the agent's workspace, or one prompt
 //! turn of the agent, on a cron pattern. The gateway keeps the schedules and
@@ -11,12 +12,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use ukai_config::{AgentSpec, Source};
+use ukai_proto::gateway::v1 as gw;
+use ukai_proto::gateway::v1::schedule_change::Outcome as Change;
+use ukai_proto::gateway::v1::schedules_client::SchedulesClient;
 
+use crate::grpc::{self, Channel};
 use crate::{ResolveError, header_map};
 
-/// Suffix of an agent's ACP endpoint that lists its schedules. One schedule
-/// is `<it>/<id>`, with `/runs`, `/run`, and `/stop` below that.
-pub const SCHEDULES_PATH: &str = "/schedules";
+pub mod wire;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -115,36 +118,53 @@ pub struct ScheduleInfo {
     pub last_run: Option<Run>,
 }
 
-/// The body of a 422: every reason a schedule was refused.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Refusal {
-    pub problems: Vec<String>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulesError {
     #[error("cannot reach the gateway: {0}")]
     Unreachable(String),
     #[error("{}", .0.join("; "))]
     Refused(Vec<String>),
+    /// No such schedule, or the gateway does not know the agent.
     #[error("no such schedule")]
     NotFound,
-    #[error("the gateway answered {0}")]
-    Status(u16),
+    #[error("the gateway refused: {0}")]
+    Denied(String),
+    #[error("the gateway failed: {0}")]
+    Failed(String),
     #[error("the gateway sent something that cannot be read: {0}")]
-    Body(String),
+    Malformed(String),
+}
+
+impl From<tonic::Status> for SchedulesError {
+    fn from(status: tonic::Status) -> Self {
+        match grpc::Failure::from(status) {
+            grpc::Failure::Unreachable(why) => Self::Unreachable(why),
+            grpc::Failure::NotFound => Self::NotFound,
+            grpc::Failure::Denied(why) => Self::Denied(why),
+            grpc::Failure::TooMany => Self::Failed("too many requests".to_owned()),
+            grpc::Failure::NotRunning => Self::Failed("the workspace is not running".to_owned()),
+            grpc::Failure::Failed(why) => Self::Failed(why),
+        }
+    }
+}
+
+impl From<wire::Malformed> for SchedulesError {
+    fn from(error: wire::Malformed) -> Self {
+        Self::Malformed(error.to_string())
+    }
 }
 
 /// One gateway agent's schedules, with the agent's headers.
 #[derive(Debug, Clone)]
 pub struct SchedulesEndpoint {
-    client: reqwest::Client,
-    base: String,
+    channel: Channel,
+    root: String,
+    agent: String,
 }
 
 impl PartialEq for SchedulesEndpoint {
     fn eq(&self, other: &Self) -> bool {
-        self.base == other.base
+        self.root == other.root && self.agent == other.agent
     }
 }
 
@@ -158,9 +178,7 @@ impl SchedulesEndpoint {
         let AgentSpec::Gateway { url, headers, .. } = spec else {
             return Ok(None);
         };
-        let Some(base) =
-            crate::reports::endpoint_base(&ukai_config::interpolate(url, lookup)?, SCHEDULES_PATH)
-        else {
+        let Some((root, agent)) = grpc::agent_root(&ukai_config::interpolate(url, lookup)?) else {
             return Ok(None);
         };
         let client = reqwest::Client::builder()
@@ -168,23 +186,47 @@ impl SchedulesEndpoint {
             .timeout(TIMEOUT)
             .build()
             .map_err(|error| ResolveError::Client(error.to_string()))?;
-        Ok(Some(Self { client, base }))
+        Ok(Some(Self {
+            channel: grpc::channel(client, root.clone()),
+            root,
+            agent,
+        }))
     }
 
-    pub fn base(&self) -> &str {
-        &self.base
+    fn client(&self) -> SchedulesClient<Channel> {
+        SchedulesClient::new(self.channel.clone())
+    }
+
+    fn one(&self, id: &str) -> gw::ScheduleRequest {
+        gw::ScheduleRequest {
+            agent: self.agent.clone(),
+            id: id.to_owned(),
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<ScheduleInfo>, SchedulesError> {
-        self.call(self.client.get(&self.base)).await
+        let request = gw::AgentRequest {
+            agent: self.agent.clone(),
+        };
+        let response = self.client().list(request).await?.into_inner();
+        Ok(response
+            .schedules
+            .into_iter()
+            .map(ScheduleInfo::try_from)
+            .collect::<Result<_, _>>()?)
     }
 
     pub async fn create(&self, spec: &ScheduleSpec) -> Result<ScheduleInfo, SchedulesError> {
-        self.call(self.client.post(&self.base).json(spec)).await
+        let request = gw::CreateScheduleRequest {
+            agent: self.agent.clone(),
+            spec: Some(spec.clone().into()),
+        };
+        saved(self.client().create(request).await?.into_inner())
     }
 
     pub async fn get(&self, id: &str) -> Result<ScheduleInfo, SchedulesError> {
-        self.call(self.client.get(self.url(id, ""))).await
+        let response = self.client().get(self.one(id)).await?;
+        Ok(response.into_inner().try_into()?)
     }
 
     pub async fn update(
@@ -192,67 +234,49 @@ impl SchedulesEndpoint {
         id: &str,
         spec: &ScheduleSpec,
     ) -> Result<ScheduleInfo, SchedulesError> {
-        self.call(self.client.put(self.url(id, "")).json(spec))
-            .await
+        let request = gw::UpdateScheduleRequest {
+            agent: self.agent.clone(),
+            id: id.to_owned(),
+            spec: Some(spec.clone().into()),
+        };
+        saved(self.client().update(request).await?.into_inner())
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), SchedulesError> {
-        self.call::<serde_json::Value>(self.client.delete(self.url(id, "")))
-            .await
-            .map(drop)
+        self.client().delete(self.one(id)).await?;
+        Ok(())
     }
 
     /// Start a run now; the schedule as it is afterwards.
     pub async fn run(&self, id: &str) -> Result<ScheduleInfo, SchedulesError> {
-        self.call(self.client.post(self.url(id, "/run"))).await
+        let response = self.client().run(self.one(id)).await?;
+        Ok(response.into_inner().try_into()?)
     }
 
     pub async fn stop(&self, id: &str) -> Result<ScheduleInfo, SchedulesError> {
-        self.call(self.client.post(self.url(id, "/stop"))).await
+        let response = self.client().stop(self.one(id)).await?;
+        Ok(response.into_inner().try_into()?)
     }
 
     /// The schedule's recent runs, newest first.
     pub async fn runs(&self, id: &str) -> Result<Vec<Run>, SchedulesError> {
-        self.call(self.client.get(self.url(id, "/runs"))).await
-    }
-
-    fn url(&self, id: &str, suffix: &str) -> String {
-        let id: String = percent_encode(id);
-        format!("{}/{id}{suffix}", self.base)
-    }
-
-    async fn call<T: serde::de::DeserializeOwned>(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> Result<T, SchedulesError> {
-        let response = request
-            .send()
-            .await
-            .map_err(|error| SchedulesError::Unreachable(error.to_string()))?;
-        match response.status().as_u16() {
-            200 | 201 => response
-                .json::<T>()
-                .await
-                .map_err(|error| SchedulesError::Body(error.to_string())),
-            404 => Err(SchedulesError::NotFound),
-            422 => Err(match response.json::<Refusal>().await {
-                Ok(refusal) => SchedulesError::Refused(refusal.problems),
-                Err(error) => SchedulesError::Body(error.to_string()),
-            }),
-            status => Err(SchedulesError::Status(status)),
-        }
+        let response = self.client().runs(self.one(id)).await?;
+        Ok(response
+            .into_inner()
+            .runs
+            .into_iter()
+            .map(Run::try_from)
+            .collect::<Result<_, _>>()?)
     }
 }
 
-/// Ids are made by the gateway from letters and digits; anything else is
-/// escaped rather than trusted.
-fn percent_encode(id: &str) -> String {
-    id.bytes()
-        .map(|byte| match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' => (byte as char).to_string(),
-            other => format!("%{other:02X}"),
-        })
-        .collect()
+/// The schedule a change saved, or every reason it was refused.
+fn saved(change: gw::ScheduleChange) -> Result<ScheduleInfo, SchedulesError> {
+    match change.outcome {
+        Some(Change::Saved(info)) => Ok(info.try_into()?),
+        Some(Change::Refused(refused)) => Err(SchedulesError::Refused(refused.problems)),
+        None => Err(wire::Malformed("outcome").into()),
+    }
 }
 
 #[cfg(test)]
@@ -275,12 +299,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"))
             .unwrap_or_else(|| panic!("a gateway agent has schedules"));
         assert_eq!(
-            endpoint.base(),
-            "https://gw.example.com/agents/claude/schedules"
-        );
-        assert_eq!(
-            endpoint.url("a1/../b", "/runs"),
-            "https://gw.example.com/agents/claude/schedules/a1%2F%2E%2E%2Fb/runs"
+            (endpoint.root.as_str(), endpoint.agent.as_str()),
+            ("https://gw.example.com", "claude")
         );
     }
 

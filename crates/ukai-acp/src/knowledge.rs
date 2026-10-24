@@ -27,7 +27,6 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tonic::Code;
 use ukai_config::{AgentSpec, Source};
 use ukai_proto::gateway::v1 as gw;
 use ukai_proto::gateway::v1::knowledge_client::KnowledgeClient;
@@ -273,22 +272,13 @@ impl From<wire::Malformed> for KnowledgeError {
 
 impl From<tonic::Status> for KnowledgeError {
     fn from(status: tonic::Status) -> Self {
-        let message = status.message().to_owned();
-        match status.code() {
-            Code::NotFound => Self::NotFound,
-            Code::ResourceExhausted => Self::TooMany,
-            Code::Unauthenticated | Code::PermissionDenied => Self::Denied(message),
-            Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled => {
-                Self::Unreachable(message)
-            }
-            // What the transport failed with, such as a connection refused.
-            Code::Unknown if std::error::Error::source(&status).is_some() => {
-                Self::Unreachable(message)
-            }
-            Code::Unimplemented => Self::Failed(
-                "the gateway does not serve knowledge over gRPC; it may need upgrading".to_owned(),
-            ),
-            code => Self::Failed(format!("{code:?}: {message}")),
+        match grpc::Failure::from(status) {
+            grpc::Failure::Unreachable(why) => Self::Unreachable(why),
+            grpc::Failure::NotFound => Self::NotFound,
+            grpc::Failure::Denied(why) => Self::Denied(why),
+            grpc::Failure::TooMany => Self::TooMany,
+            grpc::Failure::NotRunning => Self::Failed("the workspace is not running".to_owned()),
+            grpc::Failure::Failed(why) => Self::Failed(why),
         }
     }
 }
