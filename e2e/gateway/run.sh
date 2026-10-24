@@ -116,19 +116,23 @@ probe as-gateway-to-store "$gateway" ukai-surrealdb 8000 blocked
 probe as-agent-named-knowledge "$knowledge,$agent" ukai-surrealdb 8000 blocked
 
 # Whether the gateway refuses a pod with `labels` that asks what a person
-# asks, even with the gateway's token: `refused` or `answered`.
+# asks, even with the gateway's token: `refused` (403) or `answered` (any
+# other status). No answer at all fails the probe.
 asks_as_person() {
-	local name=$1 labels=$2 expected=$3 outcome
+	local name=$1 labels=$2 expected=$3 status outcome
 	# shellcheck disable=SC2016 # $TOKEN is the pod's, expanded there.
-	if k run "$name" --image=busybox:1.37 --restart=Never --rm -i --quiet \
+	status=$(k run "$name" --image=busybox:1.37 --restart=Never --rm -i --quiet \
 		--pod-running-timeout=2m ${labels:+--labels="$labels"} --env="TOKEN=$gateway_token" \
-		--command -- sh -c 'wget -q -S -O /dev/null --header "Authorization: Bearer $TOKEN" \
-			http://ukai-gateway/agents/e2e/reports 2>&1 | grep -q " 403 "' >/dev/null 2>&1; then
-		outcome=refused
-	else
-		outcome=answered
-	fi
-	echo "$name: the gateway $outcome it (expected $expected)"
+		--command -- sh -c 'wget -S -O /dev/null --header "Authorization: Bearer $TOKEN" http://ukai-gateway/agents/e2e/reports 2>&1 | grep -m1 "HTTP/"' 2>/dev/null || true)
+	case "$status" in
+	*" 403 "*) outcome=refused ;;
+	*HTTP/*) outcome=answered ;;
+	*)
+		echo "$name: no answer from the gateway" >&2
+		return 1
+		;;
+	esac
+	echo "$name: the gateway $outcome it with${status} (expected $expected)"
 	[ "$outcome" = "$expected" ]
 }
 asks_as_person person-pod "" answered

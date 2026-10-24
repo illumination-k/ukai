@@ -227,11 +227,12 @@ pub async fn guard(
     }
     let peer = peer.ip().to_canonical();
     let cluster = &gateway.cluster;
-    match gateway
+    let agent_pod = gateway
         .agent_pods
         .contains(peer, || cluster.agent_pod_addresses())
-        .await
-    {
+        .await;
+    tracing::debug!(%peer, path = request.uri().path(), ?agent_pod, "who asks");
+    match agent_pod {
         Ok(false) => next.run(request).await,
         Ok(true) => {
             tracing::warn!(%peer, path = request.uri().path(), "refused an agent pod asking as a person");
