@@ -9,7 +9,8 @@ rust-version.workspace = true
 description = "Serves a namespace's agents over ACP's WebSocket profile, one pod per workspace"
 
 [dependencies]
-axum = { workspace = true, features = ["ws"] }
+# `http2` for gRPC over h2c next to gRPC-Web on the same port.
+axum = { workspace = true, features = ["ws", "http2"] }
 futures = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
@@ -26,8 +27,10 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "handshake"] }
 toml = { workspace = true }
-# A client of ukai-knowledge, which keeps the notes.
+# Serves ukai.gateway.v1 (with gRPC-Web) and asks ukai-knowledge.
 tonic = { workspace = true }
+tonic-web = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ukai-acp = { workspace = true }

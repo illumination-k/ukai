@@ -1,0 +1,91 @@
+// What the gateway answers its clients and its agent pods about knowledge,
+// over gRPC and gRPC-Web on its own port. See "ナレッジ" in docs/design.md.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/knowledge/v1/knowledge.proto";
+
+// The knowledge of a gateway agent's scope, for a person through the app,
+// with the gateway's token. Every request names the agent, whose scope is
+// what `gateway.toml` says. NOT_FOUND names an agent or a note the gateway
+// does not have; UNAVAILABLE, a gateway that keeps no knowledge, or cannot
+// reach it now.
+service Knowledge {
+  // The scope's notes, by name.
+  rpc List(AgentRequest) returns (Listing);
+  // A note as it is now.
+  rpc Get(NoteRequest) returns (ukai.knowledge.v1.GetResponse);
+  // Every write and delete of a note, newest first.
+  rpc Revisions(NoteRequest) returns (ukai.knowledge.v1.RevisionsResponse);
+  // Create or replace a note, approved as it is written.
+  rpc Put(PutRequest) returns (ukai.knowledge.v1.ChangeResponse);
+  rpc Delete(RevisionRequest) returns (ukai.knowledge.v1.ChangeResponse);
+  // Approve a note's latest revision.
+  rpc Approve(RevisionRequest) returns (ukai.knowledge.v1.ChangeResponse);
+  // Reject a note's latest revision, which awaits review.
+  rpc Reject(RevisionRequest) returns (ukai.knowledge.v1.ChangeResponse);
+}
+
+// The knowledge of an agent pod's own scope, with its relay's token: the
+// gateway finds the pod by it, and the scope and workspace from the pod's
+// Job, never from the request. An agent's writes wait for a person to
+// approve them; there is no review here.
+service WorkspaceKnowledge {
+  rpc List(WorkspaceListRequest) returns (Listing);
+  rpc Get(WorkspaceNoteRequest) returns (ukai.knowledge.v1.GetResponse);
+  rpc Revisions(WorkspaceNoteRequest) returns (ukai.knowledge.v1.RevisionsResponse);
+  rpc Put(WorkspacePutRequest) returns (ukai.knowledge.v1.ChangeResponse);
+  rpc Delete(WorkspaceRevisionRequest) returns (ukai.knowledge.v1.ChangeResponse);
+}
+
+// A scope's notes.
+message Listing {
+  // What the notes are kept under: agents with the same scope share them.
+  string scope = 1;
+  repeated ukai.knowledge.v1.NoteSummary notes = 2;
+}
+
+message AgentRequest {
+  // The agent's id in `gateway.toml`.
+  string agent = 1;
+}
+
+message NoteRequest {
+  string agent = 1;
+  string name = 2;
+}
+
+message PutRequest {
+  string agent = 1;
+  string name = 2;
+  ukai.knowledge.v1.NoteSpec spec = 3;
+  // The revision the writer read: 0 for a new note.
+  uint64 base_revision = 4;
+}
+
+message RevisionRequest {
+  string agent = 1;
+  string name = 2;
+  // The revision the writer read, which must be the latest.
+  uint64 revision = 3;
+}
+
+message WorkspaceListRequest {}
+
+message WorkspaceNoteRequest {
+  string name = 1;
+}
+
+message WorkspacePutRequest {
+  string name = 1;
+  ukai.knowledge.v1.NoteSpec spec = 2;
+  uint64 base_revision = 3;
+  // The commit the pod's checkout is at, as it says.
+  optional string commit = 4;
+}
+
+message WorkspaceRevisionRequest {
+  string name = 1;
+  uint64 revision = 2;
+}

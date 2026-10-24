@@ -208,10 +208,12 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 
 部品の間の通信: ACP は仕様どおり WebSocket（`/acp`）で、ポートのトンネル（`/forward`）はバイト列、レポートは
 web view が相対パスで素材を読むので HTTP のまま。それ以外の要求と応答の API は gRPC にしていく。型は
-`ukai-proto` の `.proto` が決める。今は gateway → `ukai-knowledge` だけが gRPC で、次に relay → gateway と
-アプリ → gateway のナレッジ、その後スケジュール・ポートの一覧・エージェント一覧・restart を移す。アプリと
-gateway の間は IAP などの HTTP/1.1 の proxy を通ることがあるので、gateway は同じポートで gRPC と gRPC-Web の
-両方を受け、アプリは gRPC-Web で話す。クラスタの中は普通の gRPC（h2c）。
+`ukai-proto` の `.proto` が決める。今はナレッジ（アプリと relay → gateway の `ukai.gateway.v1`、gateway →
+`ukai-knowledge`）が gRPC で、次にスケジュール・ポートの一覧・restart を移す。アプリと gateway の間は IAP
+などの HTTP/1.1 の proxy を通ることがあるので、gateway は同じポートで gRPC（h2c）と gRPC-Web の両方を受け、
+gateway のクライアント（アプリと relay）は gRPC-Web で話す。gRPC-Web は、エージェントのヘッダー・TLS・
+タイムアウトを持つ既存の reqwest のクライアントの上に載せる（`ukai_acp` の `grpc`）。gateway →
+`ukai-knowledge` はクラスタの中なので普通の gRPC（h2c）。
 
 ### `ukai-relay`
 
@@ -278,8 +280,8 @@ gateway の間は IAP などの HTTP/1.1 の proxy を通ることがあるの�
   ワークスペースの決め方・トークン・Pod を起こさないことはレポートと同じ。forward はクライアントを upgrade する
   前に relay へつなぎ、relay の 502（何も listen していない）はそのまま返す。
 - スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
-- プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を `/agents/<id>/knowledge` と、Pod 向けの
-  `/workspace/knowledge` で出す。持つのは `ukai-knowledge` で、gateway は誰が聞いているかを決めて取り次ぐ。
+- プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を gRPC の `ukai.gateway.v1.Knowledge` と、
+  Pod 向けの `WorkspaceKnowledge` で出す。持つのは `ukai-knowledge` で、gateway は誰が聞いているかを決めて取り次ぐ。
 - `POST /agents/<id>/restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
   ワークスペースの決め方とトークンは `/acp` と同じ。サイドカーは TERM でスナップショットを取ってから終わるので、
   作業ツリーは idle で止まったときと同じく残る。そのワークスペースのセッションはすべて切れる。
@@ -367,31 +369,31 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 - 版と排他: 書き込みと削除はどれも 1 つの revision（名前ごとに 1 からの連番、削除をまたいでも数え続ける）
   になる。書き手は読んだ revision（新規は 0）を渡し、1 つのトランザクションの中で今の revision と違えば
   409 で今のノートを返す。黙った上書き（最後に書いたほうが勝つ）は起きない。削除は印を付けるだけで、
-  履歴は `GET .../<name>/revisions` で読め、アプリから任意の版に戻せる。汚染されたノートを後から戻せる
+  履歴は `Revisions` で読め、アプリから任意の版に戻せる。汚染されたノートを後から戻せる
   ようにするため。
 - 承認: ノートは最後に人が承認した revision（`approved`）を別に持つ。人がアプリで書いたものは書いた時点で
   承認済み、エージェントが書いたものは承認待ちで、その間も前に承認された revision はそのまま残る。承認は
-  アプリから（`POST /agents/<id>/knowledge/<name>/approve?revision=<n>`、最新の revision のときだけ）で、
-  Pod 向けの `/workspace/...` には入口がない。人が承認したノートはエージェントからは消せない（人に
-  理由を伝えさせる）。却下（`POST .../<name>/reject?revision=<n>`、最新の revision が承認待ちのとき
+  アプリから（`Knowledge.Approve`、最新の revision のときだけ）で、Pod 向けの `WorkspaceKnowledge` には
+  入口がない。人が承認したノートはエージェントからは消せない（人に
+  理由を伝えさせる）。却下（`Knowledge.Reject`、最新の revision が承認待ちのとき
   だけ）は、承認済みの revision を人の書き込みとして書き戻し、承認済みがなければノートを削除する。
-  却下された revision は履歴に残る。途中で承認されていれば 409。アプリはサイドバーで承認待ちに印を
+  却下された revision は履歴に残る。途中で承認されていれば衝突（`conflict`）。アプリはサイドバーで承認待ちに印を
   付け、ノートの pane で承認済みの revision との差分（説明とタグも）と「Approve」「Reject」を出す。
 - 由来: revision ごとに書き手（人 / エージェント）、エージェントなら gateway がトークンから突き止めた
   ワークスペース、書き手の申告する commit（16 進だけを残す）を持つ。
 - `ukai-knowledge` は起動時に store へつなぎ、つながるまで 10 秒ごとに試す。その間は UNAVAILABLE で答え、
   gRPC のヘルスチェックも serving にならない。gateway は `ukai-knowledge` に最初の要求でつなぐので、
-  どちらが先に起きてもよく、届かない間はナレッジの要求だけが 503 になる。gateway に `UKAI_KNOWLEDGE_URL`
+  どちらが先に起きてもよく、届かない間はナレッジの要求だけが UNAVAILABLE になる。gateway に `UKAI_KNOWLEDGE_URL`
   と `UKAI_KNOWLEDGE_TOKEN` がなければナレッジは持たず、Pod にも gateway の場所を渡さない（MCP の
   ナレッジのツールも出ない）。テストは SDK の `kv-mem` で本物のエンジンに対して行う。
-- アプリから: `GET /agents/<id>/knowledge`（スコープと、説明までのノート、名前順）、`GET` / `PUT` /
-  `DELETE ?revision=<n>` `/agents/<id>/knowledge/<name>`、`GET .../<name>/revisions`。トークンは
-  `/acp` と同じ。サイドバーの「Knowledge」に、スコープを共有する gateway エージェントをまとめて並べ、ノートの pane で Markdown
+- アプリから: `ukai.gateway.v1.Knowledge` の `List`（スコープと、説明までのノート、名前順）、`Get` /
+  `Put` / `Delete` / `Revisions` / `Approve` / `Reject`。どれもエージェントの id を名指し、スコープはその
+  エージェントの `gateway.toml` での宣言で決まる。トークンは `/acp` と同じ。サイドバーの「Knowledge」に、スコープを共有する gateway エージェントをまとめて並べ、ノートの pane で Markdown
   として読み、編集し、削除する。ノートはすでにある、保存済みのノートの pane（フォーカス中、今のタブ、
   ほかのタブの順）に開き直すので、ノートを開くたびに pane は増えない。書きかけの新しいノートの pane
   は上書きしない。開いている pane はノートを読み直し続け、編集中に版が進んだら保存は拒否されるので、
   そう出して「自分の版で置き換える」を選ばせる。
-- Pod から: relay の MCP サーバー（`ukai-relay mcp --gateway <url>`）が `/workspace/knowledge` を叩く。
+- Pod から: relay の MCP サーバー（`ukai-relay mcp --gateway <url>`）が `WorkspaceKnowledge` を呼ぶ。
   認証は relay のトークンで、gateway は同じトークンを持つ Pod を探し、Job を作るときに付けた注釈
   `ukai.dev/knowledge` からスコープを、ラベルからワークスペースを決める。Pod の申告は信じないので、Pod は
   自分のスコープのノートにしか触れない。スコープを変えても、動いている Pod は作り直すまで前のスコープの

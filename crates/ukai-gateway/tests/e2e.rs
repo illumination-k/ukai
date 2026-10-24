@@ -248,25 +248,30 @@ async fn the_knowledge_service_answers_its_token_only() {
 #[ignore = "needs a cluster: e2e/gateway/run.sh"]
 async fn the_gateway_answers_its_tokens_only() {
     let gateway = env("UKAI_E2E_GATEWAY");
-    let client = reqwest::Client::new();
-    let status = |request: reqwest::RequestBuilder| async move {
-        request
-            .send()
-            .await
+    let with_token = |token: &str| {
+        let spec = AgentSpec::Gateway {
+            url: format!("{}/agents/{AGENT}/acp", gateway.replacen("http", "ws", 1)),
+            headers: BTreeMap::from([("Authorization".to_owned(), format!("Bearer {token}"))]),
+            workspace: WorkspaceScope::Pod,
+        };
+        KnowledgeEndpoint::resolve(&spec, |_, _| None)
             .unwrap_or_else(|e| panic!("{e}"))
-            .status()
-            .as_u16()
+            .unwrap_or_else(|| panic!("a gateway agent has knowledge"))
     };
-    let notes = format!("{gateway}/agents/{AGENT}/knowledge");
-    assert_eq!(status(client.get(&notes)).await, 401);
-    assert_eq!(status(client.get(&notes).bearer_auth("nope")).await, 401);
+    let wrong = with_token("nope").list().await;
+    assert!(matches!(wrong, Err(KnowledgeError::Denied(_))), "{wrong:?}");
     // A pod is known by its relay's token; there is no pod with this one.
-    let workspace = format!("{gateway}/workspace/knowledge");
-    assert_eq!(
-        status(client.get(&workspace).bearer_auth("nope")).await,
-        401
-    );
-    // Review has no way in from a pod.
-    let approve = format!("{gateway}/workspace/knowledge/x/approve?revision=1");
-    assert_ne!(status(client.post(&approve).bearer_auth("nope")).await, 200);
+    let pod = KnowledgeEndpoint::for_workspace(&gateway, "nope")
+        .unwrap_or_else(|e| panic!("{e}"))
+        .list()
+        .await;
+    assert!(matches!(pod, Err(KnowledgeError::Denied(_))), "{pod:?}");
+    // The JSON API is gone.
+    let old = reqwest::Client::new()
+        .get(format!("{gateway}/agents/{AGENT}/knowledge"))
+        .bearer_auth(env("UKAI_E2E_GATEWAY_TOKEN"))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(old.status().as_u16(), 404);
 }

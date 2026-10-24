@@ -15,6 +15,7 @@
 //! schedules, and it keeps the knowledge of its repository.
 
 mod fs;
+mod grpc;
 pub mod knowledge;
 pub mod ports;
 pub mod reports;

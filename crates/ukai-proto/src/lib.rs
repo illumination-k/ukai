@@ -10,3 +10,11 @@ pub mod knowledge {
         tonic::include_proto!("ukai.knowledge.v1");
     }
 }
+
+/// `ukai.gateway.v1`: what the gateway answers its clients and agent pods.
+pub mod gateway {
+    pub mod v1 {
+        #![allow(clippy::all, clippy::pedantic, missing_docs)]
+        tonic::include_proto!("ukai.gateway.v1");
+    }
+}
