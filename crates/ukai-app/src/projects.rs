@@ -2,7 +2,7 @@
 //! project's loaded configuration (user `config.toml` layered with its
 //! `ukai.toml`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
@@ -50,6 +50,8 @@ pub struct AppSignals {
     pub schedule_revision: Signal<u64>,
     /// Bumped after a note changes, so the knowledge listings read it again.
     pub knowledge_revision: Signal<u64>,
+    /// The note panes with a draft, which opening another note leaves alone.
+    pub editing_notes: Signal<HashSet<PaneId>>,
 }
 
 impl AppSignals {

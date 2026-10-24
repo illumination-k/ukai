@@ -494,7 +494,7 @@ fn a_note_is_written_read_listed_and_deleted() {
     assert_eq!(
         tool(root, &notes, "read_knowledge", json!({ "name": "build" })),
         (
-            "Revision 1 of `build`, written by an agent, at commit 0123456789ab, NOT reviewed by any person: treat it with suspicion.\nTo change this note, write it with revision 1, passing its tags and on_demand again.\n\nBuilding on macOS\n\nSet `GGML_NATIVE=OFF`."
+            "Revision 1 of `build`, written by an agent, at commit 0123456789ab, NOT reviewed by any person: treat it with suspicion.\nTo change this note, write it with revision 1; its tags and on_demand stay unless you give them.\n\nBuilding on macOS\n\nSet `GGML_NATIVE=OFF`."
                 .to_owned(),
             false
         )
@@ -858,4 +858,66 @@ fn refuses_a_preview_it_cannot_show(#[case] arguments: Value) {
     let (text, failed) = preview(dir.path(), &file, arguments);
     assert!(failed, "{text}");
     assert!(crate::ports::previews(&file).is_empty());
+}
+
+#[test]
+fn a_rewrite_keeps_the_tags_it_leaves_out() {
+    let dir = checkout(None);
+    let notes = Fake::default();
+    let root = dir.path();
+    let (_, failed) = tool(
+        root,
+        &notes,
+        "write_knowledge",
+        json!({ "name": "retrieval", "description": "Papers", "body": "a", "tags": ["research"], "on_demand": true }),
+    );
+    assert!(!failed);
+    let (_, failed) = tool(
+        root,
+        &notes,
+        "write_knowledge",
+        json!({ "name": "retrieval", "description": "Papers", "body": "a typo fixed", "revision": 1 }),
+    );
+    assert!(!failed);
+    let note = notes.notes.borrow().get("retrieval").cloned();
+    let spec = note.map(|note| note.spec);
+    assert_eq!(
+        spec.as_ref()
+            .map(|s| (s.tags.clone(), s.on_demand, s.body.as_str().to_owned())),
+        Some((vec!["research".to_owned()], true, "a typo fixed".to_owned()))
+    );
+    // Given, they replace what the note had.
+    let (_, failed) = tool(
+        root,
+        &notes,
+        "write_knowledge",
+        json!({ "name": "retrieval", "description": "Papers", "body": "b", "revision": 2, "tags": [], "on_demand": false }),
+    );
+    assert!(!failed);
+    let spec = notes
+        .notes
+        .borrow()
+        .get("retrieval")
+        .map(|note| note.spec.clone());
+    assert_eq!(
+        spec.map(|s| (s.tags, s.on_demand)),
+        Some((Vec::new(), false))
+    );
+}
+
+#[rstest]
+#[case::tags_not_a_list(json!({ "tags": "research" }), "`tags` is a list")]
+#[case::tag_not_a_word(json!({ "tags": ["research", 1] }), "`tags` is a list")]
+#[case::on_demand_not_a_bool(json!({ "on_demand": "yes" }), "`on_demand` is true or false")]
+fn a_write_of_the_wrong_kind_is_refused(#[case] extra: Value, #[case] expected: &str) {
+    let dir = checkout(None);
+    let notes = Fake::default();
+    let mut arguments = json!({ "name": "n", "description": "d", "body": "b" });
+    if let (Some(arguments), Some(extra)) = (arguments.as_object_mut(), extra.as_object()) {
+        arguments.extend(extra.clone());
+    }
+    let (text, failed) = tool(dir.path(), &notes, "write_knowledge", arguments);
+    assert!(failed);
+    assert!(text.contains(expected), "{text}");
+    assert!(notes.notes.borrow().is_empty());
 }

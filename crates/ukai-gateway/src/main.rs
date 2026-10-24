@@ -79,6 +79,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
+mod access;
 mod api;
 mod archive;
 mod cluster;
@@ -105,6 +106,10 @@ struct Gateway {
     knowledge: Option<KnowledgeClient>,
     /// The copy of the workspaces' reports, when there is a bucket for it.
     archive: Option<Arc<Archive>>,
+    /// The agent pods' addresses, which the person's side refuses.
+    agent_pods: access::AgentPods,
+    /// For asking the pods' relays.
+    http: reqwest::Client,
 }
 
 #[tokio::main]
@@ -186,6 +191,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         schedules,
         knowledge,
         archive,
+        agent_pods: access::AgentPods::default(),
+        http: reqwest::Client::new(),
     });
     if let Some(archive) = &gateway.archive {
         tokio::spawn(archive::run(archive.clone(), gateway.cluster.clone()));
@@ -199,13 +206,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/agents/{id}/reports/files/{*path}", get(reports))
         .route("/agents/{id}/forward/{port}", get(forward))
         .with_state(gateway.clone())
-        .merge(grpc(gateway))
+        .merge(grpc(gateway.clone()))
         // The gRPC routes come with a fallback answering every other path
         // with UNIMPLEMENTED as HTTP 200; a path nothing serves is a 404.
-        .fallback(|| async { StatusCode::NOT_FOUND });
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(axum::middleware::from_fn_with_state(gateway, access::guard));
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(%listen, "serving");
-    axum::serve(listener, router).await?;
+    // The peer's address is how `access::guard` tells an agent pod.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -240,40 +253,17 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     .into_axum_router()
 }
 
-fn authorized(gateway: &Gateway, headers: &HeaderMap) -> bool {
-    let Some(token) = &gateway.token else {
-        return true;
-    };
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|presented| cluster::same_secret(token, presented))
-}
-
 async fn connect(
     State(gateway): State<Arc<Gateway>>,
     Path(id): Path<String>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !authorized(&gateway, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(agent) = gateway.agents.get(&id).cloned() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let pane = match pane_key(&headers) {
-        Ok(pane) => pane,
-        Err(problem) => return (StatusCode::BAD_REQUEST, problem).into_response(),
+    let plan = match workspace_plan(&gateway, &id, &headers) {
+        Ok(plan) => plan,
+        Err(denial) => return denial.into_response(),
     };
     upgrade.on_upgrade(move |socket| async move {
-        let plan = Plan::new(
-            agent,
-            &gateway.user,
-            gateway.cluster.namespace(),
-            pane.as_deref(),
-        );
         if let Err(error) = relay(&gateway, plan, socket).await {
             tracing::warn!(agent = %id, %error, "connection ended with an error");
         }
@@ -300,7 +290,7 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
         Ok(plan) => plan,
         Err(refused) => return refused.into_response(),
     };
-    let endpoint = match running_relay(&gateway, &id, &plan).await {
+    let endpoint = match access::running_relay(&gateway, &plan).await {
         Ok(Some(endpoint)) => endpoint,
         Ok(None) => {
             return match &gateway.archive {
@@ -308,9 +298,15 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
                 None => gone(),
             };
         }
-        Err(response) => return response,
+        Err(denial) => return denial.into_response(),
     };
-    match fetch(&endpoint.reports_url(suffix), &endpoint.token).await {
+    match fetch(
+        &gateway.http,
+        &endpoint.reports_url(suffix),
+        &endpoint.token,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(agent = %id, %error, "cannot read the workspace's reports");
@@ -357,52 +353,28 @@ async fn from_archive(archive: &Archive, id: &str, workspace: &str, suffix: &str
 }
 
 /// The workspace a request asks for, resolved as for `/acp` and with the
-/// same token, or the status and message saying why it may not.
+/// same token, or why it may not.
 fn workspace_plan(
     gateway: &Gateway,
     id: &str,
     headers: &HeaderMap,
-) -> Result<Plan, (StatusCode, &'static str)> {
-    if !authorized(gateway, headers) {
-        return Err((StatusCode::UNAUTHORIZED, ""));
-    }
-    let Some(agent) = gateway.agents.get(id).cloned() else {
-        return Err((StatusCode::NOT_FOUND, ""));
-    };
-    let pane = pane_key(headers).map_err(|problem| (StatusCode::BAD_REQUEST, problem))?;
-    Ok(Plan::new(
-        agent,
-        &gateway.user,
-        gateway.cluster.namespace(),
-        pane.as_deref(),
-    ))
+) -> Result<Plan, access::Denial> {
+    access::authorize(gateway, headers)?;
+    access::plan(gateway, id, access::pane_of_headers(headers)?.as_deref())
 }
 
-/// The relay of the workspace's running pod; `None` when it has none. It
-/// never starts a pod: what asks this way reads work that is already there.
-async fn running_relay(
-    gateway: &Gateway,
-    id: &str,
-    plan: &Plan,
-) -> Result<Option<RelayEndpoint>, Response> {
-    match gateway.cluster.serving_pod(plan).await {
-        Ok(pod) => Ok(pod.as_ref().and_then(RelayEndpoint::of)),
-        Err(error) => {
-            tracing::warn!(agent = %id, %error, "cannot look up the workspace's pod");
-            Err(StatusCode::BAD_GATEWAY.into_response())
-        }
-    }
-}
-
-/// [`running_relay`] of the workspace a request asks for, with a workspace
-/// that is not running being 410.
+/// The relay of the running pod of the workspace a request asks for, with a
+/// workspace that is not running being 410.
 async fn serving_relay(
     gateway: &Gateway,
     id: &str,
     headers: &HeaderMap,
 ) -> Result<RelayEndpoint, Response> {
     let plan = workspace_plan(gateway, id, headers).map_err(IntoResponse::into_response)?;
-    running_relay(gateway, id, &plan).await?.ok_or_else(gone)
+    access::running_relay(gateway, &plan)
+        .await
+        .map_err(IntoResponse::into_response)?
+        .ok_or_else(gone)
 }
 
 /// `GET /agents/<id>/forward/<port>`: one TCP connection to `port` in the
@@ -474,8 +446,8 @@ fn gone() -> Response {
 
 /// Read one response from the pod's relay at `url` and pass it on, with the
 /// headers a web view needs to render it and nothing else.
-async fn fetch(url: &str, token: &str) -> Result<Response, BoxError> {
-    let response = reqwest::Client::new()
+async fn fetch(client: &reqwest::Client, url: &str, token: &str) -> Result<Response, BoxError> {
+    let response = client
         .get(url)
         .bearer_auth(token)
         .timeout(REPORT_TIMEOUT)
@@ -507,33 +479,6 @@ async fn fetch(url: &str, token: &str) -> Result<Response, BoxError> {
 
 /// How long the gateway waits on the pod for one report or listing.
 const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// Whether `key` can name a pane's own workspace: 1-64 letters, digits,
-/// `-`, or `_`.
-fn valid_pane_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 64
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// The pane key when the client asks for a pod of the pane's own.
-fn pane_key(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
-    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
-    match header("ukai-workspace-scope") {
-        None | Some("shared") => Ok(None),
-        Some("pod") => {
-            let key = header("ukai-workspace").ok_or("scope `pod` needs a Ukai-Workspace key")?;
-            if valid_pane_key(key) {
-                Ok(Some(key.to_owned()))
-            } else {
-                Err("Ukai-Workspace must be 1-64 letters, digits, `-`, or `_`")
-            }
-        }
-        Some(_) => Err("Ukai-Workspace-Scope must be `shared` or `pod`"),
-    }
-}
 
 /// How often a client waiting on a pod hears that the gateway is still there.
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -763,7 +708,7 @@ mod tests {
         if let Some(key) = key {
             headers.insert("ukai-workspace", HeaderValue::from_static(key));
         }
-        assert_eq!(pane_key(&headers).map_err(|_| ()), expected);
+        assert_eq!(access::pane_of_headers(&headers).map_err(drop), expected);
     }
 
     /// A quiet connection pings its client every keepalive, and frames still

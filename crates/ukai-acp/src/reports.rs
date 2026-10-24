@@ -237,6 +237,7 @@ pub(crate) fn endpoint_base(url: &str, suffix: &str) -> Option<String> {
         _ => return None,
     };
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let rest = rest.trim_end_matches('/');
     let rest = rest.strip_suffix("/acp").unwrap_or(rest);
     let rest = rest.trim_end_matches('/');
     (!rest.is_empty()).then(|| format!("{scheme}://{rest}{suffix}"))

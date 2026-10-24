@@ -266,7 +266,7 @@ fn nearest_prefers_the_focused_pane_then_the_active_tab() {
         agent: "a".into(),
         note: Some(name.into()),
     };
-    let is_note = |content: &PaneContent| matches!(content, PaneContent::Note { .. });
+    let is_note = |_: PaneId, content: &PaneContent| matches!(content, PaneContent::Note { .. });
     assert_eq!(layout.nearest(is_note), None);
     layout.split(0, H);
     layout.set_content(1, note("a"));
@@ -283,6 +283,11 @@ fn nearest_prefers_the_focused_pane_then_the_active_tab() {
     // The focused pane before anything else.
     layout.focus(other);
     assert_eq!(layout.nearest(is_note), Some(other));
+    // Nothing the predicate passes over by its id.
+    assert_eq!(
+        layout.nearest(|pane, content| pane != other && is_note(pane, content)),
+        Some(1)
+    );
 }
 
 #[test]

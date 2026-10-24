@@ -114,3 +114,22 @@ probe as-agent-named-gateway "$gateway,$agent" ukai-knowledge 50051 blocked
 probe as-knowledge "$knowledge" ukai-surrealdb 8000 reaches
 probe as-gateway-to-store "$gateway" ukai-surrealdb 8000 blocked
 probe as-agent-named-knowledge "$knowledge,$agent" ukai-surrealdb 8000 blocked
+
+# Whether the gateway refuses a pod with `labels` that asks what a person
+# asks, even with the gateway's token: `refused` or `answered`.
+asks_as_person() {
+	local name=$1 labels=$2 expected=$3 outcome
+	# shellcheck disable=SC2016 # $TOKEN is the pod's, expanded there.
+	if k run "$name" --image=busybox:1.37 --restart=Never --rm -i --quiet \
+		--pod-running-timeout=2m ${labels:+--labels="$labels"} --env="TOKEN=$gateway_token" \
+		--command -- sh -c 'wget -q -S -O /dev/null --header "Authorization: Bearer $TOKEN" \
+			http://ukai-gateway/agents/e2e/reports 2>&1 | grep -q " 403 "' >/dev/null 2>&1; then
+		outcome=refused
+	else
+		outcome=answered
+	fi
+	echo "$name: the gateway $outcome it (expected $expected)"
+	[ "$outcome" = "$expected" ]
+}
+asks_as_person person-pod "" answered
+asks_as_person agent-pod-with-token "$agent" refused
