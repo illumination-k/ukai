@@ -1,7 +1,8 @@
 name: Image Runtime
 
-# Publishes images/runtime (ukai-gateway and the ukai-relay agent pods copy out
-# of it) to ghcr.io for every change on main that reaches either binary.
+# Publishes images/runtime (ukai-gateway, ukai-knowledge, and the ukai-relay
+# agent pods copy out of it) to ghcr.io for every change on main that reaches
+# any of them.
 on:
   push:
     branches: [main]
@@ -10,6 +11,8 @@ on:
       - "crates/ukai-config/**"
       - "crates/ukai-core/**"
       - "crates/ukai-gateway/**"
+      - "crates/ukai-knowledge/**"
+      - "crates/ukai-proto/**"
       - "crates/ukai-relay/**"
       - "Cargo.toml"
       - "Cargo.lock"

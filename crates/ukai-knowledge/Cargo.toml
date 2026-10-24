@@ -1,0 +1,30 @@
+[package]
+name = "ukai-knowledge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Keeps the notes a gateway's agents and their people write, over gRPC for the gateway"
+
+[dependencies]
+serde_json = { workspace = true }
+surrealdb = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal"] }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ukai-acp = { workspace = true }
+ukai-core = { workspace = true }
+ukai-proto = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+
+[lints]
+workspace = true
