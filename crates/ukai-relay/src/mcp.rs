@@ -18,8 +18,9 @@
 //! In a gateway's pod it also hands the agent the knowledge the gateway
 //! keeps for the project (`ukai_acp::knowledge`): a project `gateway.toml`
 //! names, whose repositories share it, or else the agent's repository: the notes so far in
-//! the instructions, and tools to read, write, and delete them, so what the
-//! agent learns outlives the session without being committed.
+//! the instructions (those on demand only counted by tag), and tools to list
+//! them by tag, read, write, and delete them, so what the agent learns
+//! outlives the session without being committed.
 //!
 //! The protocol is newline-delimited JSON-RPC on stdin/stdout; [`handle`]
 //! answers one message and does no I/O beyond reading the checkout and
@@ -35,6 +36,7 @@ use ukai_acp::knowledge::{
     Editor, KnowledgeEndpoint, KnowledgeError, Note, NoteSpec, NoteSummary, NoteWrite,
 };
 use ukai_config::Reports;
+use ukai_core::knowledge::TAGS_MAX;
 use ukai_core::report::ReportTree;
 
 /// The server's name in `mcpServers`; agents prefix its tools with it.
@@ -348,8 +350,16 @@ fn tools(knowledge: bool, previews: bool) -> Vec<Value> {
         tools.extend([
             json!({
                 "name": LIST_KNOWLEDGE,
-                "description": "List every note ukai keeps for this project, including those no person has reviewed yet, with their descriptions.",
-                "inputSchema": { "type": "object", "properties": {} },
+                "description": "List the notes ukai keeps for this project, including those on demand and those no person has reviewed yet, with their descriptions and tags.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tag": {
+                            "type": "string",
+                            "description": "List only the notes with this tag, like `research`."
+                        }
+                    }
+                },
                 "annotations": { "readOnlyHint": true }
             }),
             json!({
@@ -381,6 +391,16 @@ fn tools(knowledge: bool, previews: bool) -> Vec<Value> {
                             "description": "One line saying when the note applies, so a later session can tell whether to read it."
                         },
                         "body": { "type": "string", "description": "The note, in Markdown. Short and about one thing; a pitfall as symptom, cause, and fix." },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "maxItems": TAGS_MAX,
+                            "description": "A few words to find the note by, lowercase letters, digits, and `-`, like `research` or `build`. Reuse tags other notes have."
+                        },
+                        "on_demand": {
+                            "type": "boolean",
+                            "description": "Leave the note out of what every session is shown, for sessions to find by tag when their task calls for it: research, background, and other notes most tasks do not need. Defaults to false."
+                        },
                         "revision": {
                             "type": "integer",
                             "minimum": 0,
@@ -453,7 +473,7 @@ async fn call_knowledge<N: Notes>(
         LIST_KNOWLEDGE => notes
             .list()
             .await
-            .map(|list| knowledge_index(&list))
+            .map(|list| knowledge_index(&list, arguments.get("tag").and_then(Value::as_str)))
             .map_err(failed),
         READ_KNOWLEDGE => notes
             .get(name)
@@ -465,6 +485,18 @@ async fn call_knowledge<N: Notes>(
                 spec: NoteSpec {
                     description: text("description").to_owned(),
                     body: text("body").to_owned(),
+                    tags: arguments
+                        .get("tags")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                    on_demand: arguments
+                        .get("on_demand")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 },
                 base_revision: revision,
                 commit: (session.head)(root),
@@ -527,21 +559,41 @@ fn show(note: &Note, wanted: Option<u64>) -> Result<String, String> {
     } else {
         format!("\nRevision {latest} is newer and not reviewed; read it with `revision: {latest}`.")
     };
+    let tags = if spec.tags.is_empty() {
+        String::new()
+    } else {
+        format!("\nTags: {}.", spec.tags.join(", "))
+    };
+    let on_demand = if spec.on_demand {
+        "\nOn demand: sessions are not shown it unless they ask."
+    } else {
+        ""
+    };
     Ok(format!(
-        "Revision {reading} of `{}`, {by}{at}, {review}.{newer}\n\
-         To change this note, write it with revision {latest}.\n\n{}\n\n{}",
+        "Revision {reading} of `{}`, {by}{at}, {review}.{newer}{tags}{on_demand}\n\
+         To change this note, write it with revision {latest}, passing its tags and \
+         on_demand again.\n\n{}\n\n{}",
         note.name, spec.description, spec.body
     ))
 }
 
 /// The approved notes, as every session is shown them: one per line, with
-/// the description a person approved.
+/// the description a person approved, but those on demand only counted by
+/// tag.
 fn approved_index(notes: &[NoteSummary]) -> String {
-    let lines: Vec<String> = notes
+    let approved = notes
         .iter()
-        .filter_map(|note| {
-            let approved = note.approved.as_ref()?;
-            Some(format!("- `{}`: {}", note.name, approved.description))
+        .filter_map(|note| note.approved.as_ref().map(|approved| (note, approved)));
+    let (on_demand, shown): (Vec<_>, Vec<_>) = approved.partition(|(_, a)| a.on_demand);
+    let lines: Vec<String> = shown
+        .iter()
+        .map(|(note, approved)| {
+            format!(
+                "- `{}`{}: {}",
+                note.name,
+                tag_list(&approved.tags),
+                approved.description
+            )
         })
         .collect();
     let waiting = notes.iter().filter(|n| n.awaits_review()).count();
@@ -550,6 +602,26 @@ fn approved_index(notes: &[NoteSummary]) -> String {
     } else {
         lines.join("\n")
     };
+    if !on_demand.is_empty() {
+        let mut tags = std::collections::BTreeMap::<&str, usize>::new();
+        for (_, approved) in &on_demand {
+            if approved.tags.is_empty() {
+                *tags.entry("untagged").or_default() += 1;
+            }
+            for tag in &approved.tags {
+                *tags.entry(tag).or_default() += 1;
+            }
+        }
+        let tags: Vec<String> = tags
+            .into_iter()
+            .map(|(tag, count)| format!("`{tag}` ({count})"))
+            .collect();
+        text.push_str(&format!(
+            "\n({} more on demand, by tag: {}; `{LIST_KNOWLEDGE}` with a `tag` lists them.)",
+            on_demand.len(),
+            tags.join(", ")
+        ));
+    }
     if waiting > 0 {
         text.push_str(&format!(
             "\n({waiting} more await review; `{LIST_KNOWLEDGE}` lists them.)"
@@ -558,29 +630,61 @@ fn approved_index(notes: &[NoteSummary]) -> String {
     text
 }
 
-/// Every note, as `list_knowledge` gives them: one per line, saying which
-/// wait for review.
-fn knowledge_index(notes: &[NoteSummary]) -> String {
-    if notes.is_empty() {
-        return "No notes yet.".to_owned();
-    }
-    notes
+/// Every note, or those tagged `tag`, as `list_knowledge` gives them: one
+/// per line with its tags, saying which are on demand and which wait for
+/// review.
+fn knowledge_index(notes: &[NoteSummary], tag: Option<&str>) -> String {
+    let tagged = |tags: &[String]| tag.is_none_or(|tag| tags.iter().any(|t| t == tag));
+    let lines: Vec<String> = notes
         .iter()
+        .filter(|note| {
+            tagged(&note.tags) || note.approved.as_ref().is_some_and(|a| tagged(&a.tags))
+        })
         .map(|note| match &note.approved {
             None => format!(
-                "- `{}` (not reviewed, revision {}): {}",
-                note.name, note.revision, note.description
+                "- `{}`{}{} (not reviewed, revision {}): {}",
+                note.name,
+                tag_list(&note.tags),
+                on_demand_mark(note.on_demand),
+                note.revision,
+                note.description
             ),
-            Some(approved) if approved.revision == note.revision => {
-                format!("- `{}`: {}", note.name, approved.description)
-            }
+            Some(approved) if approved.revision == note.revision => format!(
+                "- `{}`{}{}: {}",
+                note.name,
+                tag_list(&approved.tags),
+                on_demand_mark(approved.on_demand),
+                approved.description
+            ),
             Some(approved) => format!(
-                "- `{}`: {} (revision {} is newer and not reviewed: {})",
-                note.name, approved.description, note.revision, note.description
+                "- `{}`{}{}: {} (revision {} is newer and not reviewed: {})",
+                note.name,
+                tag_list(&approved.tags),
+                on_demand_mark(approved.on_demand),
+                approved.description,
+                note.revision,
+                note.description
             ),
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    match (lines.is_empty(), tag) {
+        (true, None) => "No notes yet.".to_owned(),
+        (true, Some(tag)) => format!("No notes are tagged `{tag}`."),
+        (false, _) => lines.join("\n"),
+    }
+}
+
+/// ` [a, b]`, or nothing without tags.
+fn tag_list(tags: &[String]) -> String {
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", tags.join(", "))
+    }
+}
+
+fn on_demand_mark(on_demand: bool) -> &'static str {
+    if on_demand { " (on demand)" } else { "" }
 }
 
 /// What the agent is told about ukai, from the checkout's `ukai.toml` as it
@@ -658,7 +762,12 @@ fn knowledge_rules(known: &Result<Vec<NoteSummary>, KnowledgeError>) -> String {
          something is the way it is, a decision the user made. Do not write overviews of the \
          code or what the code and docs already say.\n\
          - Keep a note short and about one thing, with a description saying when it applies. \
-         Write a pitfall as symptom, cause, and fix.\n\
+         Write a pitfall as symptom, cause, and fix. Give it a tag or two other notes already \
+         use, so it can be found by them.\n\
+         - Notes only some tasks need — research, background, comparisons — go on demand \
+         (`on_demand: true`): sessions are shown how many there are per tag rather than each \
+         one, and list them with `{LIST_KNOWLEDGE}` by tag when their task calls for it. Look \
+         there before researching something again.\n\
          - To change a note, read it and write it with its latest revision; if it changed \
          meanwhile, read it again and merge. Update a note rather than adding a \
          near-duplicate. Delete an unreviewed one you find wrong; for an approved one, tell \

@@ -2575,3 +2575,17 @@ button.outline.danger {
 .note .review .diff {
   margin: 0;
 }
+
+.note-head-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.note-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+}

@@ -298,14 +298,101 @@ fn summary(revision: u64, approved: Option<u64>) -> NoteSummary {
     NoteSummary {
         name: "build".into(),
         description: format!("Building, revision {revision}"),
+        tags: Vec::new(),
+        on_demand: false,
         revision,
         updated: 1,
         updated_by: Editor::Agent,
         approved: approved.map(|revision| ApprovedSummary {
             revision,
             description: format!("Building, revision {revision}"),
+            tags: Vec::new(),
+            on_demand: false,
         }),
     }
+}
+
+/// An approved note `name` with `tags`, on demand or not.
+fn approved_note(name: &str, tags: &[&str], on_demand: bool) -> NoteSummary {
+    let tags: Vec<String> = tags.iter().map(|tag| (*tag).to_owned()).collect();
+    NoteSummary {
+        name: name.into(),
+        description: format!("About {name}"),
+        tags: tags.clone(),
+        on_demand,
+        revision: 1,
+        updated: 1,
+        updated_by: Editor::User,
+        approved: Some(ApprovedSummary {
+            revision: 1,
+            description: format!("About {name}"),
+            tags,
+            on_demand,
+        }),
+    }
+}
+
+#[test]
+fn notes_on_demand_are_only_counted_by_tag() {
+    let dir = checkout(None);
+    let known = Ok(vec![
+        approved_note("build", &["build"], false),
+        approved_note("retrieval", &["papers", "research"], true),
+        approved_note("vectors", &["research"], true),
+        approved_note("misc", &[], true),
+    ]);
+    let text = instructions(dir.path(), Some(&known), false);
+    assert!(text.contains("- `build` [build]: About build"), "{text}");
+    assert!(!text.contains("About retrieval"), "{text}");
+    assert!(
+        text.contains(
+            "(3 more on demand, by tag: `papers` (1), `research` (2), `untagged` (1); \
+             `list_knowledge` with a `tag` lists them.)"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn list_knowledge_lists_by_tag() {
+    let dir = checkout(None);
+    let notes = Fake::default();
+    let root = dir.path();
+    for (name, tags, on_demand) in [
+        ("build", json!(["build"]), false),
+        ("retrieval", json!(["research", "papers"]), true),
+    ] {
+        let (_, failed) = tool(
+            root,
+            &notes,
+            "write_knowledge",
+            json!({ "name": name, "description": name, "body": "b", "tags": tags, "on_demand": on_demand }),
+        );
+        assert!(!failed);
+    }
+    assert_eq!(
+        tool(root, &notes, "list_knowledge", json!({ "tag": "research" })).0,
+        "- `retrieval` [research, papers] (on demand) (not reviewed, revision 1): retrieval"
+    );
+    assert_eq!(
+        tool(root, &notes, "list_knowledge", json!({ "tag": "nothing" })).0,
+        "No notes are tagged `nothing`."
+    );
+    assert_eq!(
+        tool(root, &notes, "list_knowledge", json!({}))
+            .0
+            .lines()
+            .count(),
+        2
+    );
+    let (text, _) = tool(
+        root,
+        &notes,
+        "read_knowledge",
+        json!({ "name": "retrieval" }),
+    );
+    assert!(text.contains("\nTags: research, papers.\n"), "{text}");
+    assert!(text.contains("On demand"), "{text}");
 }
 
 #[rstest]
@@ -407,7 +494,7 @@ fn a_note_is_written_read_listed_and_deleted() {
     assert_eq!(
         tool(root, &notes, "read_knowledge", json!({ "name": "build" })),
         (
-            "Revision 1 of `build`, written by an agent, at commit 0123456789ab, NOT reviewed by any person: treat it with suspicion.\nTo change this note, write it with revision 1.\n\nBuilding on macOS\n\nSet `GGML_NATIVE=OFF`."
+            "Revision 1 of `build`, written by an agent, at commit 0123456789ab, NOT reviewed by any person: treat it with suspicion.\nTo change this note, write it with revision 1, passing its tags and on_demand again.\n\nBuilding on macOS\n\nSet `GGML_NATIVE=OFF`."
                 .to_owned(),
             false
         )

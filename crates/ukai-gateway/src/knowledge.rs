@@ -14,7 +14,9 @@
 //! silently overwrite each other. A note also keeps the last revision a
 //! person approved (`approved`): a person's writes are approved as they are
 //! made, an agent's wait, and an agent cannot delete a note a person
-//! approved.
+//! approved. A person can reject an agent's revision instead of approving
+//! it, which writes the approved revision back, or deletes a note that has
+//! none.
 //!
 //! What is wrong with a note is `ukai_core::knowledge`'s business; this
 //! module stores.
@@ -29,12 +31,15 @@ pub const NAMESPACE: &str = "ukai";
 pub const DATABASE: &str = "knowledge";
 
 /// Applied on every connection; each statement leaves what exists alone.
+/// Fields added later are optional, since notes written before lack them.
 const SCHEMA: &str = "
 DEFINE TABLE IF NOT EXISTS note SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS scope ON note TYPE string;
 DEFINE FIELD IF NOT EXISTS name ON note TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON note TYPE string;
 DEFINE FIELD IF NOT EXISTS body ON note TYPE string;
+DEFINE FIELD IF NOT EXISTS tags ON note TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS on_demand ON note TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS revision ON note TYPE int;
 DEFINE FIELD IF NOT EXISTS updated ON note TYPE int;
 DEFINE FIELD IF NOT EXISTS updated_by ON note TYPE string;
@@ -46,6 +51,8 @@ DEFINE FIELD IF NOT EXISTS approved ON note TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS approved.revision ON note TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS approved.description ON note TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS approved.body ON note TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS approved.tags ON note TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS approved.on_demand ON note TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS approved.updated ON note TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS approved.updated_by ON note TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS approved.provenance ON note TYPE option<object>;
@@ -57,6 +64,8 @@ DEFINE FIELD IF NOT EXISTS scope ON note_revision TYPE string;
 DEFINE FIELD IF NOT EXISTS name ON note_revision TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON note_revision TYPE string;
 DEFINE FIELD IF NOT EXISTS body ON note_revision TYPE string;
+DEFINE FIELD IF NOT EXISTS tags ON note_revision TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS on_demand ON note_revision TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS revision ON note_revision TYPE int;
 DEFINE FIELD IF NOT EXISTS updated ON note_revision TYPE int;
 DEFINE FIELD IF NOT EXISTS updated_by ON note_revision TYPE string;
@@ -68,7 +77,8 @@ DEFINE INDEX IF NOT EXISTS note_revision_note ON note_revision FIELDS scope, nam
 ";
 
 /// The fields of a note, without the record id, which is not JSON's.
-const FIELDS: &str = "name, description, body, revision, updated, updated_by, provenance, approved";
+const FIELDS: &str =
+    "name, description, body, tags, on_demand, revision, updated, updated_by, provenance, approved";
 
 /// What a transaction throws when the writer's base revision is not the
 /// note's current one.
@@ -80,7 +90,9 @@ const CONFLICT: &str = "ukai:conflict";
 /// or it is deleted. Revisions keep counting across a delete, so every
 /// `note_revision` of a name has its own number. With `$approve` (a
 /// person's write) the new revision is the approved one; otherwise the
-/// approved one stays, and a delete clears it.
+/// approved one stays, and a delete clears it. With `$pending`, `$base` must
+/// also not be the approved revision: a rejection, which must not undo an
+/// approval made meanwhile.
 const CHANGE: &str = "
 BEGIN TRANSACTION;
 LET $id = type::record('note', [$scope, $name]);
@@ -88,13 +100,18 @@ LET $existing = (SELECT * FROM ONLY $id);
 LET $last = IF $existing = NONE { 0 } ELSE { $existing.revision };
 LET $current = IF $existing = NONE OR $existing.deleted { 0 } ELSE { $existing.revision };
 IF $current != $base OR ($deleted AND $current = 0) { THROW 'ukai:conflict' };
+IF $pending AND $existing.approved.revision = $current { THROW 'ukai:conflict' };
 LET $description = IF $deleted { $existing.description } ELSE { $description };
 LET $body = IF $deleted { $existing.body } ELSE { $body };
+LET $tags = IF $deleted { $existing.tags } ELSE { $tags };
+LET $on_demand = IF $deleted { $existing.on_demand } ELSE { $on_demand };
 LET $fields = {
     scope: $scope,
     name: $name,
     description: $description,
     body: $body,
+    tags: $tags,
+    on_demand: $on_demand,
     revision: $last + 1,
     updated: $updated,
     updated_by: $updated_by,
@@ -108,6 +125,8 @@ LET $approved = IF $deleted {
         revision: $last + 1,
         description: $description,
         body: $body,
+        tags: $tags,
+        on_demand: $on_demand,
         updated: $updated,
         updated_by: $updated_by,
         provenance: $provenance,
@@ -131,6 +150,8 @@ UPDATE $id SET approved = {
     revision: $existing.revision,
     description: $existing.description,
     body: $existing.body,
+    tags: $existing.tags,
+    on_demand: $existing.on_demand,
     updated: $existing.updated,
     updated_by: $existing.updated_by,
     provenance: $existing.provenance,
@@ -179,6 +200,8 @@ struct Change<'a> {
     base: u64,
     editor: Editor,
     provenance: Provenance,
+    /// Only if `base` is not approved: see [`CHANGE`].
+    pending: bool,
 }
 
 /// The gateway's notes, by scope and name.
@@ -246,7 +269,8 @@ impl Knowledge {
         let rows: Vec<Value> = self
             .db
             .query(
-                "SELECT revision, description, body, updated, updated_by, provenance, deleted \
+                "SELECT revision, description, body, tags, on_demand, updated, updated_by, \
+                 provenance, deleted \
                  FROM note_revision WHERE scope = $scope AND name = $name \
                  ORDER BY revision DESC",
             )
@@ -269,15 +293,19 @@ impl Knowledge {
         editor: Editor,
         workspace: Option<String>,
     ) -> Result<Note, KnowledgeError> {
-        let problems = ukai_core::knowledge::problems(name, &write.spec);
+        let spec = NoteSpec {
+            tags: ukai_core::knowledge::normalize_tags(write.spec.tags),
+            ..write.spec
+        };
+        let problems = ukai_core::knowledge::problems(name, &spec);
         if !problems.is_empty() {
             return Err(KnowledgeError::Refused(
                 problems.iter().map(ToString::to_string).collect(),
             ));
         }
         let spec = NoteSpec {
-            description: write.spec.description.trim().to_owned(),
-            body: write.spec.body,
+            description: spec.description.trim().to_owned(),
+            ..spec
         };
         self.change(Change {
             scope,
@@ -289,6 +317,7 @@ impl Knowledge {
                 workspace,
                 commit: write.commit.filter(|commit| is_commit(commit)),
             },
+            pending: false,
         })
         .await?;
         self.get(scope, name).await?.ok_or(KnowledgeError::NotFound)
@@ -324,8 +353,43 @@ impl Knowledge {
                 workspace,
                 commit: None,
             },
+            pending: false,
         })
         .await
+    }
+
+    /// Reject `name`'s latest revision, `revision`, which no person
+    /// approved: write the approved revision back as a person's, or delete
+    /// the note when nothing was approved. The rejected revision stays in
+    /// the history. Only a person can, like [`Knowledge::approve`].
+    pub async fn reject(
+        &self,
+        scope: &str,
+        name: &str,
+        revision: u64,
+    ) -> Result<Option<Note>, KnowledgeError> {
+        let Some(note) = self.get(scope, name).await? else {
+            return Err(KnowledgeError::NotFound);
+        };
+        if note.revision != revision {
+            return Err(KnowledgeError::Conflict(Box::new(Some(note))));
+        }
+        if !note.awaits_review() {
+            return Err(KnowledgeError::Refused(vec![
+                "a person approved this revision; edit or delete the note instead".to_owned(),
+            ]));
+        }
+        self.change(Change {
+            scope,
+            name,
+            spec: note.approved.map(|approved| approved.spec),
+            base: revision,
+            editor: Editor::User,
+            provenance: Provenance::default(),
+            pending: true,
+        })
+        .await?;
+        self.get(scope, name).await
     }
 
     /// Approve `name` in `scope` as it is at `revision`, which must be
@@ -355,13 +419,18 @@ impl Knowledge {
         let spec = change.spec.unwrap_or(NoteSpec {
             description: String::new(),
             body: String::new(),
+            tags: Vec::new(),
+            on_demand: false,
         });
         let vars = json!({
             "scope": change.scope,
             "name": change.name,
             "description": spec.description,
             "body": spec.body,
+            "tags": spec.tags,
+            "on_demand": spec.on_demand,
             "base": change.base,
+            "pending": change.pending,
             "deleted": deleted,
             "approve": change.editor == Editor::User,
             "updated": time::OffsetDateTime::now_utc().unix_timestamp(),
@@ -427,6 +496,8 @@ mod tests {
             spec: NoteSpec {
                 description: description.into(),
                 body: body.into(),
+                tags: Vec::new(),
+                on_demand: false,
             },
             base_revision,
             commit: None,
@@ -695,6 +766,157 @@ mod tests {
             store.get(SCOPE, "build").await?.and_then(|n| n.approved),
             None
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tags_and_on_demand_are_kept_with_each_revision() -> Result<(), KnowledgeError> {
+        let store = store().await;
+        let mut tagged = write("Papers on retrieval", "…", 0);
+        tagged.spec.tags = vec!["research".into(), " papers ".into(), "research".into()];
+        tagged.spec.on_demand = true;
+        let note = store
+            .put(SCOPE, "retrieval", tagged, Editor::User, None)
+            .await?;
+        assert_eq!(note.spec.tags, ["papers", "research"]);
+        assert!(note.spec.on_demand);
+        let approved = note.approved.clone().map(|a| a.spec);
+        assert_eq!(approved, Some(note.spec.clone()));
+        let listed = store.list(SCOPE).await?;
+        assert_eq!(
+            listed.first().map(|n| n.tags.clone()),
+            Some(note.spec.tags.clone())
+        );
+        assert!(listed.first().is_some_and(|n| n.on_demand));
+        assert!(
+            listed
+                .first()
+                .and_then(|n| n.approved.as_ref())
+                .is_some_and(|a| a.on_demand && a.tags == note.spec.tags)
+        );
+        // Untagged again, it is shown to every session again.
+        let plain = store
+            .put(
+                SCOPE,
+                "retrieval",
+                write("Papers", "…", 1),
+                Editor::User,
+                None,
+            )
+            .await?;
+        assert_eq!((plain.spec.tags.len(), plain.spec.on_demand), (0, false));
+        let revisions = store.revisions(SCOPE, "retrieval").await?;
+        assert_eq!(
+            revisions
+                .iter()
+                .map(|r| r.spec.on_demand)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejecting_writes_the_approved_revision_back() -> Result<(), KnowledgeError> {
+        let store = store().await;
+        store
+            .put(SCOPE, "build", write("Person", "p", 0), Editor::User, None)
+            .await?;
+        store
+            .put(SCOPE, "build", write("Agent", "a", 1), Editor::Agent, None)
+            .await?;
+        let now = store
+            .reject(SCOPE, "build", 2)
+            .await?
+            .unwrap_or_else(|| panic!("the note stays"));
+        assert_eq!(
+            (now.revision, now.spec.body.as_str(), now.updated_by),
+            (3, "p", Editor::User)
+        );
+        assert!(!now.awaits_review());
+        let revisions = store.revisions(SCOPE, "build").await?;
+        assert_eq!(
+            revisions
+                .iter()
+                .map(|r| r.spec.body.as_str())
+                .collect::<Vec<_>>(),
+            ["p", "a", "p"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_note_nobody_approved_deletes_it() -> Result<(), KnowledgeError> {
+        let store = store().await;
+        store
+            .put(SCOPE, "build", write("Agent", "a", 0), Editor::Agent, None)
+            .await?;
+        assert_eq!(store.reject(SCOPE, "build", 1).await?, None);
+        assert_eq!(store.list(SCOPE).await?, Vec::new());
+        let revisions = store.revisions(SCOPE, "build").await?;
+        assert_eq!(
+            revisions
+                .iter()
+                .map(|r| (r.revision, r.updated_by, r.deleted))
+                .collect::<Vec<_>>(),
+            [(2, Editor::User, true), (1, Editor::Agent, false)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn only_an_unapproved_latest_revision_can_be_rejected() -> Result<(), KnowledgeError> {
+        let store = store().await;
+        store
+            .put(SCOPE, "build", write("Person", "p", 0), Editor::User, None)
+            .await?;
+        let approved = store.reject(SCOPE, "build", 1).await;
+        assert!(
+            matches!(approved, Err(KnowledgeError::Refused(_))),
+            "{approved:?}"
+        );
+        store
+            .put(SCOPE, "build", write("Agent", "a", 1), Editor::Agent, None)
+            .await?;
+        let stale = store.reject(SCOPE, "build", 1).await;
+        assert!(
+            matches!(stale, Err(KnowledgeError::Conflict(_))),
+            "{stale:?}"
+        );
+        assert!(matches!(
+            store.reject(SCOPE, "nothing", 1).await,
+            Err(KnowledgeError::NotFound)
+        ));
+        assert_eq!(store.revisions(SCOPE, "build").await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notes_written_before_tags_still_read_and_change() -> Result<(), KnowledgeError> {
+        let store = store().await;
+        store
+            .put(SCOPE, "build", write("Agent", "a", 0), Editor::Agent, None)
+            .await?;
+        store.approve(SCOPE, "build", 1).await?;
+        store
+            .db
+            .query(
+                "UPDATE note SET tags = NONE, on_demand = NONE, approved.tags = NONE, \
+                 approved.on_demand = NONE; UPDATE note_revision SET tags = NONE, on_demand = NONE",
+            )
+            .await?
+            .check()?;
+        let old = store.get(SCOPE, "build").await?;
+        assert_eq!(
+            old.map(|n| (n.spec.tags, n.spec.on_demand)),
+            Some((Vec::new(), false))
+        );
+        assert_eq!(store.list(SCOPE).await?.len(), 1);
+        assert_eq!(store.revisions(SCOPE, "build").await?.len(), 1);
+        store
+            .put(SCOPE, "build", write("Agent", "b", 1), Editor::Agent, None)
+            .await?;
+        assert!(store.reject(SCOPE, "build", 2).await?.is_some());
         Ok(())
     }
 

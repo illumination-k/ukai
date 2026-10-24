@@ -3,7 +3,8 @@
 //! The app lists them under the selected project's gateway agents, those
 //! sharing a scope together, and shows one in a note pane, to read or edit;
 //! the agents read and write the same notes through the relay's MCP server,
-//! so a note can change under the pane, which then shows the new one.
+//! so a note can change under the pane, which then shows the new one. Notes
+//! open in the note pane already there, so one pane follows the sidebar.
 
 use std::time::Duration;
 
@@ -55,8 +56,10 @@ fn refresh(app: AppSignals) {
     *revision.write() += 1;
 }
 
-/// Show a note (or a new one, with `note` `None`) where [`launch_target`]
-/// puts it, or focus the pane that already shows it.
+/// Show a note (or a new one, with `note` `None`): focus the pane that
+/// already shows it, else replace the note in the nearest pane showing one,
+/// else open it where [`launch_target`] puts it. A pane with a new note
+/// being written is left alone, so its draft is not lost.
 pub fn open_note(app: AppSignals, project: &ProjectId, agent: &str, note: Option<String>) {
     let mut layout = app.layout;
     let shown = note.as_ref().and_then(|name| {
@@ -69,7 +72,10 @@ pub fn open_note(app: AppSignals, project: &ProjectId, agent: &str, note: Option
         layout.write().focus(pane);
         return;
     }
-    if let Some(pane) = launch_target(app) {
+    let reused = layout
+        .peek()
+        .nearest(|content| matches!(content, PaneContent::Note { note: Some(_), .. }));
+    if let Some(pane) = reused.or_else(|| launch_target(app)) {
         let mut layout = layout.write();
         layout.set_content(
             pane,
@@ -100,6 +106,19 @@ fn provenance_label(provenance: &knowledge::Provenance) -> String {
         parts.push(format!("in workspace {workspace}"));
     }
     parts.join(" ")
+}
+
+/// Tags and whether a note is on demand, as one line.
+fn tags_label(tags: &[String], on_demand: bool) -> String {
+    let mut label = if tags.is_empty() {
+        "none".to_owned()
+    } else {
+        tags.join(", ")
+    };
+    if on_demand {
+        label.push_str(" (on demand)");
+    }
+    label
 }
 
 /// What one gateway agent listed.
@@ -262,14 +281,16 @@ fn NoteRow(
 ) -> Element {
     let app = use_context::<AppSignals>();
     let waits = note.awaits_review();
-    let title = if waits {
-        format!(
-            "{} · revision {} awaits your review",
-            note.description, note.revision
-        )
-    } else {
-        note.description.clone()
-    };
+    let mut title = note.description.clone();
+    if !note.tags.is_empty() {
+        title.push_str(&format!(" · {}", note.tags.join(", ")));
+    }
+    if note.on_demand {
+        title.push_str(" · on demand");
+    }
+    if waits {
+        title.push_str(&format!(" · revision {} awaits your review", note.revision));
+    }
     rsx! {
         div {
             class: if focused { "row schedule-row focused" } else { "row schedule-row" },
@@ -279,6 +300,9 @@ fn NoteRow(
                 span { class: "dot attention" }
             }
             span { class: "name", "{note.name}" }
+            for tag in note.tags.iter().take(2) {
+                span { key: "{tag}", class: "badge", "{tag}" }
+            }
             span { class: "meta",
                 if waits {
                     "review"
@@ -388,6 +412,41 @@ struct Draft {
     /// The revision being edited, 0 for a new note: the gateway refuses
     /// the save if the note has moved on since.
     base: u64,
+    /// The tags as typed; `spec.tags` is what they parse to.
+    tags: String,
+}
+
+impl Draft {
+    fn of(name: String, spec: NoteSpec, base: u64) -> Self {
+        let tags = spec.tags.join(", ");
+        Self {
+            name,
+            spec,
+            base,
+            tags,
+        }
+    }
+}
+
+/// A note's tags, and whether it is on demand, as badges.
+#[component]
+fn Tags(tags: Vec<String>, on_demand: bool) -> Element {
+    rsx! {
+        if !tags.is_empty() || on_demand {
+            div { class: "note-tags",
+                for tag in tags {
+                    span { key: "{tag}", class: "badge", "{tag}" }
+                }
+                if on_demand {
+                    span {
+                        class: "muted",
+                        title: "Sessions are told how many notes there are per tag, and read this one when their task calls for it",
+                        "on demand"
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One note, read as Markdown, or edited as a draft and saved whole.
@@ -408,13 +467,17 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
         }
     });
     let mut draft = use_signal(|| {
-        note.is_none().then(|| Draft {
-            name: String::new(),
-            spec: NoteSpec {
-                description: String::new(),
-                body: String::new(),
-            },
-            base: 0,
+        note.is_none().then(|| {
+            Draft::of(
+                String::new(),
+                NoteSpec {
+                    description: String::new(),
+                    body: String::new(),
+                    tags: Vec::new(),
+                    on_demand: false,
+                },
+                0,
+            )
         })
     });
     // The note's history, once asked for.
@@ -564,12 +627,18 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
         let by = editor_label(saved.updated_by);
         let from = provenance_label(&saved.provenance);
         let review = saved.awaits_review().then(|| {
-            let (old, old_description) = saved
+            let (old, old_description, old_tags) = saved
                 .approved
                 .as_ref()
-                .map(|a| (Some(a.spec.body.clone()), Some(a.spec.description.clone())))
-                .unwrap_or((None, None));
-            (saved.revision, old, old_description)
+                .map(|a| {
+                    (
+                        Some(a.spec.body.clone()),
+                        Some(a.spec.description.clone()),
+                        (a.spec.tags.clone(), a.spec.on_demand),
+                    )
+                })
+                .unwrap_or((None, None, (saved.spec.tags.clone(), saved.spec.on_demand)));
+            (saved.revision, old, old_description, old_tags)
         });
         let approve = {
             let name = saved.name.clone();
@@ -587,6 +656,38 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                         Ok(note) => {
                             errors.set(Vec::new());
                             loaded.set(Loaded::Found(Box::new(note)));
+                            refresh(app);
+                        }
+                        Err(error) => {
+                            refresh(app);
+                            errors.set(explain(&error));
+                        }
+                    }
+                });
+            }
+        };
+        let reject = {
+            let name = saved.name.clone();
+            let revision = saved.revision;
+            move |_| {
+                let Ok(endpoint) = endpoint.peek().clone() else {
+                    return;
+                };
+                let name = name.clone();
+                busy.set(true);
+                spawn(async move {
+                    let result = endpoint.reject(&name, revision).await;
+                    busy.set(false);
+                    match result {
+                        Ok(Some(note)) => {
+                            errors.set(Vec::new());
+                            loaded.set(Loaded::Found(Box::new(note)));
+                            history.set(None);
+                            refresh(app);
+                        }
+                        Ok(None) => {
+                            let mut layout = app.layout;
+                            layout.write().set_content(pane, PaneContent::Empty);
                             refresh(app);
                         }
                         Err(error) => {
@@ -621,24 +722,35 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                         div { class: "note-title",
                             h2 { "{saved.name}" }
                             p { class: "muted", "{saved.spec.description}" }
+                            Tags {
+                                tags: saved.spec.tags.clone(),
+                                on_demand: saved.spec.on_demand,
+                            }
                         }
-                        button {
-                            class: "outline",
-                            onclick: {
-                                let saved = saved.clone();
-                                move |_| {
-                                    errors.set(Vec::new());
-                                    draft
-                                        .set(
-                                            Some(Draft {
-                                                name: saved.name.clone(),
-                                                spec: saved.spec.clone(),
-                                                base: saved.revision,
-                                            }),
-                                        );
-                                }
-                            },
-                            "Edit"
+                        div { class: "note-head-actions",
+                            button {
+                                class: "outline",
+                                onclick: {
+                                    let saved = saved.clone();
+                                    move |_| {
+                                        errors.set(Vec::new());
+                                        draft
+                                            .set(
+                                                Some(
+                                                    Draft::of(saved.name.clone(), saved.spec.clone(), saved.revision),
+                                                ),
+                                            );
+                                    }
+                                },
+                                "Edit"
+                            }
+                            button {
+                                class: "outline danger",
+                                disabled: busy(),
+                                title: "Delete the note; its history is kept",
+                                onclick: delete,
+                                "Delete"
+                            }
                         }
                     }
                     p { class: "muted field-hint",
@@ -651,7 +763,7 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                             }
                         }
                     }
-                    if let Some((revision, old, old_description)) = review {
+                    if let Some((revision, old, old_description, old_tags)) = review {
                         div { class: "review",
                             p {
                                 if old.is_some() {
@@ -663,10 +775,29 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                             if let Some(old_description) = old_description.filter(|d| *d != saved.spec.description) {
                                 p { class: "muted", "Description was: {old_description}" }
                             }
-                            NoteDiff { old, new: saved.spec.body.clone() }
+                            NoteDiff {
+                                old: old.clone(),
+                                new: saved.spec.body.clone(),
+                            }
+                            if old_tags != (saved.spec.tags.clone(), saved.spec.on_demand) {
+                                p { class: "muted",
+                                    "Tags were: {tags_label(&old_tags.0, old_tags.1)}"
+                                }
+                            }
                             div { class: "schedule-actions",
                                 button { disabled: busy(), onclick: approve,
                                     "Approve revision {revision}"
+                                }
+                                button {
+                                    class: "outline danger",
+                                    disabled: busy(),
+                                    title: if old.is_some() { "Write the approved revision back; this one stays in the history" } else { "Delete the note; it stays in the history" },
+                                    onclick: reject,
+                                    if old.is_some() {
+                                        "Reject: back to the approved revision"
+                                    } else {
+                                        "Reject: delete it"
+                                    }
                                 }
                             }
                         }
@@ -693,13 +824,7 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                                         let save = save.clone();
                                         let name = saved.name.clone();
                                         let base = saved.revision;
-                                        move |spec: NoteSpec| {
-                                            save(Draft {
-                                                name: name.clone(),
-                                                spec,
-                                                base,
-                                            })
-                                        }
+                                        move |spec: NoteSpec| save(Draft::of(name.clone(), spec, base))
                                     },
                                 }
                             }
@@ -764,6 +889,33 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                     }
                     span { class: "muted field-hint",
                         "Agents see every note's name and description, and read the note when it bears on their task."
+                    }
+                }
+                div { class: "field",
+                    span { class: "field-label", "Tags" }
+                    input {
+                        class: "mono",
+                        value: "{current.tags}",
+                        spellcheck: false,
+                        placeholder: "research, build",
+                        oninput: move |event| {
+                            if let Some(draft) = draft.write().as_mut() {
+                                draft.spec.tags = knowledge::parse_tags(&event.value());
+                                draft.tags = event.value();
+                            }
+                        },
+                    }
+                    label { class: "toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: current.spec.on_demand,
+                            onchange: move |event: FormEvent| {
+                                if let Some(draft) = draft.write().as_mut() {
+                                    draft.spec.on_demand = event.checked();
+                                }
+                            },
+                        }
+                        "On demand: agents are only told how many notes there are per tag, and look this one up when their task calls for it"
                     }
                 }
                 div { class: "field",
@@ -856,6 +1008,8 @@ mod tests {
                 .map(|name| NoteSummary {
                     name: (*name).to_owned(),
                     description: String::new(),
+                    tags: Vec::new(),
+                    on_demand: false,
                     revision: 1,
                     updated: 0,
                     updated_by: Editor::User,
