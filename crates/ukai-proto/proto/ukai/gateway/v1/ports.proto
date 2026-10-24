@@ -1,0 +1,43 @@
+// What listens in a workspace's pod. Connections to a port go through the
+// gateway's `/agents/<id>/forward/<port>` WebSocket, which is not RPC.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+
+// With the gateway's token. A workspace that is not running is
+// FAILED_PRECONDITION: listing never starts a pod.
+service Ports {
+  rpc List(ListPortsRequest) returns (PortListing);
+}
+
+message ListPortsRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+}
+
+message PortListing {
+  // TCP ports something in the workspace listens on, lowest first; the
+  // relay's own is left out.
+  repeated ListeningPort ports = 1;
+  // What the agent asked the user to look at, oldest first.
+  repeated Preview previews = 2;
+}
+
+message ListeningPort {
+  uint32 port = 1;
+  // The name of the process listening, when the relay could tell.
+  optional string process = 2;
+}
+
+// A server the agent started in the workspace and asked the user to look at.
+message Preview {
+  uint32 port = 1;
+  // Where on that server to start: `/`-prefixed, with any query.
+  string path = 2;
+  optional string title = 3;
+  // When it was asked for, in milliseconds since the epoch by the pod's
+  // clock.
+  uint64 at = 4;
+}

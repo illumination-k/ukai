@@ -19,7 +19,11 @@ use std::time::Duration;
 
 use ukai_config::{AgentSpec, Source};
 
-use crate::{PaneWorkspace, ResolveError, header_map, workspace_headers};
+use ukai_proto::gateway::v1 as gw;
+use ukai_proto::gateway::v1::agents_client::AgentsClient;
+
+use crate::grpc::{self, Channel};
+use crate::{PaneWorkspace, ResolveError, header_map};
 
 /// An agent running an older release than its latest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,25 +157,37 @@ fn parse(version: &str) -> Option<([u64; 3], bool)> {
     parts.next().is_none().then_some((numbers, pre))
 }
 
-/// Suffix of an agent's ACP endpoint that replaces its workspace's pod.
-pub const RESTART_PATH: &str = "/restart";
-
 const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RestartError {
     #[error("cannot reach the gateway: {0}")]
     Unreachable(String),
-    #[error("the gateway answered {0}")]
-    Status(u16),
+    #[error("{0}")]
+    Failed(String),
 }
 
-/// Where a gateway agent's workspace pod is restarted: `POST` stops it, and
-/// the next connection starts a fresh one.
+impl From<tonic::Status> for RestartError {
+    fn from(status: tonic::Status) -> Self {
+        match grpc::Failure::from(status) {
+            grpc::Failure::Unreachable(why) => Self::Unreachable(why),
+            grpc::Failure::NotFound => Self::Failed("the gateway has no such agent".to_owned()),
+            grpc::Failure::Denied(why) => Self::Failed(format!("the gateway refused: {why}")),
+            grpc::Failure::TooMany => Self::Failed("too many requests".to_owned()),
+            grpc::Failure::NotRunning => Self::Failed("the workspace is not running".to_owned()),
+            grpc::Failure::Failed(why) => Self::Failed(why),
+        }
+    }
+}
+
+/// Where a gateway agent's workspace pod is restarted (the gateway's
+/// `ukai.gateway.v1.Agents.Restart`): it stops the pod, and the next
+/// connection starts a fresh one.
 #[derive(Debug, Clone)]
 pub struct RestartEndpoint {
-    client: reqwest::Client,
-    url: String,
+    channel: Channel,
+    agent: String,
+    workspace: gw::Workspace,
 }
 
 impl RestartEndpoint {
@@ -190,35 +206,30 @@ impl RestartEndpoint {
         else {
             return Ok(None);
         };
-        let Some(url) =
-            crate::reports::endpoint_base(&ukai_config::interpolate(url, lookup)?, RESTART_PATH)
-        else {
+        let Some((root, agent)) = grpc::agent_root(&ukai_config::interpolate(url, lookup)?) else {
             return Ok(None);
         };
-        let extra = workspace_headers(workspace, *default_scope);
         let client = reqwest::Client::builder()
-            .default_headers(header_map(headers, &extra, lookup)?)
+            .default_headers(header_map(headers, &[], lookup)?)
             .timeout(RESTART_TIMEOUT)
             .build()
             .map_err(|error| ResolveError::Client(error.to_string()))?;
-        Ok(Some(Self { client, url }))
-    }
-
-    pub fn url(&self) -> &str {
-        &self.url
+        Ok(Some(Self {
+            channel: grpc::channel(client, root),
+            agent,
+            workspace: grpc::workspace(workspace, *default_scope),
+        }))
     }
 
     pub async fn restart(&self) -> Result<(), RestartError> {
-        let response = self
-            .client
-            .post(&self.url)
-            .send()
-            .await
-            .map_err(|error| RestartError::Unreachable(error.to_string()))?;
-        match response.status().as_u16() {
-            200..=299 => Ok(()),
-            status => Err(RestartError::Status(status)),
-        }
+        let request = gw::RestartRequest {
+            agent: self.agent.clone(),
+            workspace: Some(self.workspace.clone()),
+        };
+        AgentsClient::new(self.channel.clone())
+            .restart(request)
+            .await?;
+        Ok(())
     }
 }
 
@@ -291,11 +302,12 @@ mod tests {
             headers: BTreeMap::new(),
             workspace: WorkspaceScope::Shared,
         };
-        let endpoint = RestartEndpoint::resolve(&spec, |_, _| None, None);
-        assert_eq!(
-            endpoint.ok().flatten().as_ref().map(RestartEndpoint::url),
-            Some("https://gw.example.com/agents/a/restart")
-        );
+        let endpoint = RestartEndpoint::resolve(&spec, |_, _| None, None)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("a gateway agent restarts"));
+        assert_eq!(endpoint.agent, "a");
+        assert_eq!(endpoint.workspace.scope(), gw::WorkspaceScope::Shared);
     }
 
     #[test]

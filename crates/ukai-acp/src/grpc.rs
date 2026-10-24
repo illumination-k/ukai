@@ -9,8 +9,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use http_body_util::BodyExt;
+use tonic::Code;
 use tonic::codegen::http;
 use tonic_web::{GrpcWebCall, GrpcWebClientService};
+use ukai_config::WorkspaceScope;
+use ukai_proto::gateway::v1 as gw;
+
+use crate::PaneWorkspace;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -73,6 +78,60 @@ pub fn agent_root(url: &str) -> Option<(String, String)> {
         .then(|| (format!("{scheme}://{root}"), agent.to_owned()))
 }
 
+/// The workspace a pane's request is about, as for its `/acp`: the pane's
+/// own scope, or else the agent's `default` one.
+pub fn workspace(workspace: Option<&PaneWorkspace>, default: WorkspaceScope) -> gw::Workspace {
+    let scope = workspace.map_or(default, |workspace| workspace.scope);
+    let (scope, key) = match scope {
+        WorkspaceScope::Shared => (gw::WorkspaceScope::Shared, String::new()),
+        WorkspaceScope::Pod => (
+            gw::WorkspaceScope::Pod,
+            workspace.map(|w| w.key.clone()).unwrap_or_default(),
+        ),
+    };
+    gw::Workspace {
+        scope: scope.into(),
+        key,
+    }
+}
+
+/// What went wrong with a call, as every client of the gateway tells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// The gateway, or what it asks, cannot be reached now.
+    Unreachable(String),
+    NotFound,
+    /// The token is missing or wrong, or the caller may not do this.
+    Denied(String),
+    TooMany,
+    /// The workspace is not running, and the call does not start it.
+    NotRunning,
+    Failed(String),
+}
+
+impl From<tonic::Status> for Failure {
+    fn from(status: tonic::Status) -> Self {
+        let message = status.message().to_owned();
+        match status.code() {
+            Code::NotFound => Self::NotFound,
+            Code::ResourceExhausted => Self::TooMany,
+            Code::FailedPrecondition => Self::NotRunning,
+            Code::Unauthenticated | Code::PermissionDenied => Self::Denied(message),
+            Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled => {
+                Self::Unreachable(message)
+            }
+            // What the transport failed with, such as a connection refused.
+            Code::Unknown if std::error::Error::source(&status).is_some() => {
+                Self::Unreachable(message)
+            }
+            Code::Unimplemented => Self::Failed(
+                "the gateway does not offer this over gRPC; it may need upgrading".to_owned(),
+            ),
+            code => Self::Failed(format!("{code:?}: {message}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -93,5 +152,34 @@ mod tests {
             agent_root(url),
             expected.map(|(root, agent)| (root.to_owned(), agent.to_owned()))
         );
+    }
+
+    #[rstest]
+    #[case::agents_default(None, WorkspaceScope::Shared, gw::WorkspaceScope::Shared, "")]
+    #[case::agents_pod_default(None, WorkspaceScope::Pod, gw::WorkspaceScope::Pod, "")]
+    #[case::panes_own(
+        Some(WorkspaceScope::Pod),
+        WorkspaceScope::Shared,
+        gw::WorkspaceScope::Pod,
+        "k1"
+    )]
+    #[case::pane_shares(
+        Some(WorkspaceScope::Shared),
+        WorkspaceScope::Pod,
+        gw::WorkspaceScope::Shared,
+        ""
+    )]
+    fn a_pane_names_its_workspace(
+        #[case] pane: Option<WorkspaceScope>,
+        #[case] default: WorkspaceScope,
+        #[case] scope: gw::WorkspaceScope,
+        #[case] key: &str,
+    ) {
+        let pane = pane.map(|scope| PaneWorkspace {
+            key: "k1".into(),
+            scope,
+        });
+        let workspace = workspace(pane.as_ref(), default);
+        assert_eq!((workspace.scope(), workspace.key.as_str()), (scope, key));
     }
 }
