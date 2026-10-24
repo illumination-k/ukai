@@ -27,6 +27,11 @@ pub const DESCRIPTION_MAX: usize = 200;
 /// 1 MiB; a note longer than this is several notes.
 pub const BODY_MAX: usize = 256 * 1024;
 
+/// Longest tag.
+pub const TAG_MAX: usize = 32;
+/// Most tags on one note: tags find notes, they do not describe them.
+pub const TAGS_MAX: usize = 8;
+
 /// What can be wrong with a note; [`problems`] lists them all.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Problem {
@@ -46,6 +51,12 @@ pub enum Problem {
     EmptyBody,
     #[error("the note is over {} KiB; split it", BODY_MAX / 1024)]
     LongBody,
+    #[error("the tag `{0}` is not lowercase letters, digits, and `-`, like `research`")]
+    InvalidTag(String),
+    #[error("the tag `{0}` is over {TAG_MAX} characters")]
+    LongTag(String),
+    #[error("a note has at most {TAGS_MAX} tags")]
+    TooManyTags,
     #[error("the {0} has a character that does not show (U+{1:04X}); remove it")]
     Invisible(Field, u32),
     #[error("the {0} looks like it holds a credential ({1}); never put one in a note")]
@@ -88,6 +99,17 @@ pub fn problems(name: &str, spec: &NoteSpec) -> Vec<Problem> {
     }
     if spec.body.len() > BODY_MAX {
         problems.push(Problem::LongBody);
+    }
+    for tag in &spec.tags {
+        if !is_word(tag) {
+            problems.push(Problem::InvalidTag(tag.clone()));
+        }
+        if tag.len() > TAG_MAX {
+            problems.push(Problem::LongTag(tag.clone()));
+        }
+    }
+    if spec.tags.len() > TAGS_MAX {
+        problems.push(Problem::TooManyTags);
     }
     for (field, text) in [
         (Field::Description, spec.description.as_str()),
@@ -162,18 +184,47 @@ pub fn name_problems(name: &str) -> Vec<Problem> {
         problems.push(Problem::EmptyName);
         return problems;
     }
-    let valid = name
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !name.starts_with('-')
-        && !name.ends_with('-');
-    if !valid {
+    if !is_word(name) {
         problems.push(Problem::InvalidName);
     }
     if name.len() > NAME_MAX {
         problems.push(Problem::LongName);
     }
     problems
+}
+
+/// Whether `word` is lowercase letters, digits, and `-` between them, as
+/// names and tags are.
+fn is_word(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !word.starts_with('-')
+        && !word.ends_with('-')
+}
+
+/// The tags `text` lists, separated by commas or spaces, as a note keeps
+/// them: in order, each once.
+pub fn parse_tags(text: &str) -> Vec<String> {
+    normalize_tags(
+        text.split([',', ' ', '\n', '\t'])
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// `tags` as a note keeps them: trimmed, without empty ones, sorted, each
+/// once, so the same tags written two ways are one revision's worth.
+pub fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut tags: Vec<String> = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_owned())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
 }
 
 /// Longest scope a `gateway.toml` may name.
@@ -237,7 +288,39 @@ mod tests {
         NoteSpec {
             description: description.into(),
             body: body.into(),
+            tags: Vec::new(),
+            on_demand: false,
         }
+    }
+
+    fn tagged(tags: &[&str]) -> NoteSpec {
+        NoteSpec {
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            ..spec("d", "x")
+        }
+    }
+
+    #[rstest]
+    #[case::good(&["research", "build-2"], vec![])]
+    #[case::upper(&["Research"], vec![Problem::InvalidTag("Research".into())])]
+    #[case::space(&["a b"], vec![Problem::InvalidTag("a b".into())])]
+    #[case::empty(&[""], vec![Problem::InvalidTag(String::new())])]
+    #[case::dash(&["-x"], vec![Problem::InvalidTag("-x".into())])]
+    #[case::long(&[&*"a".repeat(TAG_MAX + 1)], vec![Problem::LongTag("a".repeat(TAG_MAX + 1))])]
+    #[case::longest(&[&*"a".repeat(TAG_MAX)], vec![])]
+    #[case::too_many(&["a", "b", "c", "d", "e", "f", "g", "h", "i"], vec![Problem::TooManyTags])]
+    #[case::every_bad_tag(&["A", "b c"], vec![Problem::InvalidTag("A".into()), Problem::InvalidTag("b c".into())])]
+    fn tag_problems(#[case] tags: &[&str], #[case] expected: Vec<Problem>) {
+        assert_eq!(problems("n", &tagged(tags)), expected);
+    }
+
+    #[rstest]
+    #[case::commas("research, build", &["build", "research"])]
+    #[case::spaces("  research   build ", &["build", "research"])]
+    #[case::duplicates("build,build research", &["build", "research"])]
+    #[case::empty(" , ", &[])]
+    fn parses_tags(#[case] text: &str, #[case] expected: &[&str]) {
+        assert_eq!(parse_tags(text), expected);
     }
 
     #[rstest]

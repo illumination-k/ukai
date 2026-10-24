@@ -259,6 +259,33 @@ fn move_pane_refuses_what_cannot_move(#[case] pane: PaneId, #[case] target: Pane
 }
 
 #[test]
+fn nearest_prefers_the_focused_pane_then_the_active_tab() {
+    let mut layout = Layout::default();
+    let note = |name: &str| PaneContent::Note {
+        project: ProjectId("p".into()),
+        agent: "a".into(),
+        note: Some(name.into()),
+    };
+    let is_note = |content: &PaneContent| matches!(content, PaneContent::Note { .. });
+    assert_eq!(layout.nearest(is_note), None);
+    layout.split(0, H);
+    layout.set_content(1, note("a"));
+    let other = layout.new_tab();
+    layout.set_content(other, note("b"));
+    // Another tab's, when the active one has none.
+    layout.set_content(1, PaneContent::Empty);
+    layout.select_tab(0);
+    assert_eq!(layout.nearest(is_note), Some(other));
+    // The active tab's before another tab's.
+    layout.set_content(1, note("a"));
+    layout.focus(0);
+    assert_eq!(layout.nearest(is_note), Some(1));
+    // The focused pane before anything else.
+    layout.focus(other);
+    assert_eq!(layout.nearest(is_note), Some(other));
+}
+
+#[test]
 fn swap_exchanges_places_across_tabs() {
     let mut layout = Layout::default();
     layout.split(0, H);
