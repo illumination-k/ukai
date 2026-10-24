@@ -222,7 +222,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             post(stop_schedule),
         )
         .with_state(gateway.clone())
-        .merge(grpc(gateway));
+        .merge(grpc(gateway))
+        // The gRPC routes come with a fallback answering every other path
+        // with UNIMPLEMENTED as HTTP 200; a path nothing serves is a 404.
+        .fallback(|| async { StatusCode::NOT_FOUND });
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(%listen, "serving");
     axum::serve(listener, router).await?;
