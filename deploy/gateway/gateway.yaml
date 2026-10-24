@@ -86,20 +86,14 @@ spec:
                   name: ukai-gateway
                   key: token
                   optional: true
-            # The knowledge store (surrealdb.yaml) and its root user.
+            # ukai-knowledge (knowledge.yaml) and the token it answers.
             - name: UKAI_KNOWLEDGE_URL
-              value: ws://ukai-surrealdb:8000
-            - name: UKAI_KNOWLEDGE_USER
+              value: http://ukai-knowledge:50051
+            - name: UKAI_KNOWLEDGE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: ukai-surrealdb
-                  key: user
-                  optional: true
-            - name: UKAI_KNOWLEDGE_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: ukai-surrealdb
-                  key: pass
+                  name: ukai-knowledge
+                  key: token
                   optional: true
             # The copy of the workspaces' reports (rustfs.yaml), or any S3
             # bucket through the standard `AWS_*` variables.

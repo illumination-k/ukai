@@ -16,6 +16,8 @@ rust-version = "1.97"
 ukai-acp = { path = "crates/ukai-acp" }
 ukai-config = { path = "crates/ukai-config" }
 ukai-core = { path = "crates/ukai-core" }
+ukai-knowledge = { path = "crates/ukai-knowledge" }
+ukai-proto = { path = "crates/ukai-proto" }
 ukai-relay = { path = "crates/ukai-relay" }
 ukai-voice = { path = "crates/ukai-voice" }
 
@@ -41,6 +43,9 @@ notify-rust = { version = "4.18", default-features = false, features = ["z"] }
 object_store = { version = "0.14", default-features = false }
 percent-encoding = "2"
 proptest = "1"
+prost = "0.14"
+# Compiles the .proto files in Rust, so building needs no `protoc`.
+protox = "0.10"
 # No `html` or `getopts`: the app renders the parsed tree itself, never HTML.
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
@@ -54,8 +59,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 similar = "3"
-# The gateway's knowledge store, reached over WebSocket; engines are opted
-# into where needed (`kv-mem` in tests).
+# ukai-knowledge's store, reached over WebSocket; engines are opted into
+# where needed (`kv-mem` in tests).
 surrealdb = { version = "3.3", default-features = false, features = ["protocol-ws", "rustls"] }
 tempfile = "3"
 thiserror = "2"
@@ -63,6 +68,10 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1.52", features = ["macros", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false }
 toml = "1.1"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "transport", "router"] }
+tonic-health = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

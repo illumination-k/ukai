@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["net", "io-util"] }
 tokio-tungstenite = { workspace = true, features = ["handshake"] }
 tracing = { workspace = true }
 ukai-config = { workspace = true }
+ukai-proto = { workspace = true }
 
 # `${keychain:NAME}` references; already in the tree through native-tls.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -34,9 +34,10 @@
 //! `GET <schedule>/runs` lists its recent runs, and `POST <schedule>/run` and
 //! `<schedule>/stop` start and stop one now.
 //!
-//! `/agents/<id>/knowledge` is the [`knowledge`] of the agent's scope (its
+//! `/agents/<id>/knowledge` is the knowledge of the agent's scope (its
 //! project in `gateway.toml`, else its repository): notes kept outside the
-//! repositories. `GET` lists them; `GET`, `PUT`, and
+//! repositories, by `ukai-knowledge`, which the gateway asks over gRPC
+//! ([`knowledge`]) on behalf of whoever it finds is asking. `GET` lists them; `GET`, `PUT`, and
 //! `DELETE ?revision=<n>` on `<it>/<name>` read, write, and remove one, a
 //! change being refused with 409 when the note is no longer at the revision
 //! the writer read; `GET <name>/revisions` is its history, and
@@ -52,10 +53,11 @@
 //! - `UKAI_GATEWAY_TOKEN`: if set, clients must send `Authorization: Bearer <it>`
 //! - `UKAI_RELAY_IMAGE`: image whose `/usr/local/bin/ukai-relay` agent pods
 //!   run; the gateway's own image (read from its pod, `HOSTNAME`) when unset
-//! - `UKAI_KNOWLEDGE_URL`: the SurrealDB server keeping the [`knowledge`]
-//!   (`ws://ukai-surrealdb:8000` in `deploy/gateway`); without it the
+//! - `UKAI_KNOWLEDGE_URL`: `ukai-knowledge`, which keeps the notes
+//!   (`http://ukai-knowledge:50051` in `deploy/gateway`); without it the
 //!   gateway keeps none, and agent pods are not offered any
-//! - `UKAI_KNOWLEDGE_USER`, `UKAI_KNOWLEDGE_PASS`: its root user
+//! - `UKAI_KNOWLEDGE_TOKEN`: the token `ukai-knowledge` answers; knowledge
+//!   needs it too
 //! - `UKAI_GATEWAY_INTERNAL_URL`: where agent pods reach the gateway for the
 //!   knowledge (default `http://ukai-gateway`, the Service in `deploy/gateway`)
 //! - `UKAI_REPORTS_BUCKET`: the S3 bucket keeping a copy of the workspaces'
@@ -68,9 +70,9 @@
 //! own. [`job`] builds the Job from the config without touching the cluster;
 //! [`cluster`] finds or creates it and waits for its pod.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::BTreeMap;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -97,7 +99,7 @@ use crate::archive::{Archive, RelaySource};
 use crate::cluster::{Cluster, RelayEndpoint};
 use crate::config::KubernetesAgent;
 use crate::job::{Plan, Runtime};
-use crate::knowledge::{Knowledge, KnowledgeError, StoreConfig};
+use crate::knowledge::{Caller, KnowledgeClient, KnowledgeError};
 use crate::schedules::Scheduler;
 use ukai_core::knowledge::{Conflict, Editor, Listing, NoteWrite};
 use ukai_core::schedule::{ScheduleSpec, Trigger};
@@ -109,12 +111,8 @@ struct Gateway {
     runtime: Runtime,
     token: Option<String>,
     schedules: Scheduler,
-    /// Whether the gateway keeps knowledge at all.
-    keeps_knowledge: bool,
-    /// Set once the store is reached.
-    knowledge: tokio::sync::OnceCell<Knowledge>,
-    /// When each agent pod's workspace last changed notes, for [`POD_WRITES`].
-    pod_writes: Mutex<HashMap<String, VecDeque<std::time::Instant>>>,
+    /// `ukai-knowledge`, when the gateway is given one.
+    knowledge: Option<KnowledgeClient>,
     /// The copy of the workspaces' reports, when there is a bucket for it.
     archive: Option<Arc<Archive>>,
 }
@@ -155,16 +153,26 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("UKAI_RELAY_IMAGE is not set and the gateway pod has no image")?
         }
     };
-    let store = env("UKAI_KNOWLEDGE_URL").map(|url| StoreConfig {
-        url,
-        credentials: env("UKAI_KNOWLEDGE_USER").zip(env("UKAI_KNOWLEDGE_PASS")),
-    });
+    let knowledge_url = env("UKAI_KNOWLEDGE_URL");
+    let knowledge = match (&knowledge_url, env("UKAI_KNOWLEDGE_TOKEN")) {
+        (Some(url), Some(token)) => Some(
+            KnowledgeClient::new(url, &token)
+                .map_err(|error| format!("UKAI_KNOWLEDGE_URL: {error}"))?,
+        ),
+        (Some(_), None) => {
+            tracing::warn!(
+                "UKAI_KNOWLEDGE_URL is set without UKAI_KNOWLEDGE_TOKEN; keeping no knowledge"
+            );
+            None
+        }
+        (None, _) => None,
+    };
     // Agent pods are told where the gateway is only when it keeps knowledge.
-    let gateway_url = store.as_ref().map(|_| {
+    let gateway_url = knowledge.as_ref().map(|_| {
         env("UKAI_GATEWAY_INTERNAL_URL").unwrap_or_else(|| "http://ukai-gateway".to_owned())
     });
     let user = cluster.whoami().await?;
-    tracing::info!(namespace = cluster.namespace(), %user, %relay_image, ?gateway_url, knowledge = ?store.as_ref().map(|s| &s.url), agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
+    tracing::info!(namespace = cluster.namespace(), %user, %relay_image, ?gateway_url, knowledge = ?knowledge.as_ref().and(knowledge_url.as_ref()), agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
     let archive = match env("UKAI_REPORTS_BUCKET") {
         Some(bucket) => {
             let archive = Archive::connect(&bucket)
@@ -186,9 +194,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         token: env("UKAI_GATEWAY_TOKEN"),
         schedules,
-        keeps_knowledge: store.is_some(),
-        knowledge: tokio::sync::OnceCell::new(),
-        pod_writes: Mutex::default(),
+        knowledge,
         archive,
     });
     if let Some(archive) = &gateway.archive {
@@ -196,9 +202,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     tokio::spawn(saver.run(gateway.clone()));
     tokio::spawn(schedules::tick(gateway.clone()));
-    if let Some(store) = store {
-        tokio::spawn(reach_knowledge(gateway.clone(), store));
-    }
     let router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/agents", get(list))
@@ -260,27 +263,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%listen, "serving");
     axum::serve(listener, router).await?;
     Ok(())
-}
-
-/// How long the gateway waits between attempts to reach the knowledge store.
-const KNOWLEDGE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Reach the knowledge store, trying until it answers: the gateway serves
-/// agents meanwhile, and knowledge requests are 503 until then.
-async fn reach_knowledge(gateway: Arc<Gateway>, store: StoreConfig) {
-    loop {
-        match Knowledge::connect(&store).await {
-            Ok(knowledge) => {
-                tracing::info!(url = %store.url, "knowledge store reached");
-                let _ = gateway.knowledge.set(knowledge);
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(url = %store.url, %error, "cannot reach the knowledge store; trying again");
-                tokio::time::sleep(KNOWLEDGE_RETRY).await;
-            }
-        }
-    }
 }
 
 fn authorized(gateway: &Gateway, headers: &HeaderMap) -> bool {
@@ -762,14 +744,6 @@ async fn stop_schedule(
     }
 }
 
-/// Whose knowledge a request is about, and who is asking.
-struct Caller {
-    scope: String,
-    editor: Editor,
-    /// The agent pod's workspace, for a pod.
-    workspace: Option<String>,
-}
-
 /// The scope whose knowledge a client asks for through `agent`, or the
 /// status when it may not.
 fn client_caller(
@@ -811,43 +785,12 @@ async fn workspace_caller(gateway: &Gateway, headers: &HeaderMap) -> Result<Call
     }
 }
 
-/// Changes one agent pod's workspace may make to the knowledge per
-/// [`POD_WRITE_WINDOW`]: a session that read something hostile cannot flood
-/// the store with notes that outnumber the real ones.
-const POD_WRITES: usize = 20;
-const POD_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// Count a change by `caller`; `false` when its workspace has made too many.
-fn admit_write(gateway: &Gateway, caller: &Caller) -> bool {
-    let Some(workspace) = &caller.workspace else {
-        return true;
-    };
-    let now = std::time::Instant::now();
-    let mut writes = gateway
-        .pod_writes
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let recent = writes.entry(workspace.clone()).or_default();
-    recent.retain(|at| now.duration_since(*at) < POD_WRITE_WINDOW);
-    if recent.len() >= POD_WRITES {
-        return false;
-    }
-    recent.push_back(now);
-    true
-}
-
-/// The knowledge store, or why there is none to use.
-fn knowledge_of(gateway: &Gateway) -> Result<&Knowledge, (StatusCode, &'static str)> {
-    let unavailable = |why| (StatusCode::SERVICE_UNAVAILABLE, why);
-    if !gateway.keeps_knowledge {
-        return Err(unavailable(
-            "this gateway keeps no knowledge: set UKAI_KNOWLEDGE_URL",
-        ));
-    }
-    gateway
-        .knowledge
-        .get()
-        .ok_or_else(|| unavailable("the gateway has not reached its knowledge store yet"))
+/// `ukai-knowledge`, or why there is none to ask.
+fn knowledge_of(gateway: &Gateway) -> Result<&KnowledgeClient, (StatusCode, &'static str)> {
+    gateway.knowledge.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "this gateway keeps no knowledge: set UKAI_KNOWLEDGE_URL and UKAI_KNOWLEDGE_TOKEN",
+    ))
 }
 
 /// The response to a failed knowledge request.
@@ -860,7 +803,12 @@ fn knowledge_failed(error: KnowledgeError) -> Response {
             axum::Json(Conflict { current: *current }),
         )
             .into_response(),
-        error @ (KnowledgeError::Store(_) | KnowledgeError::Unreadable(_)) => {
+        error @ KnowledgeError::TooMany => {
+            (StatusCode::TOO_MANY_REQUESTS, error.to_string()).into_response()
+        }
+        KnowledgeError::Forbidden => StatusCode::FORBIDDEN.into_response(),
+        KnowledgeError::Unavailable(why) => (StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
+        error @ KnowledgeError::Failed(_) => {
             tracing::warn!(%error, "knowledge request failed");
             StatusCode::BAD_GATEWAY.into_response()
         }
@@ -887,53 +835,41 @@ async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask)
         Ok(knowledge) => knowledge,
         Err(unavailable) => return unavailable.into_response(),
     };
-    if matches!(ask, Ask::Write(..) | Ask::Delete(..)) && !admit_write(gateway, &caller) {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            "this workspace has changed too many notes for now",
-        )
-            .into_response();
-    }
-    let scope = &caller.scope;
+    let json = |value: serde_json::Value| axum::Json(value).into_response();
     let result = match ask {
-        Ask::List => knowledge.list(scope).await.map(|notes| {
+        Ask::List => knowledge.list(&caller).await.map(|notes| {
             axum::Json(Listing {
-                scope: scope.clone(),
+                scope: caller.scope.clone(),
                 notes,
             })
             .into_response()
         }),
-        Ask::Read(name) => knowledge.get(scope, &name).await.map(found),
+        Ask::Read(name) => knowledge.get(&caller, &name).await.map(found),
         Ask::Revisions(name) => knowledge
-            .revisions(scope, &name)
+            .revisions(&caller, &name)
             .await
             .map(|revisions| found((!revisions.is_empty()).then_some(revisions))),
         Ask::Write(name, write) => knowledge
-            .put(scope, &name, write, caller.editor, caller.workspace)
+            .put(&caller, &name, write)
             .await
             .map(|note| axum::Json(note).into_response()),
         Ask::Delete(name, revision) => knowledge
-            .delete(scope, &name, revision, caller.editor, caller.workspace)
+            .delete(&caller, &name, revision)
             .await
-            .map(|()| axum::Json(json!({})).into_response()),
-        Ask::Approve(name, revision) => {
-            if caller.editor != Editor::User {
-                return StatusCode::FORBIDDEN.into_response();
-            }
-            knowledge
-                .approve(scope, &name, revision)
-                .await
-                .map(|note| axum::Json(note).into_response())
+            .map(|()| json(json!({}))),
+        // The knowledge service refuses an agent's review too; refuse it
+        // here first, before it is asked.
+        Ask::Approve(..) | Ask::Reject(..) if caller.editor != Editor::User => {
+            return StatusCode::FORBIDDEN.into_response();
         }
-        Ask::Reject(name, revision) => {
-            if caller.editor != Editor::User {
-                return StatusCode::FORBIDDEN.into_response();
-            }
-            knowledge
-                .reject(scope, &name, revision)
-                .await
-                .map(|note| axum::Json(note).into_response())
-        }
+        Ask::Approve(name, revision) => knowledge
+            .approve(&caller, &name, revision)
+            .await
+            .map(|note| axum::Json(note).into_response()),
+        Ask::Reject(name, revision) => knowledge
+            .reject(&caller, &name, revision)
+            .await
+            .map(|note| axum::Json(note).into_response()),
     };
     result.unwrap_or_else(knowledge_failed)
 }

@@ -13,6 +13,9 @@ actionlint = "1.7.12"
 "aqua:suzuki-shunsuke/ghalint" = "1.5.5"
 "aqua:suzuki-shunsuke/pinact" = "3.9.0"
 "github:illumination-k/agent-lens" = "0.10.0"
+# e2e/gateway: a cluster to deploy the gateway into.
+"aqua:kubernetes-sigs/kind" = "0.33.0"
+"aqua:kubernetes/kubectl" = "1.37.1"
 
 [tools."cargo:cargo-nextest"]
 version = "0.9.132"
@@ -96,6 +99,10 @@ run = [
   "ghalint run",
   "pinact run",
 ]
+
+[tasks."e2e:gateway"]
+description = "Deploy the gateway into kind and check it from outside (Linux; needs Docker and the ukai-runtime:e2e image)"
+run = "e2e/gateway/run.sh"
 
 [tasks."lint:precommit"]
 description = "Run the prek (pre-commit) hooks over every tracked file"

@@ -1,0 +1,112 @@
+# ukai-knowledge: keeps the notes the gateway's agents and their people
+# write (in SurrealDB, surrealdb.yaml), and answers the gateway over gRPC.
+# The gateway tells it who is asking, so nothing else may reach it: it
+# answers only the token in the Secret `ukai-knowledge` (key `token`), which
+# the gateway holds too and agent pods never get, and the NetworkPolicy
+# below lets in the gateway alone. This base does not create the Secret:
+#   kubectl create secret generic ukai-knowledge \
+#     --from-literal=token="$(openssl rand -hex 32)"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ukai-knowledge
+  labels:
+    app.kubernetes.io/name: ukai-knowledge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ukai-knowledge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ukai-knowledge
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: knowledge
+          image: ukai-runtime
+          command: ["ukai-knowledge"]
+          env:
+            - name: UKAI_KNOWLEDGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-knowledge
+                  key: token
+            - name: UKAI_KNOWLEDGE_STORE
+              value: ws://ukai-surrealdb:8000
+            - name: UKAI_KNOWLEDGE_STORE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-surrealdb
+                  key: user
+            - name: UKAI_KNOWLEDGE_STORE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-surrealdb
+                  key: pass
+          ports:
+            - name: grpc
+              containerPort: 50051
+          # Serving once the store is reached.
+          readinessProbe:
+            grpc:
+              port: 50051
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ukai-knowledge
+  labels:
+    app.kubernetes.io/name: ukai-knowledge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ukai-knowledge
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      appProtocol: kubernetes.io/h2c
+---
+# The gateway alone: agent pods share the namespace, and must not be able
+# to say they are a person. An agent pod always has `ukai.dev/workspace`, so
+# it is kept out even if gateway.toml gave it the gateway's name label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ukai-knowledge
+  labels:
+    app.kubernetes.io/name: ukai-knowledge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ukai-knowledge
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ukai-gateway
+            matchExpressions:
+              - key: ukai.dev/workspace
+                operator: DoesNotExist
+      ports:
+        - port: grpc

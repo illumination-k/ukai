@@ -29,6 +29,8 @@ use ukai_config::{AgentSpec, Source};
 
 use crate::{ResolveError, header_map};
 
+pub mod wire;
+
 /// Suffix of an agent's ACP endpoint that lists the knowledge of its scope.
 /// One note is `<it>/<name>`.
 pub const KNOWLEDGE_PATH: &str = "/knowledge";
