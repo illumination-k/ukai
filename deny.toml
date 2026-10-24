@@ -55,6 +55,7 @@ ignore = [
   { id = "RUSTSEC-2026-0194", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2026-0195", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2023-0071", reason = "rsa via jsonwebtoken (surrealdb-core, tests only)" },
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via jsonwebtoken (surrealdb-core, tests only)" },
 ]
 
 [sources]
