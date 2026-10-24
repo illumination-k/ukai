@@ -51,6 +51,13 @@ To check a real agent without the UI, run
 repository root; it uses the agents in `ukai.toml` and declines every
 permission request.
 
+`mise run e2e:gateway` deploys `deploy/gateway` into a kind cluster and checks
+it from outside (`e2e/gateway/run.sh`, with the tests in
+`crates/ukai-gateway/tests/e2e.rs`, ignored otherwise). It needs Linux, Docker,
+and the runtime image built as `ukai-runtime:e2e` (see the script); CI runs it
+on every change that reaches the cluster side. Extend it when a change crosses
+the gateway, `ukai-knowledge`, or the manifests.
+
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an
 in-process mock agent over `Channel::duplex`; extend the mock rather than
 reaching for a real agent in tests.

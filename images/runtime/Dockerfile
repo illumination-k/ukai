@@ -19,10 +19,13 @@ RUN apt-get update \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
-RUN cargo build --release --locked -p ukai-relay --target x86_64-unknown-linux-musl \
-  && cargo build --release --locked -p ukai-gateway -p ukai-knowledge \
-  && cp target/x86_64-unknown-linux-musl/release/ukai-relay target/release/ukai-gateway \
-    target/release/ukai-knowledge /usr/local/bin/
+# `dev` for e2e/gateway, which wants the image soon rather than small.
+ARG CARGO_PROFILE=release
+RUN out=$([ "$CARGO_PROFILE" = dev ] && echo debug || echo "$CARGO_PROFILE") \
+  && cargo build --profile "$CARGO_PROFILE" --locked -p ukai-relay --target x86_64-unknown-linux-musl \
+  && cargo build --profile "$CARGO_PROFILE" --locked -p ukai-gateway -p ukai-knowledge \
+  && cp "target/x86_64-unknown-linux-musl/$out/ukai-relay" "target/$out/ukai-gateway" \
+    "target/$out/ukai-knowledge" /usr/local/bin/
 
 FROM debian:trixie-slim
 

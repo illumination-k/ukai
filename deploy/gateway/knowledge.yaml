@@ -87,7 +87,8 @@ spec:
       appProtocol: kubernetes.io/h2c
 ---
 # The gateway alone: agent pods share the namespace, and must not be able
-# to say they are a person.
+# to say they are a person. An agent pod always has `ukai.dev/workspace`, so
+# it is kept out even if gateway.toml gave it the gateway's name label.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -104,5 +105,8 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: ukai-gateway
+            matchExpressions:
+              - key: ukai.dev/workspace
+                operator: DoesNotExist
       ports:
         - port: grpc

@@ -100,7 +100,7 @@ spec:
       port: 8000
       targetPort: surrealdb
 ---
-# ukai-knowledge alone.
+# ukai-knowledge alone; never an agent pod (see knowledge.yaml).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -117,5 +117,8 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: ukai-knowledge
+            matchExpressions:
+              - key: ukai.dev/workspace
+                operator: DoesNotExist
       ports:
         - port: surrealdb

@@ -1,0 +1,16 @@
+# deploy/gateway as e2e/gateway/run.sh runs it in a kind cluster: the image
+# built from this checkout, and a gateway.toml of its own.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ukai-e2e
+resources:
+  - ../../deploy/gateway
+images:
+  - name: ghcr.io/illumination-k/ukai-runtime
+    newName: ukai-runtime
+    newTag: e2e
+configMapGenerator:
+  - name: ukai-gateway
+    behavior: replace
+    files:
+      - gateway.toml
