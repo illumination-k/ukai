@@ -13,7 +13,11 @@
 //! its `/acp`: the reports it writes stay in its pod and are read back, the
 //! servers it runs there are reached through a tunnel, the gateway runs its
 //! schedules, and it keeps the knowledge of its repository.
+//!
+//! [`checkout`] is where any agent works, as the composer reaches it: the
+//! files to mention, and commands the user runs there.
 
+pub mod checkout;
 mod fs;
 mod grpc;
 pub mod knowledge;
@@ -24,6 +28,7 @@ mod secrets;
 mod session;
 pub mod updates;
 
+pub use checkout::Checkout;
 pub use fs::{FsError, FsRoot};
 pub use ports::{PortsEndpoint, Tunnel};
 pub use reports::ReportsEndpoint;

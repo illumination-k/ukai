@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use ukai_acp::checkout::CommandOutput;
 use ukai_acp::{
     Attachment, ConfigOption, FileDiff, PastSession, PermissionChoice, PermissionId, PlanItem,
     Prompt, PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Update, Usage,
@@ -55,6 +56,16 @@ pub enum Entry {
     Notice {
         text: String,
         error: bool,
+    },
+    /// A command the user ran in the checkout with `!` (`crate::shell`).
+    Shell {
+        /// Tells the run apart, for its output to land in its entry.
+        id: u64,
+        command: String,
+        /// `None` while it runs; why it could not run, or what it printed.
+        result: Option<Result<CommandOutput, String>>,
+        /// What it printed went to the agent with a prompt.
+        sent: bool,
     },
 }
 
@@ -201,13 +212,70 @@ impl Transcript {
         true
     }
 
-    /// Record a prompt the user sent, with the names of its attachments.
+    /// Record a prompt the user sent, with the names of its attachments. It
+    /// carried the commands [`Self::unsent_shell`] lists.
     pub fn push_prompt(&mut self, text: impl Into<String>, attachments: Vec<String>) {
+        for entry in &mut self.entries {
+            if let Entry::Shell {
+                result: Some(Ok(_)),
+                sent,
+                ..
+            } = entry
+            {
+                *sent = true;
+            }
+        }
         self.entries.push(Entry::User {
             text: text.into(),
             attachments,
         });
         self.status = Status::Busy;
+    }
+
+    /// Record a command the user started with `!`; its id finishes it.
+    pub fn start_shell(&mut self, command: impl Into<String>) -> u64 {
+        let id = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Shell { .. }))
+            .count() as u64;
+        self.entries.push(Entry::Shell {
+            id,
+            command: command.into(),
+            result: None,
+            sent: false,
+        });
+        id
+    }
+
+    /// Record how the command `id` went.
+    pub fn finish_shell(&mut self, id: u64, outcome: Result<CommandOutput, String>) {
+        if let Some(Entry::Shell { result, .. }) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(entry, Entry::Shell { id: run, .. } if *run == id))
+        {
+            *result = Some(outcome);
+        }
+    }
+
+    /// The commands that finished and no prompt told the agent about yet,
+    /// for the next one to; those that could not run are left out, and
+    /// [`Self::push_prompt`] counts these as told.
+    pub fn unsent_shell(&self) -> Vec<(&str, &CommandOutput)> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Shell {
+                    command,
+                    result: Some(Ok(output)),
+                    sent: false,
+                    ..
+                } => Some((command.as_str(), output)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Record the user's answer to a permission request.
@@ -1096,5 +1164,39 @@ mod tests {
             answers,
             [Some("cancelled"), Some("Allow"), Some("cancelled")]
         );
+    }
+
+    #[test]
+    fn finished_commands_go_with_the_next_prompt_once() {
+        let ran = |text: &str| CommandOutput {
+            exit_code: Some(0),
+            output: text.into(),
+            ..CommandOutput::default()
+        };
+        let mut transcript = Transcript::default();
+        let old = transcript.start_shell("ls");
+        transcript.finish_shell(old, Ok(ran("a")));
+        transcript.push_prompt("look", Vec::new());
+        let done = transcript.start_shell("cat a");
+        let failed = transcript.start_shell("nope");
+        let running = transcript.start_shell("sleep 9");
+        transcript.finish_shell(done, Ok(ran("hello")));
+        transcript.finish_shell(failed, Err("no workspace".into()));
+        let unsent: Vec<(&str, &str)> = transcript
+            .unsent_shell()
+            .into_iter()
+            .map(|(command, output)| (command, output.output.as_str()))
+            .collect();
+        assert_eq!(unsent, [("cat a", "hello")]);
+        transcript.push_prompt("and now", Vec::new());
+        assert!(transcript.unsent_shell().is_empty());
+        // One that was still running then goes with the prompt after it ends.
+        transcript.finish_shell(running, Ok(ran("woke")));
+        let unsent: Vec<&str> = transcript
+            .unsent_shell()
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(unsent, ["sleep 9"]);
     }
 }

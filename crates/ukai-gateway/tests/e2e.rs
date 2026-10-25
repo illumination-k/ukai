@@ -361,7 +361,10 @@ async fn schedules_are_kept_through_the_gateway() {
 #[tokio::test]
 #[ignore = "needs a cluster: e2e/gateway/run.sh"]
 async fn a_workspace_that_is_not_running_is_left_alone() {
+    use std::path::Path;
+
     use ukai_acp::PaneWorkspace;
+    use ukai_acp::checkout::{Checkout, CheckoutError};
     use ukai_acp::ports::{PortsEndpoint, PortsError};
     use ukai_acp::updates::RestartEndpoint;
 
@@ -376,6 +379,19 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         .list()
         .await;
     assert!(matches!(ports, Err(PortsError::Gone)), "{ports:?}");
+    // Neither the checkout's files nor a command start one.
+    let checkout = Checkout::resolve(
+        &agent_spec(&token),
+        |_, _| None,
+        Some(&pane),
+        Path::new("."),
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap_or_else(|| panic!("a gateway agent has a checkout"));
+    let files = checkout.files().await;
+    assert!(matches!(files, Err(CheckoutError::NotRunning)), "{files:?}");
+    let ran = checkout.run("true").await;
+    assert!(matches!(ran, Err(CheckoutError::NotRunning)), "{ran:?}");
     // Restarting a workspace with no pod leaves it without one.
     RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
         .unwrap_or_else(|e| panic!("{e}"))

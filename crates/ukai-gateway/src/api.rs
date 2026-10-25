@@ -1,12 +1,15 @@
 //! The gateway's control plane besides knowledge, as gRPC and gRPC-Web
 //! (`ukai.gateway.v1`): `Agents` (the agents, and restarting a workspace),
-//! `Ports` (what listens in a workspace), and `Schedules`. All take the
+//! `Ports` (what listens in a workspace), `Files` and `Commands` (the files
+//! of a workspace's checkout, and the user's commands run in it), and
+//! `Schedules`. All take the
 //! gateway's token. What is not request and answer stays HTTP: ACP's
 //! `/acp`, the tunnels at `/forward`, and the reports a web view loads.
 
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
+use ukai_acp::checkout::{CommandOutput, FileListing, RUN_TIMEOUT, RunRequest};
 use ukai_acp::ports::PortListing;
 use ukai_core::schedule::{ScheduleInfo, ScheduleSpec, Trigger};
 use ukai_proto::gateway::v1 as gw;
@@ -17,7 +20,7 @@ use crate::cluster::RelayEndpoint;
 use crate::job::Plan;
 use crate::{Gateway, access, schedules};
 
-/// How long the relay may take to list its pod's ports.
+/// How long the relay may take to list its pod's ports or files.
 const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Clone)]
@@ -125,6 +128,77 @@ impl gw::ports_server::Ports for Api {
             Status::unavailable("cannot list the workspace's ports")
         })?;
         Ok(Response::new(listing.into()))
+    }
+}
+
+#[tonic::async_trait]
+impl gw::files_server::Files for Api {
+    async fn list(
+        &self,
+        request: Request<gw::ListFilesRequest>,
+    ) -> Result<Response<gw::FileListing>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let listing = async {
+            self.gateway
+                .http
+                .get(relay.files_url())
+                .bearer_auth(&relay.token)
+                .timeout(LIST_TIMEOUT)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<FileListing>()
+                .await
+        }
+        .await
+        .map_err(|error| {
+            tracing::warn!(agent = %request.agent, %error, "cannot list the workspace's files");
+            Status::unavailable("cannot list the workspace's files")
+        })?;
+        Ok(Response::new(listing.into()))
+    }
+}
+
+#[tonic::async_trait]
+impl gw::commands_server::Commands for Api {
+    async fn run(
+        &self,
+        request: Request<gw::RunCommandRequest>,
+    ) -> Result<Response<gw::CommandOutput>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        if request.command.trim().is_empty() {
+            return Err(Status::invalid_argument("the command is empty"));
+        }
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        tracing::info!(agent = %request.agent, job = %plan.job_name(), "running a command for the user");
+        let output = async {
+            self.gateway
+                .http
+                .post(relay.run_url())
+                .bearer_auth(&relay.token)
+                .json(&RunRequest {
+                    command: request.command,
+                })
+                // The relay stops the command itself; this is for a relay
+                // that does not answer at all.
+                .timeout(RUN_TIMEOUT + LIST_TIMEOUT)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<CommandOutput>()
+                .await
+        }
+        .await
+        .map_err(|error| {
+            tracing::warn!(agent = %request.agent, %error, "cannot run a command in the workspace");
+            Status::unavailable("cannot run the command in the workspace")
+        })?;
+        Ok(Response::new(output.into()))
     }
 }
 

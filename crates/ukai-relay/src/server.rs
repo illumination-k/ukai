@@ -92,6 +92,9 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         .merge(crate::reports::router(
             cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
         ))
+        .merge(crate::checkout::router(
+            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        ))
         .merge(crate::ports::router(crate::ports::Ports {
             own: options.listen.port(),
             previews: previews.clone(),
@@ -231,7 +234,8 @@ async fn authorize(token: Option<Arc<str>>, request: Request, next: Next) -> Res
         return next.run(request).await;
     };
     // `/health` stays open for the kubelet's probes; `/acp`, the reports
-    // of the agent's checkout, and its ports all want the token.
+    // of the agent's checkout, its files and commands, and its ports all
+    // want the token.
     if request.uri().path().starts_with("/health") {
         return next.run(request).await;
     }

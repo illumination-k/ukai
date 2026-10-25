@@ -53,16 +53,18 @@ impl Recall {
     }
 }
 
-/// The prompts sent in `transcript`, oldest first, without one repeated
-/// right after itself.
+/// The prompts sent in `transcript` and the commands run with `!`, as they
+/// were written, oldest first, without one repeated right after itself.
 pub fn prompts(transcript: &Transcript) -> Vec<String> {
     let mut prompts: Vec<String> = Vec::new();
     for entry in &transcript.entries {
-        if let Entry::User { text, .. } = entry
-            && !text.trim().is_empty()
-            && prompts.last() != Some(text)
-        {
-            prompts.push(text.clone());
+        let written = match entry {
+            Entry::User { text, .. } => text.clone(),
+            Entry::Shell { command, .. } => format!("!{command}"),
+            _ => continue,
+        };
+        if !written.trim().is_empty() && prompts.last() != Some(&written) {
+            prompts.push(written);
         }
     }
     prompts
@@ -154,14 +156,15 @@ mod tests {
     }
 
     #[test]
-    fn prompts_skip_agent_messages_and_repeats() {
+    fn prompts_and_commands_skip_agent_messages_and_repeats() {
         let mut transcript = Transcript::default();
         transcript.push_prompt("fix it", Vec::new());
         transcript.push_prompt("fix it", Vec::new());
         transcript.entries.push(Entry::Agent {
             text: "done".into(),
         });
+        transcript.start_shell("cargo test");
         transcript.push_prompt("thanks", Vec::new());
-        assert_eq!(prompts(&transcript), ["fix it", "thanks"]);
+        assert_eq!(prompts(&transcript), ["fix it", "!cargo test", "thanks"]);
     }
 }

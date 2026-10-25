@@ -23,6 +23,7 @@ pub enum Icon {
     Mic,
     Back,
     Globe,
+    Terminal,
 }
 
 impl Icon {
@@ -61,6 +62,7 @@ impl Icon {
                 "M8 12v2",
             ],
             Self::Back => &["M10 4l-4 4 4 4"],
+            Self::Terminal => &["M3.5 4.5l3.5 3.5-3.5 3.5", "M8.5 11.5h4"],
             Self::Globe => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
                 "M2.5 8h11",
