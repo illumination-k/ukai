@@ -7,4 +7,5 @@ ignore = [
   "RUSTSEC-2026-0194", # quick-xml
   "RUSTSEC-2026-0195", # quick-xml
   "RUSTSEC-2023-0071", # rsa
+  "RUSTSEC-2026-0387", # crypto-bigint
 ]

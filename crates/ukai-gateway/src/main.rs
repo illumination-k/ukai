@@ -40,7 +40,8 @@
 //! `DELETE ?revision=<n>` on `<it>/<name>` read, write, and remove one, a
 //! change being refused with 409 when the note is no longer at the revision
 //! the writer read; `GET <name>/revisions` is its history, and
-//! `POST <name>/approve?revision=<n>` approves what an agent wrote. Agent pods reach
+//! `POST <name>/approve?revision=<n>` approves what an agent wrote and
+//! `POST <name>/reject?revision=<n>` takes it back. Agent pods reach
 //! the same, with a cap on how many changes each makes, at
 //! `/workspace/knowledge` with their relay's token instead of the gateway's,
 //! which names the scope of the pod it belongs to and no other.
@@ -234,10 +235,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "/agents/{id}/knowledge/{name}/revisions",
             get(agent_note_revisions),
         )
-        // Approval is a person's: there is no route for it under /workspace.
+        // Review is a person's: there is no route for it under /workspace.
         .route(
             "/agents/{id}/knowledge/{name}/approve",
             post(approve_agent_note),
+        )
+        .route(
+            "/agents/{id}/knowledge/{name}/reject",
+            post(reject_agent_note),
         )
         .route("/workspace/knowledge", get(workspace_notes))
         .route(
@@ -870,6 +875,7 @@ enum Ask {
     Write(String, NoteWrite),
     Delete(String, u64),
     Approve(String, u64),
+    Reject(String, u64),
 }
 
 async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask) -> Response {
@@ -919,11 +925,20 @@ async fn answer(gateway: &Gateway, caller: Result<Caller, StatusCode>, ask: Ask)
                 .await
                 .map(|note| axum::Json(note).into_response())
         }
+        Ask::Reject(name, revision) => {
+            if caller.editor != Editor::User {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            knowledge
+                .reject(scope, &name, revision)
+                .await
+                .map(|note| axum::Json(note).into_response())
+        }
     };
     result.unwrap_or_else(knowledge_failed)
 }
 
-/// `?revision=<n>` on a delete or an approval: the revision the person or
+/// `?revision=<n>` on a delete or a review: the revision the person or
 /// agent read.
 #[derive(serde::Deserialize)]
 struct RevisionQuery {
@@ -985,6 +1000,16 @@ async fn approve_agent_note(
 ) -> Response {
     let caller = client_caller(&gateway, &headers, &id);
     answer(&gateway, caller, Ask::Approve(name, query.revision)).await
+}
+
+async fn reject_agent_note(
+    State(gateway): State<Arc<Gateway>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let caller = client_caller(&gateway, &headers, &id);
+    answer(&gateway, caller, Ask::Reject(name, query.revision)).await
 }
 
 async fn workspace_notes(State(gateway): State<Arc<Gateway>>, headers: HeaderMap) -> Response {

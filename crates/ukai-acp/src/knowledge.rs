@@ -16,7 +16,9 @@
 //! deleted note can be written again. What a person writes is approved as
 //! it is written; what an agent writes waits for a person to approve it
 //! ([`Note::approved`] keeps the last approved revision meanwhile), and only
-//! approved notes are put before every session. A write names the revision it read
+//! approved notes are put before every session, except those [`NoteSpec::on_demand`],
+//! which are only listed when asked for. A person can also reject what an
+//! agent wrote, back to the approved revision. A write names the revision it read
 //! ([`NoteWrite::base_revision`], 0 for a new note), and is refused with
 //! [`KnowledgeError::Conflict`] when the note has moved on since.
 
@@ -45,6 +47,22 @@ pub struct NoteSpec {
     pub description: String,
     /// Markdown.
     pub body: String,
+    /// Words to find the note by, like `research` or `build`.
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags: Vec<String>,
+    /// Whether sessions are left to ask for the note (`list_knowledge` by
+    /// tag) rather than shown it from the start: for research and other
+    /// notes only some tasks need.
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub on_demand: bool,
 }
 
 /// Who last wrote a note.
@@ -96,6 +114,18 @@ pub struct Listing {
 pub struct NoteSummary {
     pub name: String,
     pub description: String,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub on_demand: bool,
     pub revision: u64,
     /// Unix seconds.
     pub updated: i64,
@@ -119,6 +149,18 @@ impl NoteSummary {
 pub struct ApprovedSummary {
     pub revision: u64,
     pub description: String,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub on_demand: bool,
 }
 
 /// The last revision of a note a person approved, whole.
@@ -156,12 +198,16 @@ impl Note {
         NoteSummary {
             name: self.name.clone(),
             description: self.spec.description.clone(),
+            tags: self.spec.tags.clone(),
+            on_demand: self.spec.on_demand,
             revision: self.revision,
             updated: self.updated,
             updated_by: self.updated_by,
             approved: self.approved.as_ref().map(|approved| ApprovedSummary {
                 revision: approved.revision,
                 description: approved.spec.description.clone(),
+                tags: approved.spec.tags.clone(),
+                on_demand: approved.spec.on_demand,
             }),
         }
     }
@@ -310,6 +356,15 @@ impl KnowledgeEndpoint {
         self.call(self.client.post(url)).await
     }
 
+    /// Reject `name`'s latest revision, `revision`, which an agent wrote and
+    /// no person approved: the note goes back to the approved revision, or
+    /// is deleted when none was, and then `None`. Only a client of the
+    /// gateway can.
+    pub async fn reject(&self, name: &str, revision: u64) -> Result<Option<Note>, KnowledgeError> {
+        let url = format!("{}?revision={revision}", self.url(name, "/reject"));
+        self.call(self.client.post(url)).await
+    }
+
     /// Every write and delete of `name`, newest first.
     pub async fn revisions(&self, name: &str) -> Result<Vec<Revision>, KnowledgeError> {
         self.call(self.client.get(self.url(name, "/revisions")))
@@ -346,6 +401,16 @@ impl KnowledgeEndpoint {
             status => Err(KnowledgeError::Status(status)),
         }
     }
+}
+
+/// A field notes written before it existed have as `null`, read as its
+/// default.
+fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 fn conflict_message(current: &Option<Note>) -> String {
@@ -424,6 +489,8 @@ mod tests {
             spec: NoteSpec {
                 description: "How to build on macOS".into(),
                 body: "Set `GGML_NATIVE=OFF`.".into(),
+                tags: vec!["build".into()],
+                on_demand: false,
             },
             revision: 3,
             updated: 1,
@@ -438,11 +505,23 @@ mod tests {
         let json = serde_json::to_value(&note).unwrap_or_default();
         assert_eq!(json["description"], "How to build on macOS");
         assert_eq!(json["updated_by"], "agent");
+        assert_eq!(json["tags"], serde_json::json!(["build"]));
+        assert_eq!(json.get("on_demand"), None);
         assert_eq!(
             json["provenance"],
             serde_json::json!({ "workspace": "0a1b2c3d4e5f" })
         );
         assert_eq!(serde_json::from_value::<Note>(json).ok(), Some(note));
+    }
+
+    #[test]
+    fn a_note_written_before_tags_reads_with_none() {
+        let note: NoteSummary = serde_json::from_value(serde_json::json!({
+            "name": "build", "description": "d", "tags": null, "on_demand": null,
+            "revision": 1, "updated": 0, "updated_by": "user",
+        }))
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((note.tags, note.on_demand), (Vec::new(), false));
     }
 
     #[test]
@@ -452,5 +531,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(write.base_revision, 0);
         assert_eq!(write.commit, None);
+        assert_eq!(write.spec.tags, Vec::<String>::new());
+        assert!(!write.spec.on_demand);
     }
 }
