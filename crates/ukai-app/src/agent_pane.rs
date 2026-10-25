@@ -8,25 +8,28 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
+use ukai_acp::checkout::{CommandOutput, FileListing};
 use ukai_acp::{
-    Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot,
+    Attachment, Checkout, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, FileDiff, FsRoot,
     PaneWorkspace, Prompt, RestartEndpoint, SessionEvent, SessionEvents, SessionHandle,
     SessionOptions, SlashCommand, ToolStatus, UpdateCheck,
 };
 use ukai_core::config::{ApplyDefaults, Setting};
 use ukai_core::keymap::{Action, Scope};
+use ukai_core::mention::{self, Mention};
 use ukai_core::recall::{self, Recall};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
-use ukai_core::slash;
 use ukai_core::{
     Alert, Entry, History, PaneContent, PaneId, ProjectId, Queued, ReportSource, Status,
     Transcript, session_label, updated_label, usage_label,
 };
+use ukai_core::{shell, slash};
 
 use crate::alert;
 use crate::clipboard::{self, Pasted};
@@ -44,6 +47,8 @@ pub struct AgentSession {
     handle: Option<SessionHandle>,
     transcript: Signal<Transcript>,
     composer: Composer,
+    /// Where the agent works, for `@` and `!`; `None` when it cannot be told.
+    checkout: Option<Checkout>,
     /// Something happened in the session that the user has not looked at.
     pub unread: Signal<bool>,
     /// Ends the composer's recording once no session holds the composer.
@@ -61,7 +66,25 @@ struct Composer {
     /// Why the last file could not be attached, or dictation failed.
     error: Signal<Option<String>>,
     dictation: Signal<Dictation>,
+    /// Files picked with `@`, linked to the prompt while it names them.
+    mentions: Signal<Vec<Mention>>,
+    /// The checkout's files, for `@`.
+    files: Signal<Files>,
 }
+
+/// The last listing of the checkout's files, read when an `@` is typed.
+#[derive(Debug, Clone, PartialEq)]
+enum Files {
+    Unread,
+    Loading,
+    Listed(FileListing, Instant),
+    Failed(String, Instant),
+}
+
+/// How long a listing of the checkout's files is used before an `@` reads
+/// it again; a failed one is retried sooner.
+const FILES_FRESH: Duration = Duration::from_secs(30);
+const FILES_RETRY: Duration = Duration::from_secs(5);
 
 impl Composer {
     fn new() -> Self {
@@ -71,6 +94,8 @@ impl Composer {
             review: Signal::new_in_scope(Vec::new(), ScopeId::APP),
             error: Signal::new_in_scope(None, ScopeId::APP),
             dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::APP),
+            mentions: Signal::new_in_scope(Vec::new(), ScopeId::APP),
+            files: Signal::new_in_scope(Files::Unread, ScopeId::APP),
         }
     }
 
@@ -142,10 +167,14 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
         None => agent.clone(),
     };
     let mut defaults = ApplyDefaults::new(projects.peek().defaults(&project, &agent));
-    let started =
-        project_context(&projects.peek(), &configs.peek(), &project).and_then(|context| {
-            start_session(&context, &agent, workspace.as_ref(), restore, expecting)
-        });
+    let context = project_context(&projects.peek(), &configs.peek(), &project);
+    let checkout = context
+        .as_ref()
+        .ok()
+        .and_then(|context| checkout_of(context, &agent, workspace.as_ref()));
+    let started = context.and_then(|context| {
+        start_session(&context, &agent, workspace.as_ref(), restore, expecting)
+    });
     let handle = match started {
         Ok((handle, mut events)) => {
             let window = dioxus::desktop::window();
@@ -184,6 +213,7 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
             handle,
             transcript,
             composer,
+            checkout,
             unread,
             dictation,
         },
@@ -298,6 +328,65 @@ pub fn HistoryMenu(pane: PaneId) -> Element {
             }
         }
     }
+}
+
+/// Where the pane's agent works: the project root, or its gateway workspace.
+fn checkout_of(
+    context: &ProjectContext,
+    agent: &str,
+    workspace: Option<&PaneWorkspace>,
+) -> Option<Checkout> {
+    let spec = context.config.agents.get(agent)?;
+    Checkout::resolve(spec, ukai_acp::system_lookup, workspace, &context.root)
+        .inspect_err(|error| tracing::warn!(%error, "cannot reach the agent's checkout"))
+        .ok()
+        .flatten()
+}
+
+/// Read the checkout's files again, unless a recent listing will do.
+fn refresh_files(checkout: Option<Checkout>, mut files: Signal<Files>) {
+    let stale = match &*files.peek() {
+        Files::Unread => true,
+        Files::Loading => false,
+        Files::Listed(_, at) => at.elapsed() > FILES_FRESH,
+        Files::Failed(_, at) => at.elapsed() > FILES_RETRY,
+    };
+    if !stale {
+        return;
+    }
+    let Some(checkout) = checkout else {
+        files.set(Files::Failed(
+            "this agent's files cannot be listed".to_owned(),
+            Instant::now(),
+        ));
+        return;
+    };
+    // A listing just read stays shown while the next one loads.
+    if matches!(*files.peek(), Files::Unread | Files::Failed(..)) {
+        files.set(Files::Loading);
+    }
+    spawn_forever(async move {
+        let listed = match checkout.files().await {
+            Ok(listing) => Files::Listed(listing, Instant::now()),
+            Err(error) => Files::Failed(error.to_string(), Instant::now()),
+        };
+        files.set(listed);
+    });
+}
+
+/// Run `command` in the checkout, as the user's `!`, into the transcript.
+fn run_shell(checkout: Option<Checkout>, mut transcript: Signal<Transcript>, command: String) {
+    let id = transcript.write().start_shell(command.clone());
+    spawn_forever(async move {
+        let result = match checkout {
+            Some(checkout) => checkout
+                .run(&command)
+                .await
+                .map_err(|error| error.to_string()),
+            None => Err("this agent has nowhere to run commands".to_owned()),
+        };
+        transcript.write().finish_shell(id, result);
+    });
 }
 
 fn start_session(
@@ -500,6 +589,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         handle,
         mut transcript,
         composer,
+        checkout,
         ..
     } = session;
     let Composer {
@@ -508,17 +598,25 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         mut review,
         mut error,
         dictation,
+        mut mentions,
+        files,
     } = composer;
     let status = transcript.read().status.clone();
     let mut dropping = use_signal(|| false);
-    // The highlighted slash command, and whether escape hid the list.
+    // The highlighted slash command or file, and whether escape hid the list.
     let mut picked = use_signal(|| 0_usize);
     let mut dismissed = use_signal(|| false);
 
     let mut send = {
         let handle = handle.clone();
+        let checkout = checkout.clone();
         move || {
             let text = draft.read().trim().to_owned();
+            if let Some(command) = shell::command(&text) {
+                run_shell(checkout.clone(), transcript, command.to_owned());
+                draft.set(String::new());
+                return;
+            }
             let comments = review.read().clone();
             let pending = attachments.read().clone();
             let status = transcript.read().status.clone();
@@ -527,8 +625,28 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
             {
                 return;
             }
-            let text = review::review_prompt(&comments, &text);
+            // Files picked with `@` go as links, without a chip: the text
+            // names them.
+            let linked: Vec<(String, Attachment)> = mention::named(&text, &mentions.read())
+                .into_iter()
+                .map(|mention| {
+                    let link = Attachment::Link {
+                        name: mention.path.clone(),
+                        uri: mention.uri.clone(),
+                    };
+                    (mention.path.clone(), link)
+                })
+                .collect();
+            let shown = review::review_prompt(&comments, &text);
+            let text = shell::prompt(&transcript.read().unsent_shell(), &shown);
             let busy = status == Status::Busy;
+            let mut clear = move || {
+                draft.set(String::new());
+                review.set(Vec::new());
+                attachments.set(Vec::new());
+                mentions.set(Vec::new());
+                error.set(None);
+            };
             // An agent that cannot take a message mid-turn is stopped first.
             if busy && !transcript.read().prompt_caps.steering {
                 stop_turn(app.sessions, pane);
@@ -537,18 +655,20 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     attachments: pending
                         .into_iter()
                         .map(|p| (p.name, p.attachment))
+                        .chain(linked)
                         .collect(),
                 });
-                draft.set(String::new());
-                review.set(Vec::new());
-                attachments.set(Vec::new());
-                error.set(None);
+                clear();
                 return;
             }
             let names = pending.iter().map(|p| p.name.clone()).collect();
             let prompt = Prompt {
-                text: text.clone(),
-                attachments: pending.into_iter().map(|p| p.attachment).collect(),
+                text,
+                attachments: pending
+                    .into_iter()
+                    .map(|p| p.attachment)
+                    .chain(linked.into_iter().map(|(_, link)| link))
+                    .collect(),
             };
             let sent = handle.as_ref().is_some_and(|h| {
                 if busy {
@@ -558,11 +678,8 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 }
             });
             if sent {
-                transcript.write().push_prompt(text, names);
-                draft.set(String::new());
-                review.set(Vec::new());
-                attachments.set(Vec::new());
-                error.set(None);
+                transcript.write().push_prompt(shown, names);
+                clear();
             }
         }
     };
@@ -581,10 +698,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let has_extras = !review.read().is_empty() || !attachments.read().is_empty();
     let config = transcript.read().config.clone();
     let update = transcript.read().update.clone();
-    let card_class = match (writable, dropping()) {
-        (_, true) => "composer-card dropping",
-        (true, false) => "composer-card",
-        (false, false) => "composer-card disabled",
+    let shell_mode = draft.read().trim_start().starts_with('!');
+    let card_class = match (writable, dropping(), shell_mode) {
+        (_, true, _) => "composer-card dropping",
+        (true, false, true) => "composer-card shell",
+        (true, false, false) => "composer-card",
+        (false, false, _) => "composer-card disabled",
     };
     let send_hint = shortcuts.keymap.hint(Action::Send);
     let usage = transcript.read().usage.as_ref().map(|usage| {
@@ -602,7 +721,49 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     } else {
         Vec::new()
     };
-    let current = picked().min(commands.len().saturating_sub(1));
+    let file_query = if writable && !dismissed() && commands.is_empty() {
+        mention::query(&draft.read()).map(str::to_owned)
+    } else {
+        None
+    };
+    let (found, files_root, files_note): (Vec<String>, String, Option<String>) =
+        match (&file_query, &*files.read()) {
+            (None, _) => (Vec::new(), String::new(), None),
+            (Some(query), Files::Listed(listing, _)) => {
+                let found: Vec<String> =
+                    mention::suggestions(query, &listing.files, MAX_SUGGESTIONS)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                let note = found.is_empty().then(|| "No matching files".to_owned());
+                (found, listing.root.clone(), note)
+            }
+            (Some(_), Files::Failed(message, _)) => {
+                (Vec::new(), String::new(), Some(message.clone()))
+            }
+            (Some(_), Files::Unread | Files::Loading) => {
+                (Vec::new(), String::new(), Some("Listing files…".to_owned()))
+            }
+        };
+    let listed = if commands.is_empty() {
+        found.len()
+    } else {
+        commands.len()
+    };
+    let current = picked().min(listed.saturating_sub(1));
+    // Picking the file `path` for the `@` the draft ends with.
+    let mut pick_file = {
+        let root = files_root.clone();
+        move |path: &str| {
+            let completed = mention::complete(&draft.peek(), path);
+            draft.set(completed);
+            mentions.write().push(Mention {
+                path: path.to_owned(),
+                uri: ukai_core::attachment::file_uri(&Path::new(&root).join(path)),
+            });
+            picked.set(0);
+        }
+    };
     let stop_title = shortcuts.title("Stop", Action::Stop);
     let (mic_class, mic_label) = match &*dictation.read() {
         Dictation::Idle => ("icon mic", "Dictate"),
@@ -803,6 +964,27 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         }
                     }
                 }
+                if file_query.is_some() {
+                    div { class: "slash-list",
+                        if let Some(note) = &files_note {
+                            div { class: "slash-note", "{note}" }
+                        }
+                        for (index, path) in found.iter().enumerate() {
+                            div {
+                                key: "{path}",
+                                class: if index == current { "slash-item selected" } else { "slash-item" },
+                                onmouseenter: move |_| picked.set(index),
+                                onmousedown: move |event| event.prevent_default(),
+                                onclick: {
+                                    let path = path.clone();
+                                    let mut pick_file = pick_file.clone();
+                                    move |_| pick_file(&path)
+                                },
+                                span { class: "name", "@{path}" }
+                            }
+                        }
+                    }
+                }
                 // Grows with the draft: the hidden copy after the textarea
                 // (`::after`) sizes the grid cell both share.
                 div { class: "composer-input", "data-value": "{draft}",
@@ -810,7 +992,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         rows: "1",
                         placeholder: match status {
                             Status::Idle => {
-                                "Message the agent — / for commands, ↑ for earlier messages, paste or drop files and images"
+                                "Message the agent — / for commands, @ for files, ! to run a command, ↑ for earlier messages"
                             }
                             Status::Busy if steering => "Steer the agent — your message joins this turn",
                             Status::Busy => {
@@ -821,10 +1003,17 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         },
                         disabled: !writable,
                         value: "{draft}",
-                        oninput: move |event| {
-                            draft.set(event.value());
-                            picked.set(0);
-                            dismissed.set(false);
+                        oninput: {
+                            let checkout = checkout.clone();
+                            move |event: FormEvent| {
+                                let value = event.value();
+                                if mention::query(&value).is_some() {
+                                    refresh_files(checkout.clone(), files);
+                                }
+                                draft.set(value);
+                                picked.set(0);
+                                dismissed.set(false);
+                            }
                         },
                         oncompositionend: move |_| ime.end(),
                         onkeyup: move |_| ime.settle(),
@@ -865,8 +1054,8 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                                     event.stop_propagation();
                                     return;
                                 }
-                                if !commands.is_empty() {
-                                    let len = commands.len() as isize;
+                                if listed > 0 {
+                                    let len = listed as isize;
                                     match event.key() {
                                         Key::ArrowDown => {
                                             picked.set((current as isize + 1).rem_euclid(len) as usize);
@@ -875,8 +1064,12 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                                             picked.set((current as isize - 1).rem_euclid(len) as usize);
                                         }
                                         Key::Tab | Key::Enter => {
-                                            draft.set(slash::completion(&commands[current]));
-                                            picked.set(0);
+                                            if let Some(command) = commands.get(current) {
+                                                draft.set(slash::completion(command));
+                                                picked.set(0);
+                                            } else if let Some(path) = found.get(current) {
+                                                pick_file(path);
+                                            }
                                         }
                                         // Not the app's: escape here only hides the list.
                                         Key::Escape => dismissed.set(true),
@@ -933,7 +1126,11 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     if let Some(hint) = send_hint {
                         span { class: "hint",
                             kbd { "{hint}" }
-                            " send"
+                            if shell_mode {
+                                " run in the agent's workspace"
+                            } else {
+                                " send"
+                            }
                         }
                     }
                     if let Some((label, title)) = usage {
@@ -949,10 +1146,11 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                     }
                     button {
                         class: "round primary",
-                        title: match (busy, steering) {
-                            (false, _) => "Send",
-                            (true, true) => "Steer: add to this turn",
-                            (true, false) => "Steer: stop this turn and send",
+                        title: match (shell_mode, busy, steering) {
+                            (true, _, _) => "Run in the agent's workspace",
+                            (false, false, _) => "Send",
+                            (false, true, true) => "Steer: add to this turn",
+                            (false, true, false) => "Steer: stop this turn and send",
                         },
                         disabled: !writable || (draft.read().trim().is_empty() && !has_extras),
                         onclick: move |_| send_on_click(),
@@ -1397,6 +1595,50 @@ fn EntryView(pane: PaneId, entry: Entry) -> Element {
         Entry::Notice { text, error } => rsx! {
             div { class: if error { "notice-line error" } else { "notice-line" }, "{text}" }
         },
+        Entry::Shell {
+            command,
+            result,
+            sent,
+            ..
+        } => rsx! {
+            ShellRun { command, result, sent }
+        },
+    }
+}
+
+/// A command the user ran with `!`, and what it printed.
+#[component]
+fn ShellRun(command: String, result: Option<Result<CommandOutput, String>>, sent: bool) -> Element {
+    let (outcome, failed) = match &result {
+        None => ("running…".to_owned(), false),
+        Some(Ok(output)) => (shell::outcome(output), output.exit_code != Some(0)),
+        Some(Err(_)) => ("could not run".to_owned(), true),
+    };
+    rsx! {
+        div { class: "shell-run",
+            div { class: "shell-head",
+                Svg { icon: Icon::Terminal, size: 12 }
+                code { class: "command", "{command}" }
+                span { class: if failed { "outcome failed" } else { "outcome" }, "{outcome}" }
+            }
+            match &result {
+                Some(Ok(output)) if !output.output.is_empty() => rsx! {
+                    pre { class: "shell-output",
+                        if output.truncated {
+                            span { class: "muted", "…\n" }
+                        }
+                        "{output.output}"
+                    }
+                },
+                Some(Err(message)) => rsx! {
+                    div { class: "shell-output error", "{message}" }
+                },
+                _ => rsx! {},
+            }
+            if !sent && matches!(result, Some(Ok(_))) {
+                div { class: "shell-note", "Goes to the agent with your next message" }
+            }
+        }
     }
 }
 

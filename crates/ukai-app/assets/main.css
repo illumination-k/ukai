@@ -1630,6 +1630,15 @@ button.new-tab {
   border-color: color-mix(in srgb, var(--fg) 22%, transparent);
 }
 
+/* A draft starting with `!` runs in the agent's workspace. */
+.composer-card.shell {
+  border-color: color-mix(in srgb, var(--working) 55%, transparent);
+}
+
+.composer-card.shell textarea {
+  font-family: var(--mono);
+}
+
 .composer-card.disabled {
   background: color-mix(in srgb, var(--muted) 40%, var(--card));
 }
@@ -1984,6 +1993,12 @@ button.config-trigger:disabled {
 
 .slash-item.selected {
   background: var(--selected);
+}
+
+.slash-note {
+  padding: 4px 8px;
+  color: var(--muted-fg);
+  font-size: 12px;
 }
 
 .slash-item .name {
@@ -2607,5 +2622,64 @@ button.outline.danger {
   align-items: center;
   gap: 4px;
   margin-top: 4px;
+  font-size: 11px;
+}
+
+/* A command the user ran with `!`. */
+.shell-run {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-self: flex-end;
+  width: min(100%, 80%);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.shell-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-fg);
+  font-size: 12px;
+}
+
+.shell-head .command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-strong);
+  font: 12.5px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-head .outcome {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.shell-head .outcome.failed {
+  color: var(--destructive);
+}
+
+.shell-output {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  color: var(--chat-strong);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.shell-output.error {
+  color: var(--destructive);
+}
+
+.shell-note {
+  color: var(--muted-fg);
   font-size: 11px;
 }

@@ -25,7 +25,9 @@
 //! port ([`api`], `ukai.gateway.v1`): `Agents` lists the agents and restarts
 //! a workspace (stopping its pod, so the next connection starts a fresh
 //! one, e.g. to pick up a newer agent release); `Ports` lists what listens
-//! in a workspace's pod and the previews its agent asked for; `Schedules`
+//! in a workspace's pod and the previews its agent asked for; `Files` and
+//! `Commands` list the files of its checkout and run the user's commands
+//! there, through the pod's relay, for the composer's `@` and `!`; `Schedules`
 //! keeps the agent's [`schedules`], commands and prompts the gateway runs on
 //! a cron pattern, in a workspace of each schedule's own. These name the
 //! workspace in the request rather than in headers.
@@ -229,6 +231,8 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use tonic_web::GrpcWebLayer;
     use tower::Layer;
     use ukai_proto::gateway::v1::agents_server::AgentsServer;
+    use ukai_proto::gateway::v1::commands_server::CommandsServer;
+    use ukai_proto::gateway::v1::files_server::FilesServer;
     use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
@@ -248,6 +252,8 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     )
     .add_service(web.layer(AgentsServer::new(api.clone())))
     .add_service(web.layer(PortsServer::new(api.clone())))
+    .add_service(web.layer(FilesServer::new(api.clone())))
+    .add_service(web.layer(CommandsServer::new(api.clone())))
     .add_service(web.layer(SchedulesServer::new(api)))
     .prepare()
     .into_axum_router()

@@ -3,6 +3,7 @@
 const PROTOS: &[&str] = &[
     "proto/ukai/knowledge/v1/knowledge.proto",
     "proto/ukai/gateway/v1/agents.proto",
+    "proto/ukai/gateway/v1/checkout.proto",
     "proto/ukai/gateway/v1/common.proto",
     "proto/ukai/gateway/v1/knowledge.proto",
     "proto/ukai/gateway/v1/ports.proto",

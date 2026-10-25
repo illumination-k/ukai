@@ -1,0 +1,55 @@
+// The checkout an agent works in, as the composer reaches it: its files, to
+// mention one with `@`, and running a command in it with `!`.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+
+// With the gateway's token. A workspace that is not running is
+// FAILED_PRECONDITION: listing never starts a pod.
+service Files {
+  rpc List(ListFilesRequest) returns (FileListing);
+}
+
+// With the gateway's token, which already lets its holder have the agent
+// run commands, and schedule them. A workspace that is not running is
+// FAILED_PRECONDITION: running a command never starts a pod.
+service Commands {
+  rpc Run(RunCommandRequest) returns (CommandOutput);
+}
+
+message ListFilesRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+}
+
+message FileListing {
+  // The checkout's absolute path in the pod, which `file://` URIs of its
+  // files start with.
+  string root = 1;
+  // Paths relative to `root`, `/`-separated, in order; what the checkout's
+  // ignore files exclude is left out.
+  repeated string files = 2;
+  // There were more files than a listing carries.
+  bool truncated = 3;
+}
+
+message RunCommandRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  // A shell command line, run in the checkout.
+  string command = 3;
+}
+
+message CommandOutput {
+  // Absent when the command did not exit by itself, such as on a signal or
+  // a timeout.
+  optional int32 exit_code = 1;
+  // Standard output and error as they came, the end of it when long.
+  string output = 2;
+  // The start of the output was dropped.
+  bool truncated = 3;
+  // The command ran too long and was stopped.
+  bool timed_out = 4;
+}
