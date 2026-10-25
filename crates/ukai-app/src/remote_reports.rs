@@ -3,9 +3,9 @@
 //! A gateway agent writes its reports in its pod, not here (see
 //! [`ukai_acp::reports`]), so the app cannot scan a directory for them as it
 //! does for a project. It asks the gateway instead: [`Follow`] keeps the
-//! listing of every workspace an open agent pane uses, and the sidebar, the
-//! palette, and a report pane read what it found rather than each polling on
-//! their own.
+//! listing of every workspace an open agent pane uses, and of those the
+//! sidebar shows, and the sidebar, the palette, and a report pane read what
+//! it found rather than each polling on their own.
 //!
 //! The unit is the *workspace*, not the pane: two panes sharing one
 //! (`workspace = "shared"`) see one listing, and a report stays readable
@@ -20,6 +20,7 @@ use dioxus::prelude::*;
 use ukai_acp::reports::{ReportsEndpoint, ReportsError};
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::{AgentSpec, Config};
+use ukai_core::sidebar::{self, Fold, Folds, Node};
 use ukai_core::{Layout, PaneContent, ProjectId, ReportSource};
 
 use crate::projects::AppSignals;
@@ -48,6 +49,19 @@ impl Workspace {
             workspace: workspace
                 .filter(|workspace| workspace.scope == WorkspaceScope::Pod)
                 .cloned(),
+        }
+    }
+
+    /// The gateway workspace `place` names in `project`; `None` for this
+    /// machine's checkout.
+    pub fn at(project: &ProjectId, place: &ReportSource) -> Option<Self> {
+        match place {
+            ReportSource::Project => None,
+            ReportSource::Agent { agent, workspace } => Some(Self {
+                project: project.clone(),
+                agent: agent.clone(),
+                workspace: workspace.clone(),
+            }),
         }
     }
 
@@ -194,7 +208,34 @@ pub fn workspaces(
     found
 }
 
-/// Reads the listings of the open agent panes' workspaces, over and over.
+/// What the pollers read: the workspaces of the open agent panes, then the
+/// others the sidebar shows under the projects it has open (a shared
+/// workspace is there with no pane in it, and keeps its reports).
+pub fn followed(
+    layout: &Layout,
+    configs: &HashMap<ProjectId, Result<Config, String>>,
+    folds: &Folds,
+) -> Vec<Workspace> {
+    let mut found = workspaces(layout, configs);
+    let mut projects: Vec<&ProjectId> = configs.keys().collect();
+    projects.sort();
+    for project in projects {
+        if !folds.is_open(&Fold::new(project, Node::Project)) {
+            continue;
+        }
+        let config = configs.get(project).and_then(|config| config.as_ref().ok());
+        for shown in sidebar::tree(layout, project, config).workspaces {
+            if let Some(workspace) = Workspace::at(project, &shown.place)
+                && !found.contains(&workspace)
+            {
+                found.push(workspace);
+            }
+        }
+    }
+    found
+}
+
+/// Reads the listings of the [`followed`] workspaces, over and over.
 /// Rendered once by the app; it draws nothing.
 #[component]
 pub fn Follow() -> Element {
@@ -206,7 +247,7 @@ pub fn Follow() -> Element {
             let wanted = {
                 let layout = app.layout.peek();
                 let configs = app.configs.peek();
-                workspaces(&layout, &configs)
+                followed(&layout, &configs, &app.folds.peek())
             };
             for workspace in &wanted {
                 let endpoint = endpoints.get(&app.configs.peek(), workspace);
@@ -219,7 +260,7 @@ pub fn Follow() -> Element {
                     listings.write().insert(workspace.clone(), listing);
                 }
             }
-            // Drop what no open pane works in anymore.
+            // Drop what nothing shows anymore.
             let stale = listings.peek().keys().any(|known| !wanted.contains(known));
             if stale {
                 listings.write().retain(|known, _| wanted.contains(known));
@@ -247,28 +288,6 @@ async fn read(endpoint: &ReportsEndpoint) -> Listing {
         Err(ReportsError::Gone) => Listing::NotRunning,
         Err(error) => Listing::Failed(error.to_string()),
     }
-}
-
-/// The workspaces of `project` with what each last listed, in the order
-/// [`workspaces`] found them.
-pub fn of_project(app: AppSignals, project: &ProjectId) -> Vec<(Workspace, Listing)> {
-    let wanted = {
-        let layout = app.layout.read();
-        let configs = app.configs.read();
-        workspaces(&layout, &configs)
-    };
-    let listings = app.reports.read();
-    wanted
-        .into_iter()
-        .filter(|workspace| workspace.project == *project)
-        .map(|workspace| {
-            let listing = listings
-                .get(&workspace)
-                .cloned()
-                .unwrap_or(Listing::Reports(Vec::new()));
-            (workspace, listing)
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -371,6 +390,35 @@ mod tests {
                 agent: "claude".into(),
                 workspace: own("c")
             }
+        );
+    }
+
+    #[test]
+    fn follows_the_shared_workspaces_of_open_projects_too() {
+        let mut projects = Projects::default();
+        let open = projects.add(std::path::Path::new("/work/ukai"));
+        let folded = projects.add(std::path::Path::new("/work/other"));
+        let mut layout = Layout::default();
+        let own = Some(PaneWorkspace {
+            key: "c".to_owned(),
+            scope: WorkspaceScope::Pod,
+        });
+        agent_pane(&mut layout, &folded, "claude", own.clone());
+        let configs = HashMap::from([
+            (open.clone(), config(&[("claude", gateway())])),
+            (folded.clone(), config(&[("claude", gateway())])),
+        ]);
+        let mut folds = Folds::default();
+        folds.toggle(Fold::new(&folded, Node::Project));
+
+        // A folded project's shared workspace is not looked at, but a pane's
+        // workspace is, wherever it is.
+        assert_eq!(
+            followed(&layout, &configs, &folds),
+            [
+                Workspace::of(&folded, "claude", own.as_ref()),
+                Workspace::of(&open, "claude", None),
+            ]
         );
     }
 

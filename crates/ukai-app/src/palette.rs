@@ -139,7 +139,7 @@ fn perform(app: AppSignals, paths: &Paths, action: Action) {
     let focused = layout.peek().focused();
     match action {
         Action::Focus(pane) => layout.write().focus(pane),
-        Action::Launch(project, agent) => launch_agent(app, &project, &agent),
+        Action::Launch(project, agent) => launch_agent(app, &project, &agent, None),
         Action::Report(project, path, source) => {
             if let Some(pane) = launch_target(app) {
                 open_report(app, pane, &project, path, source);

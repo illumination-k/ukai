@@ -74,17 +74,17 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate            | kind      | 役割                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`    | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                                                                                                                           |
-| `ukai-acp`       | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。エージェントの checkout のファイル一覧とコマンド実行（`checkout`）。UI に依存しない。                                                                                                                                             |
-| `ukai-core`      | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`、送った発言の呼び戻し `recall`、`@` のファイル補完 `mention`、`!` のコマンドの送り方 `shell`）。UI フレームワークに依存しない。 |
-| `ukai-voice`     | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                                                                                                                    |
-| `ukai-app`       | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                                                                                                                          |
-| `ukai-relay`     | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                                                                                                                |
-| `ukai-gateway`   | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                                                                                                                         |
-| `ukai-knowledge` | bin       | ナレッジのノートを SurrealDB に持ち、gateway にだけ gRPC（`ukai.knowledge.v1.KnowledgeStore`）で答える。                                                                                                                                                                                                                                                                                                                                                       |
-| `ukai-proto`     | lib       | 部品の間の gRPC の `.proto` と、そこから生成した message・client・server だけ。`protox` でコンパイルするのでビルドに `protoc` は要らない。ukai の型との変換は型の側（`ukai_acp::knowledge::wire`）に置く。                                                                                                                                                                                                                                                     |
+| crate            | kind      | 役割                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`    | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                                                                                                                                                           |
+| `ukai-acp`       | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。エージェントの checkout のファイル一覧とコマンド実行（`checkout`）。UI に依存しない。                                                                                                                                                                             |
+| `ukai-core`      | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`、送った発言の呼び戻し `recall`、`@` のファイル補完 `mention`、`!` のコマンドの送り方 `shell`、サイドバーの木と開閉 `sidebar`）。UI フレームワークに依存しない。 |
+| `ukai-voice`     | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                                                                                                                                                    |
+| `ukai-app`       | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `ukai-relay`     | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                                                                                                                                                |
+| `ukai-gateway`   | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                                                                                                                                                         |
+| `ukai-knowledge` | bin       | ナレッジのノートを SurrealDB に持ち、gateway にだけ gRPC（`ukai.knowledge.v1.KnowledgeStore`）で答える。                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ukai-proto`     | lib       | 部品の間の gRPC の `.proto` と、そこから生成した message・client・server だけ。`protox` でコンパイルするのでビルドに `protoc` は要らない。ukai の型との変換は型の側（`ukai_acp::knowledge::wire`）に置く。                                                                                                                                                                                                                                                                                     |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -396,7 +396,7 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
   ナレッジのツールも出ない）。テストは SDK の `kv-mem` で本物のエンジンに対して行う。
 - アプリから: `ukai.gateway.v1.Knowledge` の `List`（スコープと、説明までのノート、名前順）、`Get` /
   `Put` / `Delete` / `Revisions` / `Approve` / `Reject`。どれもエージェントの id を名指し、スコープはその
-  エージェントの `gateway.toml` での宣言で決まる。トークンは `/acp` と同じ。サイドバーの「Knowledge」に、スコープを共有する gateway エージェントをまとめて並べ、ノートの pane で Markdown
+  エージェントの `gateway.toml` での宣言で決まる。トークンは `/acp` と同じ。サイドバーの各プロジェクトの「Knowledge」に、スコープを共有する gateway エージェントをまとめて並べ、ノートの pane で Markdown
   として読み、編集し、削除する。ノートはすでにある、保存済みのノートの pane（フォーカス中、今のタブ、
   ほかのタブの順）に開き直すので、ノートを開くたびに pane は増えない。下書き（新しいノートか、保存して
   いない編集）のある pane は上書きしない。開いている pane はノートを読み直し続け、編集中に版が進んだら保存は拒否されるので、
@@ -529,7 +529,7 @@ allow_network = false # true でレポートからの外部読み込み（CDN �
   **pane ごとにプロジェクトを持つ**ので、1 つのタブに別プロジェクトのエージェントを並べられる（herdr と同じ。
   orca は worktree ごとに配置を丸ごと切り替える方式で、混在はできない）。
 - 新しい pane / タブは空で開き、プロジェクトを選んでから、その設定にあるエージェント（起動コマンド付き）を選ぶ。
-  サイドバーのエージェントをクリックすると、フォーカス中の pane が空ならそこに、そうでなければ右に分割して開く。
+  サイドバーの「+」から開くと、フォーカス中の pane が空ならそこに、そうでなければ右に分割して開く。
 - 操作: pane ヘッダの分割（右 / 下）・閉じる、タブバーの追加・閉じる。
 - **リサイズ。** split の子の間の境界（1px、掴める幅は左右 3px ずつ広い）をドラッグすると、その両隣の子の比率だけを
   動かす（`Layout::resize`。2 つの合計のうち各 5% は残す）。ダブルクリックで両隣を等分。ドラッグ中は全面の
@@ -581,10 +581,10 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 
 ### 開き方
 
-1. **サイドバー** … 選択中プロジェクトの `reports.dirs` 配下で `reports.globs` に合うファイルを新しい順に一覧
+1. **サイドバー** … 手元のワークスペースの Reports に、`reports.dirs` 配下で `reports.globs` に合うファイルを新しい順に一覧
    （`ukai_core::report::list`。隠しディレクトリは除外、最大 500 件）。表示中は 2 秒ごとに再走査する。
    クリックでフォーカス中の pane が空ならそこに、そうでなければ右に分割して開く（エージェントと同じ）。
-   その下に、開いている gateway エージェント pane のワークスペースごとの一覧を足す。
+   gateway のワークスペースの Reports には、そのワークスペースの一覧を出す（後述）。
 2. **エージェント pane** … `fs/write_text_file` で HTML / 画像が書かれたら、その行に「Open」ボタンを出す
    （手元に書かれたものなので `source = project`）。
 3. **ファイル選択** … サイドバーの Reports の「+」と空 pane の「Open report or image…」。プロジェクト外の
@@ -602,8 +602,8 @@ gateway のエージェントは Pod の中に書くので、手元を走査し�
 - **単位は pane ではなくワークスペース。** `shared` の pane は一覧を共有し、`pod` の pane はそれぞれ持つ。
   pane を閉じてもワークスペースが動いていればレポートは読めるので、`state.json` には pane ではなく
   エージェント id とワークスペースを残す。
-- `ukai-app/src/remote_reports.rs` が、開いている gateway エージェント pane のワークスペースの一覧を
-  3 秒ごとに読み直して 1 つの signal に置く。サイドバーもパレットもそれを読むので、パレットは
+- `ukai-app/src/remote_reports.rs` が、開いている gateway エージェント pane のワークスペースと、サイドバーに
+  見えているワークスペースの一覧を 3 秒ごとに読み直して 1 つの signal に置く。サイドバーもパレットもそれを読むので、パレットは
   ネットワークを待たずに開く。Pod が idle で落ちていれば、コピーがあればその一覧を「Saved <時刻> · not running」と、
   なければ「not running」と出す。
 - pane の描画は手元のレポートと同じ（IPC ハンドラのない子 WebView、`incognito`、同じ CSP）。違うのは
@@ -662,8 +662,7 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
 
 ## UI
 
-- 左: サイドバー（プロジェクトごとのエージェント一覧と接続状態、起動できるエージェント、レポート一覧、
-  gateway ワークスペースのポート一覧）。
+- 左: サイドバー（プロジェクト → ワークスペース → エージェント・レポート・ポートの木。後述）。
 - 中央: タブバーと pane 木。各 pane はヘッダ（タイトル・状態・分割/閉じるボタン）を持つ。
 - `mod+k`: パレット。開いている pane へ移動（フォーカス中のものを除く）、全プロジェクトのエージェントを開く、
   全プロジェクトのレポートと gateway ワークスペースのレポートを開く、レイアウト操作（新規タブ・分割・閉じる・プロジェクトを開く）を 1 つの
@@ -697,8 +696,47 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
 - スタイルは素の CSS + CSS 変数（ライト/ダークはOS追従）。Node ツールチェーンを持ち込まないため Tailwind は使わない。
   見た目は orca に倣う: ニュートラルな配色（主色は黒/白、面の差は前景色の数 % で付ける）、細い境界線、
   pane 同士は隙間なしで 1px の区切り線、アイコンはインライン SVG。
-- サイドバーはプロジェクトごとに、開いている agent pane を状態ドット付きで並べる（クリックでそのタブと pane に
-  フォーカス）。その下に選択中プロジェクトで起動できるエージェント。
+- **サイドバーは木（`ukai_core::sidebar`）。** プロジェクトの下に、そのエージェントが作業するワークスペースと、
+  gateway エージェントのナレッジ・スケジュールを置く。
+
+  ```
+  ▾ ukai                        + ⟳ ×
+    ▾ This machine              +
+        ● claude   idle
+        ▾ Reports               3
+        ▾ Ports
+    ▾ cloud        shared       +
+        ● cloud    working
+        ▾ Reports               2
+        ▾ Ports                 1
+    ▸ cloud        pod a1b2c3   +
+    ▸ Knowledge    ● 1 to review
+    ▸ Schedules    ● 1 failed
+  ```
+  - ワークスペースは、レポートとポートを読む先の `ReportSource` で名指す（手元の checkout が `project`、gateway の
+    ものが `agent { agent, workspace }` で、`shared` は鍵なし）。1 つの checkout のエージェント・レポート・ポートが
+    1 つのノードの下に揃う。並びは手元、既定が `shared` の gateway エージェントの共有ワークスペース（pane がなくても
+    あり、レポートのコピーも読める）、開いている pane のワークスペースの残り（pane 順）。pane の置き場所は pane の
+    `workspace` で決め、設定は見ない。手元しかないプロジェクトはワークスペースの段を省く。スケジュールの
+    ワークスペース（鍵 `schedule-<id>`）はスケジュールの名前で出す。
+  - ナレッジ（スコープはプロジェクト）とスケジュール（エージェントごと）はワークスペースのものではないので、
+    ワークスペースと並べてプロジェクト直下に置く。gateway エージェントがなければ出さない。スコープや gateway
+    エージェントが 2 つ以上なら、その下をそれぞれで分ける。
+  - agent pane の行は状態ドット付き（クリックでそのタブと pane にフォーカス）。
+  - 「+」: プロジェクトの行は、起動できるエージェント全部（gateway エージェントは `shared` と `pod` の両方。空
+    pane の選択肢と同じ）を下に広げる。ワークスペースの行は、そこで新しいセッションを開く（手元はその設定の手元の
+    エージェント、gateway のワークスペースは同じ鍵で開くので、`pod` なら同じ Pod に合流する）。手元の Reports は
+    ファイル選択、手元の Ports はポートの入力。
+  - 開閉は、既定（Knowledge と Schedules は閉、ほかは開）と違うノードだけを `state.json` の `sidebar` に残す。
+    プロジェクトを閉じるとそのぶんは消す。閉じたノードは中身を描かないが、行に Knowledge はレビュー待ちの数を、
+    Schedules は前回失敗した数か実行中を、点と一緒に出す。そのため両者の一覧はサイドバーではなくアプリ全体で、
+    全プロジェクトの gateway エージェントについて 15 秒ごとに読み直す（`FollowKnowledge` / `FollowSchedules`。
+    失敗の通知もそこで出す）。
+  - gateway のワークスペースのレポートとポートは、開いている pane のワークスペースに加えて、サイドバーで開いて
+    いるプロジェクトに見えているもの（pane のない共有ワークスペース）も読む。プレビューを開くのは pane のある
+    ワークスペースのものだけ。手元の Ports には、開いている手元のポートの browser pane を並べる。
+  - プロジェクトの行をクリックすると開閉し、そのプロジェクトを選択中にする（空 pane で最初に選ばれている
+    プロジェクト）。
 - エージェントの状態は全面（サイドバー・タブ・pane ヘッダ）で同じ語彙: 作業中は黄のスピナー、待機は緑、
   **未回答のパーミッション要求がある間はオレンジ**（`Transcript::awaiting_permission`）、エラー切断は赤、それ以外は灰。
   タブは中の pane のうち最も注意を要する状態を出す。
@@ -768,7 +806,7 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
   ものとして扱う（`shortcuts::Ime`）。macOS の WKWebView は変換確定の Enter を `compositionend` の後に
   `isComposing = false` で送るため、`isComposing` だけでは確定の Enter で送信してしまう。
 - **スケジュール。** 後述「スケジュール」の通り gateway が持って回し、アプリは編集と結果の表示だけをする。
-  サイドバーの「Schedules」に選択中のプロジェクトの gateway エージェントごとの一覧（15 秒ごとに読み直す）、
+  サイドバーの各プロジェクトの「Schedules」に gateway エージェントごとの一覧（アプリ全体で 15 秒ごとに読み直す）、
   schedule pane（`PaneContent::Schedule { project, agent, schedule }`、未保存は `schedule: None`）で名前・中身・
   cron（プリセットと次回時刻の表示）を下書きとして編集して保存、有効化、「Run now」、停止、削除する。
   run の一覧と出力の末尾も pane に出す（開いている間は 4 秒ごとに読み直す）。失敗はウィンドウが背面なら
@@ -811,7 +849,7 @@ pane の中身は `browser { project, port, path, source }`。`source` はレポ
 ### 手元のポート
 
 `http://localhost:<port><path>` をそのまま開く（`::1` だけで listen する dev server もあるので `127.0.0.1` では
-なく `localhost`）。サイドバーの「Ports」の「+」か空 pane の「Open a local port…」で `5173` や
+なく `localhost`）。サイドバーの手元の「Ports」の「+」か空 pane の「Open a local port…」で `5173` や
 `localhost:3000/docs` を打つ（`ukai_core::browser::parse_target`。手元の名前しか受けない）。
 
 ### ワークスペースのポート（トンネル）
@@ -846,8 +884,8 @@ browser pane ──▶ 127.0.0.1:<port>（ukai_acp::ports::Tunnel）
   `instructions` に伝え、`open_preview(port, path, title)` ツールを出す。記録は relay の一時ディレクトリの
   JSON Lines ファイル（relay の起動時に空にする）で、`/ports` が最新 20 件を返す。`path` はオリジンに足すだけの
   パスに限る（`ukai_acp::ports::preview_path`）。
-- アプリ（`ukai-app/src/ports.rs`）は開いている gateway エージェント pane のワークスペースの一覧を 3 秒ごとに
-  読み、サイドバーの「Ports」に出す（クリックで browser pane）。前回より新しいプレビューは、そのポートの
+- アプリ（`ukai-app/src/ports.rs`）は、レポートと同じワークスペースの一覧を 3 秒ごとに読み、サイドバーの
+  そのワークスペースの「Ports」に出す（クリックで browser pane）。pane のあるワークスペースで前回より新しいプレビューは、そのポートの
   browser pane があればそこで、なければエージェントの pane の右に開く。フォーカスは動かさない。初めて読んだ
   ワークスペースのプレビューは開かない（起動し直すたびに全部開かないため。`ukai_core::browser::new_previews`）。
 

@@ -1,7 +1,7 @@
 //! Schedules: commands and prompts a gateway agent runs on a cron pattern.
 //! The gateway keeps them and fires them, so they run while ukai is closed;
-//! the app lists them under the selected project's gateway agents, edits
-//! them in a schedule pane, and reads their runs back.
+//! the app lists every project's in the sidebar, edits them in a schedule
+//! pane, and reads their runs back.
 //!
 //! A prompt run is a session of its own in the schedule's workspace. Once it
 //! is over, or while it waits on a permission request, the user can open
@@ -20,6 +20,7 @@ use ukai_acp::schedules::{SchedulesEndpoint, SchedulesError};
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::{AgentSpec, Config};
 use ukai_core::schedule::{self, Outcome, Run, ScheduleInfo, ScheduleSpec, Task, Trigger};
+use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId};
 
 use crate::agent_pane::connect;
@@ -27,8 +28,10 @@ use crate::alert;
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::projects::AppSignals;
+use crate::remote_reports::{Endpoints, Workspace};
+use crate::sidebar::Head;
 
-/// How often the sidebar asks the gateways for their schedules.
+/// How often the app asks the gateways for their schedules.
 const LIST_EVERY: Duration = Duration::from_secs(15);
 /// How often an open schedule pane asks for its schedule and runs.
 const PANE_EVERY: Duration = Duration::from_secs(4);
@@ -75,7 +78,7 @@ fn explain(error: &SchedulesError) -> Vec<String> {
     }
 }
 
-/// Ask the sidebar and open schedule panes to read their schedules again.
+/// Ask the schedule listings and open schedule panes to read again.
 fn refresh(app: AppSignals) {
     let mut revision = app.schedule_revision;
     *revision.write() += 1;
@@ -211,113 +214,234 @@ fn state_of(info: &ScheduleInfo, now: OffsetDateTime) -> (&'static str, String) 
 }
 
 /// What one gateway agent listed.
-type Listing = (String, Result<Vec<ScheduleInfo>, String>);
+pub type Listing = (String, Result<Vec<ScheduleInfo>, String>);
 
-/// The selected project's schedules, under each of its gateway agents.
+/// What each project's gateway agents last listed, kept by
+/// [`FollowSchedules`].
+pub type ScheduleListings = Signal<HashMap<ProjectId, Vec<Listing>>>;
+
+fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<SchedulesEndpoint, String> {
+    SchedulesEndpoint::resolve(spec, ukai_acp::system_lookup)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "agent `{}` is not a gateway agent, so it keeps no schedules",
+                workspace.agent
+            )
+        })
+}
+
+/// Reads the schedules of every project's gateway agents, over and over,
+/// and announces the runs that failed meanwhile. Rendered once by the app,
+/// so the sidebar's badges and the notices go on while it is folded; it
+/// draws nothing.
 #[component]
-pub fn ScheduleList(project: ProjectId, name: String) -> Element {
+pub fn FollowSchedules() -> Element {
     let app = use_context::<AppSignals>();
-    let endpoints = use_memo({
-        let project = project.clone();
-        move || -> Vec<(String, Result<SchedulesEndpoint, String>)> {
-            let Ok(config) = config_of(app, &project) else {
-                return Vec::new();
-            };
-            gateway_agents(&config)
-                .into_iter()
-                .map(|agent| {
-                    let endpoint = endpoint(&config, &agent);
-                    (agent, endpoint)
-                })
-                .collect()
-        }
-    });
-    let mut listings = use_signal(Vec::<Listing>::new);
-    // The run each schedule last showed, so a failure is announced once.
-    let seen = use_hook(|| Rc::new(RefCell::new(HashMap::<String, i64>::new())));
-    use_future({
-        let source = name.clone();
-        move || {
+    let mut listings = app.schedules;
+    use_future(move || {
+        // A workspace is how `Endpoints` names an agent; schedules are the
+        // agent's, so it is always the shared one.
+        let endpoints = Rc::new(RefCell::new(Endpoints::new(resolve)));
+        // The run each schedule last showed, so a failure is announced once.
+        let seen = Rc::new(RefCell::new(HashMap::<String, i64>::new()));
+        poll(app.schedule_revision, LIST_EVERY, move || {
+            let endpoints = endpoints.clone();
             let seen = seen.clone();
-            let source = source.clone();
-            poll(app.schedule_revision, LIST_EVERY, move || {
-                let seen = seen.clone();
-                let source = source.clone();
-                async move {
-                    let mut fetched = Vec::new();
-                    for (agent, endpoint) in endpoints.peek().clone() {
-                        let listed = match endpoint {
+            async move {
+                let wanted = gateways(app);
+                let mut fetched = HashMap::new();
+                let mut asked = Vec::new();
+                for (project, name, agents) in wanted {
+                    let mut listed = Vec::new();
+                    for agent in agents {
+                        let workspace = Workspace::of(&project, &agent, None);
+                        let endpoint = endpoints.borrow_mut().get(&app.configs.peek(), &workspace);
+                        let list = match endpoint {
                             Ok(endpoint) => {
                                 endpoint.list().await.map_err(|error| error.to_string())
                             }
                             Err(error) => Err(error),
                         };
-                        fetched.push((agent, listed));
+                        listed.push((agent, list));
+                        asked.push(workspace);
                     }
-                    remember(app, &fetched, &mut seen.borrow_mut(), &source);
-                    if *listings.peek() != fetched {
-                        listings.set(fetched);
-                    }
+                    remember(app, &listed, &mut seen.borrow_mut(), &name);
+                    fetched.insert(project, listed);
                 }
-            })
-        }
+                endpoints.borrow_mut().keep(&asked);
+                if *listings.peek() != fetched {
+                    listings.set(fetched);
+                }
+            }
+        })
     });
+    rsx! {}
+}
+
+/// Every project with a gateway agent: its id, name, and gateway agents.
+pub(crate) fn gateways(app: AppSignals) -> Vec<(ProjectId, String, Vec<String>)> {
+    let projects = app.projects.peek();
+    let configs = app.configs.peek();
+    projects
+        .iter()
+        .filter_map(|project| {
+            let config = configs.get(&project.id)?.as_ref().ok()?;
+            let agents = gateway_agents(config);
+            (!agents.is_empty()).then(|| (project.id.clone(), project.name(), agents))
+        })
+        .collect()
+}
+
+/// What the folded node says of a project's schedules: the dot, and how
+/// many failed last time or whether one is running.
+fn summary(listings: &[Listing]) -> (Option<&'static str>, String) {
+    let infos = || {
+        listings
+            .iter()
+            .filter_map(|(_, listed)| listed.as_ref().ok())
+            .flatten()
+    };
+    let outcome = |info: &&ScheduleInfo| info.last_run.as_ref().map(|run| run.outcome.clone());
+    let failed = infos()
+        .filter(|info| matches!(outcome(info), Some(Outcome::Failed { .. })))
+        .count();
+    if failed > 0 {
+        return (Some("closed"), format!("{failed} failed"));
+    }
+    if infos().any(|info| outcome(&info) == Some(Outcome::Running)) {
+        return (Some("busy"), "running".to_owned());
+    }
+    if listings.iter().any(|(_, listed)| listed.is_err()) {
+        return (None, "unreachable".to_owned());
+    }
+    let count = infos().count();
+    (
+        None,
+        if count == 0 {
+            String::new()
+        } else {
+            count.to_string()
+        },
+    )
+}
+
+/// A project's schedules in the sidebar, under each of its gateway agents
+/// when it has several.
+#[component]
+pub fn ScheduleNode(project: ProjectId, gateways: Vec<String>, depth: u8) -> Element {
+    let app = use_context::<AppSignals>();
+    let listings = app
+        .schedules
+        .read()
+        .get(&project)
+        .cloned()
+        .unwrap_or_default();
+    let fold = Fold::new(&project, Node::Schedules);
+    let open = app.folds.read().is_open(&fold);
     let now = local_now();
-    let open = match app.layout.read().content(app.layout.read().focused()) {
+    let focused = match app.layout.read().content(app.layout.read().focused()) {
         Some(PaneContent::Schedule { schedule, .. }) => schedule.clone(),
         _ => None,
     };
-    let agents: Vec<String> = endpoints
-        .read()
-        .iter()
-        .map(|(agent, _)| agent.clone())
-        .collect();
-    let listings = listings.read().clone();
+    let (marker, meta) = summary(&listings);
+    let single = match gateways.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    };
 
     rsx! {
-        div { class: "sidebar-section",
-            div { class: "sidebar-header",
-                span { class: "section-label", "Schedules · {name}" }
-            }
-            if agents.is_empty() {
-                p { class: "muted hint",
-                    "Schedules run on a gateway agent, so they keep going while ukai is closed. This project has none."
+        Head {
+            fold,
+            depth,
+            icon: Icon::History,
+            label: "Schedules",
+            meta,
+            marker,
+            title: "Commands and prompts the gateway runs on a schedule, while ukai is closed too",
+            if let Some(agent) = single.clone() {
+                button {
+                    class: "icon",
+                    title: "New schedule on {agent}",
+                    onclick: {
+                        let project = project.clone();
+                        move |event: MouseEvent| {
+                            event.stop_propagation();
+                            open_schedule(app, &project, &agent, None);
+                        }
+                    },
+                    Svg { icon: Icon::Plus }
                 }
             }
-            for agent in agents {
-                div { key: "{agent}", class: "schedule-agent",
-                    div { class: "schedule-agent-head",
-                        span { class: "muted", "{agent}" }
-                        button {
-                            class: "icon",
-                            title: "New schedule on {agent}",
-                            onclick: {
-                                let project = project.clone();
-                                let agent = agent.clone();
-                                move |_| open_schedule(app, &project, &agent, None)
-                            },
-                            Svg { icon: Icon::Plus }
-                        }
-                    }
-                    match listings.iter().find(|(a, _)| *a == agent).map(|(_, listed)| listed.clone()) {
-                        None => rsx! {},
-                        Some(Err(error)) => rsx! {
-                            p { class: "muted hint", title: "{error}", "Cannot read schedules: {error}" }
-                        },
-                        Some(Ok(list)) if list.is_empty() => rsx! {
-                            p { class: "muted hint", "Run a command or a prompt on a schedule." }
-                        },
-                        Some(Ok(list)) => rsx! {
-                            for info in list {
-                                ScheduleRow {
-                                    key: "{info.schedule.id}",
-                                    project: project.clone(),
-                                    focused: open.as_deref() == Some(info.schedule.id.as_str()),
-                                    state: state_of(&info, now),
-                                    info,
+        }
+        if open {
+            for agent in gateways {
+                {
+                    let listed = listings
+                        .iter()
+                        .find(|(a, _)| *a == agent)
+                        .map(|(_, listed)| listed.clone());
+                    let inner = if single.is_some() { depth + 1 } else { depth + 2 };
+                    rsx! {
+                        if single.is_none() {
+                            div {
+                                key: "head-{agent}",
+                                class: "row tree-subhead",
+                                style: "--depth: {depth + 1}",
+                                span { class: "name", "{agent}" }
+                                span { class: "row-actions",
+                                    button {
+                                        class: "icon",
+                                        title: "New schedule on {agent}",
+                                        onclick: {
+                                            let project = project.clone();
+                                            let agent = agent.clone();
+                                            move |_| open_schedule(app, &project, &agent, None)
+                                        },
+                                        Svg { icon: Icon::Plus }
+                                    }
                                 }
                             }
-                        },
+                        }
+                        match listed {
+                            None => rsx! {
+                                p {
+                                    key: "none-{agent}",
+                                    class: "muted hint tree-hint",
+                                    style: "--depth: {inner}",
+                                    "Listing…"
+                                }
+                            },
+                            Some(Err(error)) => rsx! {
+                                p {
+                                    key: "error-{agent}",
+                                    class: "muted hint tree-hint",
+                                    style: "--depth: {inner}",
+                                    title: "{error}",
+                                    "Cannot read schedules: {error}"
+                                }
+                            },
+                            Some(Ok(list)) if list.is_empty() => rsx! {
+                                p {
+                                    key: "empty-{agent}",
+                                    class: "muted hint tree-hint",
+                                    style: "--depth: {inner}",
+                                    "No schedules yet."
+                                }
+                            },
+                            Some(Ok(list)) => rsx! {
+                                for info in list {
+                                    ScheduleRow {
+                                        key: "{info.schedule.id}",
+                                        project: project.clone(),
+                                        focused: focused.as_deref() == Some(info.schedule.id.as_str()),
+                                        state: state_of(&info, now),
+                                        depth: inner,
+                                        info,
+                                    }
+                                }
+                            },
+                        }
                     }
                 }
             }
@@ -331,6 +455,7 @@ fn ScheduleRow(
     info: ScheduleInfo,
     focused: bool,
     state: (&'static str, String),
+    depth: u8,
 ) -> Element {
     let app = use_context::<AppSignals>();
     let (dot, label) = state;
@@ -338,6 +463,7 @@ fn ScheduleRow(
     rsx! {
         div {
             class: if focused { "row schedule-row focused" } else { "row schedule-row" },
+            style: "--depth: {depth}",
             title: "{title} · {label}",
             onclick: move |_| {
                 open_schedule(

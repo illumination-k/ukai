@@ -17,6 +17,7 @@ pub mod review;
 pub mod schedule;
 pub mod secret;
 pub mod shell;
+pub mod sidebar;
 pub mod slash;
 pub mod state;
 mod transcript;
