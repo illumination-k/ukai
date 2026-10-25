@@ -4,6 +4,7 @@ syntax = "proto3";
 
 package ukai.gateway.v1;
 
+import "ukai/gateway/v1/common.proto";
 import "ukai/knowledge/v1/knowledge.proto";
 
 // The knowledge of a gateway agent's scope, for a person through the app,
@@ -44,11 +45,6 @@ message Listing {
   // What the notes are kept under: agents with the same scope share them.
   string scope = 1;
   repeated ukai.knowledge.v1.NoteSummary notes = 2;
-}
-
-message AgentRequest {
-  // The agent's id in `gateway.toml`.
-  string agent = 1;
 }
 
 message NoteRequest {

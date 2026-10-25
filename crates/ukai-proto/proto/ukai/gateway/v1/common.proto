@@ -1,0 +1,29 @@
+// What several of the gateway's services take.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+message AgentRequest {
+  // The agent's id in `gateway.toml`.
+  string agent = 1;
+}
+
+// Which workspace of an agent a request is about, as for its `/acp`.
+message Workspace {
+  WorkspaceScope scope = 1;
+  // The pane's key, for `WORKSPACE_SCOPE_POD`: 1-64 letters, digits, `-`,
+  // or `_`.
+  string key = 2;
+}
+
+enum WorkspaceScope {
+  // The agent's one shared workspace.
+  WORKSPACE_SCOPE_SHARED = 0;
+  // A workspace of the pane's own, by `key`.
+  WORKSPACE_SCOPE_POD = 1;
+}
+
+// Every reason a change was refused.
+message Refused {
+  repeated string problems = 1;
+}

@@ -1,0 +1,137 @@
+// Commands and prompts the gateway runs for an agent on a cron pattern. See
+// "スケジュール" in docs/design.md.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+
+// With the gateway's token. NOT_FOUND names an agent or a schedule the
+// gateway does not have.
+service Schedules {
+  // The agent's schedules, with when each fires next and how it last went.
+  rpc List(AgentRequest) returns (ListSchedulesResponse);
+  rpc Create(CreateScheduleRequest) returns (ScheduleChange);
+  rpc Get(ScheduleRequest) returns (ScheduleInfo);
+  rpc Update(UpdateScheduleRequest) returns (ScheduleChange);
+  rpc Delete(ScheduleRequest) returns (DeleteScheduleResponse);
+  // The schedule's recent runs, newest first.
+  rpc Runs(ScheduleRequest) returns (RunsResponse);
+  // Start a run now; one already going is not an error, the answer shows it.
+  rpc Run(ScheduleRequest) returns (ScheduleInfo);
+  // Stop the run going, if any.
+  rpc Stop(ScheduleRequest) returns (ScheduleInfo);
+}
+
+message ScheduleRequest {
+  string agent = 1;
+  string id = 2;
+}
+
+message CreateScheduleRequest {
+  string agent = 1;
+  ScheduleSpec spec = 2;
+}
+
+message UpdateScheduleRequest {
+  string agent = 1;
+  string id = 2;
+  ScheduleSpec spec = 3;
+}
+
+message ListSchedulesResponse {
+  repeated ScheduleInfo schedules = 1;
+}
+
+message DeleteScheduleResponse {}
+
+message RunsResponse {
+  repeated Run runs = 1;
+}
+
+// What a change came to: the schedule, or every reason it was refused.
+message ScheduleChange {
+  oneof outcome {
+    ScheduleInfo saved = 1;
+    Refused refused = 2;
+  }
+}
+
+// What a schedule runs.
+message Task {
+  oneof kind {
+    // `sh -c <it>` in the agent's checkout.
+    string command = 1;
+    // One prompt turn of the agent, in a session of its own.
+    string prompt = 2;
+  }
+}
+
+// The part of a schedule its author sets.
+message ScheduleSpec {
+  string name = 1;
+  // Five fields or an alias such as `@daily`, read at `utc_offset_minutes`.
+  string cron = 2;
+  // The author's fixed offset from UTC, e.g. 540 for JST.
+  int32 utc_offset_minutes = 3;
+  Task task = 4;
+  bool enabled = 5;
+}
+
+message Schedule {
+  string id = 1;
+  // The gateway agent it runs.
+  string agent = 2;
+  ScheduleSpec spec = 3;
+  // The `pod` workspace every run of the schedule asks for.
+  string workspace_key = 4;
+  // When the schedule was last due, fired or not, in Unix seconds.
+  int64 last_due = 5;
+}
+
+enum Trigger {
+  TRIGGER_UNSPECIFIED = 0;
+  TRIGGER_SCHEDULE = 1;
+  // "Run now".
+  TRIGGER_MANUAL = 2;
+}
+
+message Outcome {
+  oneof kind {
+    Running running = 1;
+    Succeeded succeeded = 2;
+    Failed failed = 3;
+    // Stopped by a user.
+    Stopped stopped = 4;
+    // The gateway restarted while it ran.
+    Interrupted interrupted = 5;
+  }
+
+  message Running {}
+  message Succeeded {}
+  message Failed {
+    string message = 1;
+  }
+  message Stopped {}
+  message Interrupted {}
+}
+
+message Run {
+  Trigger trigger = 1;
+  int64 started = 2;
+  optional int64 finished = 3;
+  Outcome outcome = 4;
+  // The end of the command's output, or of the agent's messages.
+  string output = 5;
+  // Whether `output` lost its beginning.
+  bool truncated = 6;
+  // The ACP session of a prompt run.
+  optional string session = 7;
+}
+
+// A schedule as listed: with when it fires next and how it last went.
+message ScheduleInfo {
+  Schedule schedule = 1;
+  optional int64 next_due = 2;
+  optional Run last_run = 3;
+}

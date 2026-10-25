@@ -126,7 +126,7 @@ Pod の中で書かれたレポートは relay の読み取り専用 HTTP から
 `initialize` 応答の `agentInfo.name` が npm のパッケージ名として読めれば registry.npmjs.org の `latest` を引き
 （5 秒で諦める）、`agentInfo.version` より新しければ `UpdateAvailable` を出して `session/new` を止める。
 UI は「再起動して更新」か「そのまま開始」（`SessionHandle::proceed`）を選ばせる。再起動は stdio ならプロセスを
-起動し直し、gateway なら `POST /agents/<id>/restart` でワークスペースの Pod を止めてつなぎ直す。新しい版が
+起動し直し、gateway なら `Agents.Restart` でワークスペースの Pod を止めてつなぎ直す。新しい版が
 入るかはエージェントのコマンド次第（`npx -y <package>@latest` なら起動のたびに取り直す）なので、再起動後も
 同じ `latest` に届かなければ聞き直さず `UpdateMissed` を出してそのまま始める。復元するセッションは他の pane が
 使っているかもしれないので確かめない。版の取得は claude-agent-acp のようにエージェント自身が npm パッケージ
@@ -208,8 +208,9 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 
 部品の間の通信: ACP は仕様どおり WebSocket（`/acp`）で、ポートのトンネル（`/forward`）はバイト列、レポートは
 web view が相対パスで素材を読むので HTTP のまま。それ以外の要求と応答の API は gRPC にしていく。型は
-`ukai-proto` の `.proto` が決める。今はナレッジ（アプリと relay → gateway の `ukai.gateway.v1`、gateway →
-`ukai-knowledge`）が gRPC で、次にスケジュール・ポートの一覧・restart を移す。アプリと gateway の間は IAP
+`ukai-proto` の `.proto` が決める。アプリと relay → gateway の `ukai.gateway.v1`（`Knowledge`・
+`WorkspaceKnowledge`・`Agents`・`Ports`・`Schedules`）と、gateway → `ukai-knowledge` が gRPC。gateway → relay
+（`/ports` など）はクラスタの中の HTTP のまま。アプリと gateway の間は IAP
 などの HTTP/1.1 の proxy を通ることがあるので、gateway は同じポートで gRPC（h2c）と gRPC-Web の両方を受け、
 gateway のクライアント（アプリと relay）は gRPC-Web で話す。gRPC-Web は、エージェントのヘッダー・TLS・
 タイムアウトを持つ既存の reqwest のクライアントの上に載せる（`ukai_acp` の `grpc`）。gateway →
@@ -276,14 +277,15 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   すでにある仕事を読むだけなので、動いている Pod がなければコピー（後述「レポートのコピー」）から答え、
   それもなければ 410 を返してクライアントにそう言わせる（イメージの pull を待たせない）。ファイル部分はエンコードされたまま relay に渡し、デコードは relay で
   1 回だけ行う。
-- ポートは `GET /agents/<id>/ports`（一覧）と `GET /agents/<id>/forward/<port>`（WebSocket）で中継する。
-  ワークスペースの決め方・トークン・Pod を起こさないことはレポートと同じ。forward はクライアントを upgrade する
+- ポートは `Ports.List`（一覧。relay の `/ports` を読んで型にして返す）と `GET /agents/<id>/forward/<port>`
+  （WebSocket）で中継する。ワークスペースの決め方・トークン・Pod を起こさないことはレポートと同じ（`Ports.List`
+  はワークスペースをヘッダーではなく要求の `Workspace` で名指し、動いていなければ FAILED_PRECONDITION）。forward はクライアントを upgrade する
   前に relay へつなぎ、relay の 502（何も listen していない）はそのまま返す。
-- スケジュール（後述「スケジュール」）を `/agents/<id>/schedules` で持ち、自分で発火する。
+- スケジュール（後述「スケジュール」）を `ukai.gateway.v1.Schedules` で持ち、自分で発火する。
 - プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を gRPC の `ukai.gateway.v1.Knowledge` と、
   Pod 向けの `WorkspaceKnowledge` で出す。持つのは `ukai-knowledge` で、gateway は誰が聞いているかを決めて取り次ぐ。
-- `POST /agents/<id>/restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
-  ワークスペースの決め方とトークンは `/acp` と同じ。サイドカーは TERM でスナップショットを取ってから終わるので、
+- `Agents.Restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
+  ワークスペース（要求の `Workspace`）とトークンは `/acp` と同じ。`Agents.List` は `gateway.toml` のエージェントの id。サイドカーは TERM でスナップショットを取ってから終わるので、
   作業ツリーは idle で止まったときと同じく残る。そのワークスペースのセッションはすべて切れる。
   エージェントの新しい版を入れる（イメージを pull し直す、`npx ...@latest` で取り直す）ためのもの。
 - 権限は namespace の Role だけ（jobs、pods と events の参照、スケジュールのコマンド用の `pods/exec`、
@@ -301,14 +303,13 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 ので、ukai を閉じていても回る（Kubernetes の CronJob ではない。発火のたびに Pod を立てると clone と
 イメージの pull を毎回待つうえ、prompt の結果のセッションを後から開けない）。
 
-- API は `/agents/<id>/schedules`（`GET` 一覧・`POST` 追加）、`/<schedule>`（`GET`・`PUT`・`DELETE`）、
-  `/<schedule>/runs`（新しい順）、`/<schedule>/run` と `/<schedule>/stop`（`POST`）。トークンは `/acp` と同じ。
-  型は `ukai_acp::schedules`（クライアント `SchedulesEndpoint` も）、判定は `ukai_core::schedule`（純粋）で、
-  両端が同じものを使う。
+- API は gRPC の `ukai.gateway.v1.Schedules`（`List`・`Create`・`Get`・`Update`・`Delete`、`Runs`（新しい順）、
+  `Run` と `Stop`）。トークンは `/acp` と同じ。型は `ukai_acp::schedules`（クライアント `SchedulesEndpoint` と、
+  wire との変換 `wire` も）、判定は `ukai_core::schedule`（純粋）で、両端が同じものを使う。
 - 中身: 名前、cron（5 フィールドか `@daily` などの別名。解析と次回時刻は `ukai_core::schedule::Cron` が `time` で行う）、作った人の UTC オフセット（保存時のもの。
   夏時間には追従しない）、タスク（`command`: エージェントのコンテナで checkout から `sh -c`、`prompt`: 専用の
   セッションで 1 ターン）、有効かどうか。問題（名前なし・cron 不正・空のコマンド / prompt・オフセット範囲外）は
-  全部集めて 422 で返す。アプリも保存前に同じ判定を出す。
+  全部集めて拒否（`ScheduleChange` の `refused`）で返す。アプリも保存前に同じ判定を出す。
 - 発火: 15 秒ごとに `Schedules::tick`。`last_due` 以降の最初の一致が過ぎていれば 1 回だけ発火する（gateway が
   止まっていた間に何回過ぎても 1 回。走っている間に来た回は飛ばす）。保存した時点から数え直すので、過去の
   時刻では発火しない。
