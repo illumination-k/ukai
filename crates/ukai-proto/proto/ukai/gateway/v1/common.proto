@@ -10,6 +10,7 @@ message AgentRequest {
 
 // Which workspace of an agent a request is about, as for its `/acp`.
 message Workspace {
+  // Refused when unspecified: a request says which workspace it means.
   WorkspaceScope scope = 1;
   // The pane's key, for `WORKSPACE_SCOPE_POD`: 1-64 letters, digits, `-`,
   // or `_`.
@@ -17,10 +18,11 @@ message Workspace {
 }
 
 enum WorkspaceScope {
+  WORKSPACE_SCOPE_UNSPECIFIED = 0;
   // The agent's one shared workspace.
-  WORKSPACE_SCOPE_SHARED = 0;
+  WORKSPACE_SCOPE_SHARED = 1;
   // A workspace of the pane's own, by `key`.
-  WORKSPACE_SCOPE_POD = 1;
+  WORKSPACE_SCOPE_POD = 2;
 }
 
 // Every reason a change was refused.

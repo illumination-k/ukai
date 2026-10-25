@@ -1,0 +1,17 @@
+# buf lints and formats the .proto files (`mise run lint:base`, `mise run
+# fmt:base`); builds compile them with protox (crates/ukai-proto/build.rs).
+version: v2
+modules:
+  - path: crates/ukai-proto/proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Both ends are ukai, in this repository: messages are shared across RPCs
+    # where the answer is the same, such as a change's typed outcome, rather
+    # than wrapped once per RPC.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    # Services are named for what they serve: `ukai.gateway.v1.Knowledge`.
+    - SERVICE_SUFFIX
