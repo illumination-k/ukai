@@ -19,6 +19,7 @@ use ukai_acp::{
 };
 use ukai_core::config::{ApplyDefaults, Setting};
 use ukai_core::keymap::{Action, Scope};
+use ukai_core::recall::{self, Recall};
 use ukai_core::report::ReportKind;
 use ukai_core::review::{self, LineKind, ReviewComment};
 use ukai_core::slash;
@@ -28,13 +29,13 @@ use ukai_core::{
 };
 
 use crate::alert;
-use crate::clipboard;
+use crate::clipboard::{self, Pasted};
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::markdown::Markdown;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::report_pane::project_relative;
-use crate::shortcuts::Shortcuts;
+use crate::shortcuts::{Shortcuts, use_ime};
 use crate::voice::{self, Dictation, DictationOwner, Voice};
 
 #[derive(Clone)]
@@ -462,6 +463,9 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
     let app = use_context::<AppSignals>();
     let shortcuts = use_context::<Shortcuts>();
     let voice = use_context::<Voice>();
+    let ime = use_ime();
+    // How far ↑ has gone back through the prompts sent.
+    let mut recall = use_signal(Recall::default);
     let Some(session) = app.sessions.read().get(&pane).cloned() else {
         return rsx! {
             div { class: "pane-body placeholder",
@@ -799,53 +803,116 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         }
                     }
                 }
-                textarea {
-                    rows: "2",
-                    placeholder: match status {
-                        Status::Idle => "Message the agent — / for commands, drop files or images here",
-                        Status::Busy if steering => "Steer the agent — your message joins this turn",
-                        Status::Busy => {
-                            "Steer the agent — sending stops this turn and sends your message"
-                        }
-                        Status::Connecting => "Connecting…",
-                        Status::Closed { .. } => "Disconnected",
-                    },
-                    disabled: !writable,
-                    value: "{draft}",
-                    oninput: move |event| {
-                        draft.set(event.value());
-                        picked.set(0);
-                        dismissed.set(false);
-                    },
-                    onkeydown: {
-                        let shortcuts = shortcuts.clone();
-                        move |event: KeyboardEvent| {
-                            if !commands.is_empty() && !event.is_composing() {
-                                let len = commands.len() as isize;
-                                match event.key() {
-                                    Key::ArrowDown => {
-                                        picked.set((current as isize + 1).rem_euclid(len) as usize);
-                                    }
-                                    Key::ArrowUp => {
-                                        picked.set((current as isize - 1).rem_euclid(len) as usize);
-                                    }
-                                    Key::Tab | Key::Enter => {
-                                        draft.set(slash::completion(&commands[current]));
-                                        picked.set(0);
-                                    }
-                                    // Not the app's: escape here only hides the list.
-                                    Key::Escape => dismissed.set(true),
-                                    _ => return,
-                                }
-                                event.prevent_default();
-                                event.stop_propagation();
-                            } else if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
-                                event.prevent_default();
-                                event.stop_propagation();
-                                send();
+                // Grows with the draft: the hidden copy after the textarea
+                // (`::after`) sizes the grid cell both share.
+                div { class: "composer-input", "data-value": "{draft}",
+                    textarea {
+                        rows: "1",
+                        placeholder: match status {
+                            Status::Idle => {
+                                "Message the agent — / for commands, ↑ for earlier messages, paste or drop files and images"
                             }
-                        }
-                    },
+                            Status::Busy if steering => "Steer the agent — your message joins this turn",
+                            Status::Busy => {
+                                "Steer the agent — sending stops this turn and sends your message"
+                            }
+                            Status::Connecting => "Connecting…",
+                            Status::Closed { .. } => "Disconnected",
+                        },
+                        disabled: !writable,
+                        value: "{draft}",
+                        oninput: move |event| {
+                            draft.set(event.value());
+                            picked.set(0);
+                            dismissed.set(false);
+                        },
+                        oncompositionend: move |_| ime.end(),
+                        onkeyup: move |_| ime.settle(),
+                        onpaste: move |event| {
+                            let Some(pasted) = clipboard::pasted() else {
+                                return;
+                            };
+                            event.prevent_default();
+                            match pasted {
+                                Pasted::Image(bytes) => {
+                                    attach(composer, transcript, Path::new("pasted-image.png"), bytes);
+                                }
+                                Pasted::Files(paths) => {
+                                    for path in paths {
+                                        spawn(async move {
+                                            let read = {
+                                                let path = path.clone();
+                                                tokio::task::spawn_blocking(move || std::fs::read(path))
+                                                    .await
+                                            };
+                                            match read {
+                                                Ok(Ok(bytes)) => attach(composer, transcript, &path, bytes),
+                                                Ok(Err(e)) => {
+                                                    error.set(Some(format!("{}: {e}", path.display())))
+                                                }
+                                                Err(e) => error.set(Some(e.to_string())),
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        },
+                        onkeydown: {
+                            let shortcuts = shortcuts.clone();
+                            move |event: KeyboardEvent| {
+                                if ime.composing(&event) {
+                                    // The input method's, so not the app's either.
+                                    event.stop_propagation();
+                                    return;
+                                }
+                                if !commands.is_empty() {
+                                    let len = commands.len() as isize;
+                                    match event.key() {
+                                        Key::ArrowDown => {
+                                            picked.set((current as isize + 1).rem_euclid(len) as usize);
+                                        }
+                                        Key::ArrowUp => {
+                                            picked.set((current as isize - 1).rem_euclid(len) as usize);
+                                        }
+                                        Key::Tab | Key::Enter => {
+                                            draft.set(slash::completion(&commands[current]));
+                                            picked.set(0);
+                                        }
+                                        // Not the app's: escape here only hides the list.
+                                        Key::Escape => dismissed.set(true),
+                                        _ => return,
+                                    }
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    return;
+                                }
+                                let recalled = match event.key() {
+                                    _ if !event.modifiers().is_empty() => None,
+                                    Key::ArrowUp => {
+                                        recall
+                                            .write()
+                                            .older(&recall::prompts(&transcript.peek()), &draft.peek())
+                                    }
+                                    Key::ArrowDown => {
+                                        recall
+                                            .write()
+                                            .newer(&recall::prompts(&transcript.peek()), &draft.peek())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(text) = recalled {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    draft.set(text);
+                                    dismissed.set(true);
+                                } else if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    send();
+                                }
+                            }
+                        },
+                    }
                 }
                 div { class: "composer-footer",
                     button {
@@ -1342,6 +1409,7 @@ const MAX_DIFF_LINES: usize = 400;
 fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
     let app = use_context::<AppSignals>();
     let shortcuts = use_context::<Shortcuts>();
+    let ime = use_ime();
     let mut editing = use_signal(|| None::<(usize, usize)>);
     let mut text = use_signal(String::new);
     let Some(mut review) = app
@@ -1446,12 +1514,16 @@ fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
                                             let _ = event.set_focus(true).await;
                                         },
                                         oninput: move |event| text.set(event.value()),
+                                        oncompositionend: move |_| ime.end(),
+                                        onkeyup: move |_| ime.settle(),
                                         onkeydown: {
                                             let path = path.clone();
                                             let line = line.clone();
                                             let shortcuts = shortcuts.clone();
                                             move |event: KeyboardEvent| {
-                                                if event.key() == Key::Escape && !event.is_composing() {
+                                                if ime.composing(&event) {
+                                                    event.stop_propagation();
+                                                } else if event.key() == Key::Escape {
                                                     // Not the app's: escape here drops the comment.
                                                     event.stop_propagation();
                                                     editing.set(None);

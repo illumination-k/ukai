@@ -65,6 +65,47 @@ impl Shortcuts {
     }
 }
 
+/// Tells the keys an input method takes from the user's own, for a text
+/// field: `event.is_composing()` alone misses the Enter that commits a
+/// composition in WebKit (the macOS web view), which ends the composition
+/// first and then sends that Enter with `isComposing` false.
+#[derive(Clone, Copy)]
+pub struct Ime {
+    /// A composition just ended; the next key may be the one that ended it.
+    ended: Signal<bool>,
+}
+
+pub fn use_ime() -> Ime {
+    Ime {
+        ended: use_signal(|| false),
+    }
+}
+
+impl Ime {
+    /// Whether the keydown `event` belongs to the input method. Ask once
+    /// per keydown: it uses up a composition's end.
+    pub fn composing(mut self, event: &KeyboardEvent) -> bool {
+        let ended = *self.ended.peek();
+        if ended {
+            self.ended.set(false);
+        }
+        event.is_composing() || ended
+    }
+
+    /// For `oncompositionend`.
+    pub fn end(mut self) {
+        self.ended.set(true);
+    }
+
+    /// For `onkeyup`: in Chromium the composition ends after the keydown
+    /// that ended it, so nothing is left to use up.
+    pub fn settle(mut self) {
+        if *self.ended.peek() {
+            self.ended.set(false);
+        }
+    }
+}
+
 /// Run the app-wide action bound to the pressed keys, if any.
 pub fn on_keydown(app: AppSignals, shortcuts: &Shortcuts, event: &KeyboardEvent) {
     if let Some(action) = shortcuts.pressed(Scope::App, event) {

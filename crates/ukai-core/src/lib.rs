@@ -10,6 +10,7 @@ mod layout;
 pub mod markdown;
 pub mod palette;
 mod project;
+pub mod recall;
 pub mod report;
 pub mod review;
 pub mod schedule;
