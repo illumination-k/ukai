@@ -1,16 +1,38 @@
 //! The lines of a file's diff, numbered on both sides, each open to a
-//! comment that goes to an agent pane's next prompt. Shared by the diffs of
-//! an agent's tool calls and the diff pane of a whole checkout.
+//! comment that goes to an agent pane's next prompt, with the agent's
+//! annotations under the lines they are about. Shared by the diffs of an
+//! agent's tool calls and the diff pane of a whole checkout.
 
 use dioxus::prelude::*;
+use ukai_acp::review::{Annotation, Author};
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::review::{DiffLine, Hunk, LineKind, ReviewComment};
 
 use crate::icons::{Icon, Svg};
+use crate::markdown::Markdown;
 use crate::shortcuts::{Shortcuts, use_ime};
+
+/// An annotation shown under line `index` of hunk `hunk`; `outdated` when
+/// that line changed since it was written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineNote {
+    pub hunk: usize,
+    pub index: usize,
+    pub annotation: Annotation,
+    pub outdated: bool,
+}
+
+/// What the user does to an annotation: reply to it (`id`, text), or
+/// resolve or reopen it (`id`, resolved).
+#[derive(Clone, Copy, PartialEq)]
+pub struct NoteActions {
+    pub reply: EventHandler<(String, String)>,
+    pub resolve: EventHandler<(String, bool)>,
+}
 
 /// The hunks of `path`, the first `max_lines` lines of them. Comments are
 /// kept in `review`, an agent pane's; with none, lines take no comments.
+/// `notes` show under their lines.
 #[component]
 pub fn DiffLines(
     path: String,
@@ -18,6 +40,8 @@ pub fn DiffLines(
     review: Option<Signal<Vec<ReviewComment>>>,
     max_lines: usize,
     placeholder: String,
+    #[props(default)] notes: Vec<LineNote>,
+    #[props(default)] actions: Option<NoteActions>,
 ) -> Element {
     let shortcuts = use_context::<Shortcuts>();
     let ime = use_ime();
@@ -72,6 +96,11 @@ pub fn DiffLines(
                     let open = editing() == Some((h, i));
                     let path = path.clone();
                     let placeholder = placeholder.clone();
+                    let here: Vec<LineNote> = notes
+                        .iter()
+                        .filter(|note| note.hunk == h && note.index == i)
+                        .cloned()
+                        .collect();
                     rsx! {
                         div { key: "{h}-{i}", class: "{class}",
                             span { class: "ln", "{old}" }
@@ -88,6 +117,14 @@ pub fn DiffLines(
                                 }
                             }
                             span { class: "code", "{marker}{line.text}" }
+                        }
+                        for note in here {
+                            AnnotationCard {
+                                key: "n-{note.annotation.id}",
+                                annotation: note.annotation,
+                                outdated: note.outdated,
+                                actions,
+                            }
                         }
                         for (index, body) in on_line {
                             div { key: "c-{h}-{i}-{index}", class: "diff-comment",
@@ -182,4 +219,141 @@ fn add_comment(
         body,
     });
     text.set(String::new());
+}
+
+/// One of the agent's annotations: its priority, tags, and remark, the
+/// thread of replies under it, and, with `actions`, a way to reply and to
+/// resolve or reopen it.
+#[component]
+pub fn AnnotationCard(
+    annotation: Annotation,
+    outdated: bool,
+    actions: Option<NoteActions>,
+) -> Element {
+    let shortcuts = use_context::<Shortcuts>();
+    let ime = use_ime();
+    let mut replying = use_signal(|| false);
+    let mut text = use_signal(String::new);
+    let id = annotation.id.clone();
+    let resolved = annotation.resolved;
+    let priority = annotation.priority.map(|p| p.name());
+    let class = match (resolved, priority) {
+        (true, _) => "annotation resolved".to_owned(),
+        (false, Some(priority)) => format!("annotation {priority}"),
+        (false, None) => "annotation".to_owned(),
+    };
+    let mut send = {
+        let id = id.clone();
+        move || {
+            let body = text.peek().trim().to_owned();
+            if let (false, Some(actions)) = (body.is_empty(), actions) {
+                actions.reply.call((id.clone(), body));
+                text.set(String::new());
+                replying.set(false);
+            }
+        }
+    };
+    let mut send_on_click = send.clone();
+
+    rsx! {
+        div { class: "{class}",
+            div { class: "annotation-head",
+                if let Some(priority) = priority {
+                    span { class: "priority {priority}", "{priority}" }
+                }
+                for tag in annotation.tags.iter() {
+                    span { key: "{tag}", class: "badge", "{tag}" }
+                }
+                if outdated {
+                    span {
+                        class: "badge outdated",
+                        title: "The line changed since this was written",
+                        "outdated"
+                    }
+                }
+                if resolved {
+                    span { class: "badge", "resolved" }
+                }
+                span { class: "spacer" }
+                span { class: "muted id", "{annotation.id}" }
+            }
+            Markdown { source: annotation.body.clone() }
+            for (index, reply) in annotation.replies.iter().enumerate() {
+                div {
+                    key: "{index}",
+                    class: if reply.by == Author::User { "annotation-reply user" } else { "annotation-reply" },
+                    span { class: "by",
+                        if reply.by == Author::User {
+                            "You"
+                        } else {
+                            "Agent"
+                        }
+                    }
+                    Markdown { source: reply.body.clone() }
+                }
+            }
+            if let Some(actions) = actions {
+                if replying() {
+                    div { class: "diff-comment-editor annotation-editor",
+                        textarea {
+                            rows: "2",
+                            placeholder: "Reply; it goes to the agent with your next message to it",
+                            value: "{text}",
+                            onmounted: move |event| async move {
+                                let _ = event.set_focus(true).await;
+                            },
+                            oninput: move |event| text.set(event.value()),
+                            oncompositionend: move |_| ime.end(),
+                            onkeyup: move |_| ime.settle(),
+                            onkeydown: move |event: KeyboardEvent| {
+                                if ime.composing(&event) {
+                                    event.stop_propagation();
+                                } else if event.key() == Key::Escape {
+                                    event.stop_propagation();
+                                    replying.set(false);
+                                } else if shortcuts.pressed(Scope::Composer, &event) == Some(Action::Send) {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    send();
+                                }
+                            },
+                        }
+                        div { class: "actions",
+                            button {
+                                class: "small outline",
+                                onclick: move |_| replying.set(false),
+                                "Cancel"
+                            }
+                            button {
+                                class: "small primary",
+                                disabled: text.read().trim().is_empty(),
+                                onclick: move |_| send_on_click(),
+                                "Reply"
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "annotation-actions",
+                        button {
+                            class: "small outline",
+                            onclick: move |_| replying.set(true),
+                            "Reply"
+                        }
+                        button {
+                            class: "small outline",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| actions.resolve.call((id.clone(), !resolved))
+                            },
+                            if resolved {
+                                "Reopen"
+                            } else {
+                                "Resolve"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

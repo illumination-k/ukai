@@ -101,6 +101,64 @@ fn reports_problem(#[case] src: &str, #[case] expected: Problem) {
     assert_eq!(problems(src), vec![expected]);
 }
 
+#[rstest]
+#[case::bad_tag(
+    "[review.tags]\nSecurity = \"auth\"",
+    vec![Problem::InvalidReviewTag("Security".into())]
+)]
+#[case::unknown_priority(
+    "[review.priorities]\np4 = \"never\"",
+    vec![Problem::UnknownPriority("p4".into())]
+)]
+#[case::empty_description(
+    "[review.tags]\nrisk = \"  \"",
+    vec![Problem::ReviewDescription("tags.risk".into(), DescriptionProblem::Empty)]
+)]
+#[case::multiline_description(
+    "[review.priorities]\np0 = \"\"\"\nbroken\nor unsafe\"\"\"",
+    vec![Problem::ReviewDescription("priorities.p0".into(), DescriptionProblem::Multiline)]
+)]
+#[case::long_description(
+    &format!("[review.tags]\nrisk = \"{}\"", "x".repeat(201)),
+    vec![Problem::ReviewDescription("tags.risk".into(), DescriptionProblem::Long)]
+)]
+#[case::invisible_description(
+    "[review.tags]\nrisk = \"risky\u{200b}\"",
+    vec![Problem::ReviewDescription("tags.risk".into(), DescriptionProblem::Invisible)]
+)]
+fn review_problem(#[case] src: &str, #[case] expected: Vec<Problem>) {
+    assert_eq!(problems(src), expected);
+}
+
+#[test]
+fn reads_the_review_vocabulary() {
+    let config = parse(
+        "[review.tags]\nsecurity = \"auth and secrets\"\n\n[review.priorities]\np0 = \"breaks prod\"",
+    );
+    let review = config.map(|c| c.review).unwrap_or_default();
+    assert_eq!(
+        review.tags.get("security").map(String::as_str),
+        Some("auth and secrets")
+    );
+    assert_eq!(
+        review.priorities.get("p0").map(String::as_str),
+        Some("breaks prod")
+    );
+}
+
+#[rstest]
+#[case::word("risk", true)]
+#[case::dashed("needs-test", true)]
+#[case::digit("p1-ish", true)]
+#[case::upper("Risk", false)]
+#[case::space("needs test", false)]
+#[case::edge_dash("-risk", false)]
+#[case::empty("", false)]
+#[case::long(&"x".repeat(33), false)]
+fn tells_a_tag(#[case] tag: &str, #[case] valid: bool) {
+    assert_eq!(is_tag(tag), valid);
+}
+
 #[test]
 fn every_problem_is_reported() {
     let src = r#"

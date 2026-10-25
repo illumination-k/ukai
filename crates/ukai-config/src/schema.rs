@@ -20,6 +20,8 @@ pub struct Config {
     pub permissions: Vec<PermissionRule>,
     #[serde(default)]
     pub reports: Reports,
+    #[serde(default)]
+    pub review: Review,
     /// Keyboard shortcuts by action name, over the defaults. Only the
     /// user-level `config.toml` may set them: they apply to the whole app.
     #[serde(default)]
@@ -140,6 +142,29 @@ pub enum Decision {
     Deny,
     Ask,
 }
+
+/// How agents annotate the checkout's diff for the user (the relay's
+/// `review_diff` tool): which tags they may use, and what each priority
+/// means here. Both go into what the agent is told, word for word.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Review {
+    /// Tag → what it marks. With none, an agent picks its own tags.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    /// `p0` to `p3` → what it means in this project, over the defaults.
+    #[serde(default)]
+    pub priorities: BTreeMap<String, String>,
+}
+
+/// The priorities an annotation may have, most pressing first.
+pub const PRIORITIES: [&str; 4] = ["p0", "p1", "p2", "p3"];
+
+/// Longest tag of `[review.tags]`.
+pub const REVIEW_TAG_MAX: usize = 32;
+
+/// Longest description in `[review]`, in characters: one line.
+pub const REVIEW_DESCRIPTION_MAX: usize = 200;
 
 /// Agent-written files a pane can show: HTML reports and images.
 #[derive(Debug, Clone, PartialEq, Deserialize)]

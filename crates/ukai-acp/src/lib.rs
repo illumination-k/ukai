@@ -23,6 +23,7 @@ mod grpc;
 pub mod knowledge;
 pub mod ports;
 pub mod reports;
+pub mod review;
 pub mod schedules;
 mod secrets;
 mod session;

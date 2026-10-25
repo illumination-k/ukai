@@ -13,6 +13,7 @@ use ukai_acp::checkout::{
     CheckoutDiff, CommandOutput, DiffBase, FileListing, RUN_TIMEOUT, RunRequest,
 };
 use ukai_acp::ports::PortListing;
+use ukai_acp::review::{AnnotateRequest, Review};
 use ukai_core::schedule::{ScheduleInfo, ScheduleSpec, Trigger};
 use ukai_proto::gateway::v1 as gw;
 use ukai_proto::gateway::v1::schedule_change::Outcome as Change;
@@ -198,6 +199,46 @@ impl gw::files_server::Files for Api {
             .await
             .map_err(unavailable)?;
         Ok(Response::new(diff.into()))
+    }
+
+    async fn annotate(
+        &self,
+        request: Request<gw::AnnotateRequest>,
+    ) -> Result<Response<gw::Review>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let unavailable = |error: reqwest::Error| {
+            tracing::warn!(agent = %request.agent, %error, "cannot answer the agent's review");
+            Status::unavailable("cannot answer the agent's review")
+        };
+        let response = self
+            .gateway
+            .http
+            .post(relay.review_url())
+            .bearer_auth(&relay.token)
+            .json(&AnnotateRequest {
+                id: request.id.clone(),
+                reply: request.reply.clone(),
+                resolved: request.resolved,
+            })
+            .timeout(LIST_TIMEOUT)
+            .send()
+            .await
+            .map_err(unavailable)?;
+        // What the relay says is wrong goes back as it is.
+        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let problem = response.text().await.map_err(unavailable)?;
+            return Err(Status::aborted(problem));
+        }
+        let review = response
+            .error_for_status()
+            .map_err(unavailable)?
+            .json::<Review>()
+            .await
+            .map_err(unavailable)?;
+        Ok(Response::new(review.into()))
     }
 }
 

@@ -74,17 +74,17 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate            | kind      | 役割                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`    | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ukai-acp`       | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。エージェントの checkout のファイル一覧・コマンド実行・差分（`checkout`）。UI に依存しない。                                                                                                                                                                                                     |
-| `ukai-core`      | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`、送った発言の呼び戻し `recall`、`@` のファイル補完 `mention`、`!` のコマンドの送り方 `shell`、`git diff` の読み取り `diff`、サイドバーの木と開閉 `sidebar`）。UI フレームワークに依存しない。 |
-| `ukai-voice`     | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                                                                                                                                                                                  |
-| `ukai-app`       | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `ukai-relay`     | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                                                                                                                                                                              |
-| `ukai-gateway`   | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                                                                                                                                                                                       |
-| `ukai-knowledge` | bin       | ナレッジのノートを SurrealDB に持ち、gateway にだけ gRPC（`ukai.knowledge.v1.KnowledgeStore`）で答える。                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `ukai-proto`     | lib       | 部品の間の gRPC の `.proto` と、そこから生成した message・client・server だけ。`protox` でコンパイルするのでビルドに `protoc` は要らない。ukai の型との変換は型の側（`ukai_acp::knowledge::wire`）に置く。                                                                                                                                                                                                                                                                                                                   |
+| crate            | kind      | 役割                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`    | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `ukai-acp`       | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。エージェントの checkout のファイル一覧・コマンド実行・差分（`checkout`）とそのレビュー（`review`）。UI に依存しない。                                                                                                                                                                                                                      |
+| `ukai-core`      | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`、送った発言の呼び戻し `recall`、`@` のファイル補完 `mention`、`!` のコマンドの送り方 `shell`、`git diff` の読み取り `diff`、エージェントのレビューの規則 `annotation`、サイドバーの木と開閉 `sidebar`）。UI フレームワークに依存しない。 |
+| `ukai-voice`     | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ukai-app`       | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `ukai-relay`     | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `ukai-gateway`   | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `ukai-knowledge` | bin       | ナレッジのノートを SurrealDB に持ち、gateway にだけ gRPC（`ukai.knowledge.v1.KnowledgeStore`）で答える。                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ukai-proto`     | lib       | 部品の間の gRPC の `.proto` と、そこから生成した message・client・server だけ。`protox` でコンパイルするのでビルドに `protoc` は要らない。ukai の型との変換は型の側（`ukai_acp::knowledge::wire`）に置く。                                                                                                                                                                                                                                                                                                                                                              |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -257,6 +257,10 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
 - 同じく `/ports` で Pod の中で listen しているポートとエージェントが頼んだプレビューを、`/forward/<port>` で
   そのポートへの TCP 接続 1 本を WebSocket で出す（`ports`。後述「ブラウザ pane とポート」）。MCP サーバーには
   `--previews <ファイル>` を渡し、`open_preview` ツールが頼んだプレビューをそのファイルに記録する。
+- 同じく MCP サーバーに `--review <ファイル>` を渡し、エージェントが自分の変更をレビューするツール
+  （`review_diff` / `reply_annotation` / `read_review`。後述「checkout の差分」）がそのファイルにレビューを置く
+  （`review`。relay の一時ディレクトリで、Pod と同じだけ持つ。書き込みは丸ごと置き換え）。`GET /diff` は
+  差分にそれを添え、`POST /review` はユーザーの返信と解決を受ける（拒否は 422 と、問題を 1 行ずつ）。
 - 同じく `GET /files` で checkout のファイルの一覧を、`POST /run` でユーザーのコマンドを checkout で実行した
   結果を、`GET /diff?base=branch|uncommitted` で checkout の差分を出す（`checkout`。後述「`@` と `!`」
   「checkout の差分」）。中身は `ukai_acp::checkout` の `list_files` / `run` / `diff` で、手元のエージェントで
@@ -286,8 +290,9 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   はワークスペースをヘッダーではなく要求の `Workspace` で名指し、動いていなければ FAILED_PRECONDITION）。forward はクライアントを upgrade する
   前に relay へつなぎ、relay の 502（何も listen していない）はそのまま返す。
 - checkout のファイル一覧・差分とユーザーのコマンドを `Files.List`・`Files.Diff`・`Commands.Run` で中継する
-  （relay の `/files`・`/diff`・`/run`。後述「`@` と `!`」「checkout の差分」）。relay の 422 は ABORTED にして
-  理由をそのまま返す。ワークスペースの名指しとトークン、Pod を起こさないこと（FAILED_PRECONDITION）は
+  （relay の `/files`・`/diff`・`/run`。後述「`@` と `!`」「checkout の差分」）。エージェントのレビューへの
+  ユーザーの返信と解決は `Files.Annotate`（relay の `POST /review`）。relay の 422 は ABORTED にして理由を
+  そのまま返す。ワークスペースの名指しとトークン、Pod を起こさないこと（FAILED_PRECONDITION）は
   `Ports.List` と同じ。`Commands.Run` を許すトークンは、エージェントに prompt でコマンドを走らせることも
   スケジュールでコマンドを登録することもすでにできるので、できることは増えない。
 - スケジュール（後述「スケジュール」）を `ukai.gateway.v1.Schedules` で持ち、自分で発火する。
@@ -514,7 +519,17 @@ globs = [
   "**/*.html",
 ] # 既定は HTML と画像（html, htm, svg, png, jpg, jpeg, gif, webp）
 allow_network = false # true でレポートからの外部読み込み（CDN の JS など）を許す
+
+# ---- エージェントのレビュー（gateway のエージェントが差分に付ける注釈） --------
+[review.tags] # 宣言するとこのタグだけを受ける。説明はエージェントへの instructions にそのまま入る
+security = "認証・認可・秘密情報に触る変更"
+question = "決める前にユーザーに聞きたいこと"
+
+[review.priorities] # p0〜p3 の意味をプロジェクトごとに。書かなければ既定の意味
+p0 = "マージ不可（壊れる・危ない）"
 ```
+
+`[review]` の説明は 1 行 200 文字まで、見えない文字は不可。タグは小文字・数字・`-` の 32 文字まで。
 
 環境変数 `UKAI_REPORT_DIRS`（`PATH` と同じ区切り、プロジェクトルート相対）があれば、そのディレクトリを
 `reports.dirs` に足す（`ukai_config::load_layered`。外に出る指定は同じく検証エラー）。`ukai.toml` を持たない
@@ -770,9 +785,25 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
   - 行へのコメントはツール呼び出しの差分と同じ部品（`diff_view::DiffLines`）で付け、同じワークスペースで作業する
     agent pane（2 つ以上なら選ぶ）の入力欄に溜まって、そこから次の送信で送る。agent pane がなければ
     コメントは付けられない。
-  - 予定: エージェントが差分に注釈（要約と、行ごとの説明・優先度 `p0`〜`p3`・タグ）を付ける relay の MCP ツール
-    `review_diff`、注釈への返信と解決。タグと優先度の意味はプロジェクトの `ukai.toml` の `[review]` に書き、relay は
-    Pod の checkout のそれを読む（reports と同じ）。
+  - **エージェントのレビュー（gateway のエージェント）。** relay の MCP サーバーの `review_diff` で、エージェントは
+    変更全体の要約と、差分の行（ファイルの今の行番号。範囲は `end_line`、省けばファイル全体）への注釈
+    （Markdown、優先度 `p0`〜`p3`、タグ）を書く。型は `ukai_acp::review`、何を書けるか・置き換え方・スレッド・
+    差分のどこに出すかは `ukai_core::annotation`（relay とアプリで共有）。
+    - MCP の `instructions` で、ファイルを変えたターンの終わりに要約と注釈（危ないところ、ユーザーが知るべき・
+      決めるべきこと、未解決の問い、テストしていないこと）を書くよう頼む。差分を見ればわかることは書かせない。
+    - 書き直すと前の注釈は置き換わるが、ユーザーが返信したもの（スレッドのあるもの）は解決されるまで残る。id
+      （`a1`、`a2`…）は使い回さない。注釈は書いた時点のその行の文字を持ち、差分のその行が変わっていたら
+      `outdated` と出す。差分にない行への注釈はファイルの上に出す。
+    - 要約は差分の上、注釈は該当行の下に出し、優先度・タグ・解決済みかで絞る。ファイル一覧には開いている注釈の
+      数を、最も高い優先度の色で出す。
+    - 注釈への返信は、そのスレッドに残る（`Files.Annotate`）と同時に、注釈の id を添えたコメントとして送り先の
+      agent pane の入力欄に溜まり、次の送信でエージェントに届く。エージェントは `reply_annotation` で
+      スレッドに答え、片づいたら解決する。ユーザーも解決・再開できる。
+    - 書けるもの（ほかは全部集めて拒否）: 要約は 16 KiB、注釈は 100 件・本文 8 KiB・タグ 4 つまで、パスは
+      checkout の中の相対パス、見えない文字は不可。タグと優先度の意味はプロジェクトの `ukai.toml` の
+      `[review]` で決め（後述）、relay は Pod の checkout のそれを読む（reports と同じ）。`[review.tags]` を
+      宣言したらそのタグだけを受ける。
+    - 手元のエージェントには relay の MCP サーバーが付かないので、まだ書けない。
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと貼り付け、📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。貼り付けはクリップボードを `arboard` で読み、Finder などでコピーしたファイルか、文字を伴わない
   画像（スクリーンショット）を PNG にして添える。文字があれば web view の通常の貼り付けに任せる。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には

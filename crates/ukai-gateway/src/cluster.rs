@@ -18,6 +18,7 @@ use kube::{Client, Config};
 
 use ukai_acp::checkout::{DIFF_PATH, DiffBase, FILES_PATH, RUN_PATH};
 use ukai_acp::ports::{FORWARD_PATH, PORTS_PATH};
+use ukai_acp::review::REVIEW_PATH;
 
 use crate::job::{
     AGENT_CONTAINER, GIT_ANNOTATION, KNOWLEDGE_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT,
@@ -399,6 +400,11 @@ impl RelayEndpoint {
     /// Where a command is run in the pod's checkout.
     pub fn run_url(&self) -> String {
         format!("http://{}{RUN_PATH}", self.address)
+    }
+
+    /// Where the user's replies to the agent's review are taken.
+    pub fn review_url(&self) -> String {
+        format!("http://{}{REVIEW_PATH}", self.address)
     }
 
     /// The changes of the pod's checkout since `base`.

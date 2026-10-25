@@ -14,6 +14,10 @@ service Files {
   // wrong when there are none to show, as in a checkout that is not a git
   // repository.
   rpc Diff(DiffRequest) returns (CheckoutDiff);
+  // The user's reply to an annotation of the agent's review, or resolving
+  // or reopening it; answered with the review as it is now. ABORTED with
+  // what is wrong when it is refused.
+  rpc Annotate(AnnotateRequest) returns (Review);
 }
 
 // With the gateway's token, which already lets its holder have the agent
@@ -80,4 +84,61 @@ message CheckoutDiff {
   string patch = 2;
   // The patch was cut short, or untracked files were left out.
   bool truncated = 3;
+  // What the agent says of these changes, when it has said anything.
+  optional Review review = 4;
+}
+
+// An agent's review of a checkout's changes: a summary, and annotations on
+// lines of the diff.
+message Review {
+  // Markdown.
+  string summary = 1;
+  repeated Annotation annotations = 2;
+  // When it last changed, in seconds since the epoch.
+  int64 updated = 3;
+}
+
+enum Priority {
+  PRIORITY_NONE = 0;
+  PRIORITY_P0 = 1;
+  PRIORITY_P1 = 2;
+  PRIORITY_P2 = 3;
+  PRIORITY_P3 = 4;
+}
+
+message Annotation {
+  string id = 1;
+  // Relative to the checkout's root.
+  string path = 2;
+  // The line on the new side; absent for the file as a whole.
+  optional uint32 line = 3;
+  // The last line of a range starting at `line`.
+  optional uint32 end_line = 4;
+  Priority priority = 5;
+  repeated string tags = 6;
+  // Markdown.
+  string body = 7;
+  // The text of the line it is shown at when it was written.
+  string anchor = 8;
+  bool resolved = 9;
+  repeated Reply replies = 10;
+}
+
+enum Author {
+  AUTHOR_AGENT = 0;
+  AUTHOR_USER = 1;
+}
+
+message Reply {
+  Author by = 1;
+  string body = 2;
+  int64 at = 3;
+}
+
+message AnnotateRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  string id = 3;
+  optional string reply = 4;
+  optional bool resolved = 5;
 }

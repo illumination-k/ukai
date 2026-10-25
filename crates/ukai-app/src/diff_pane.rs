@@ -4,19 +4,28 @@
 //! branch, or from `HEAD`. Its lines take comments like the diffs of an
 //! agent's tool calls, and they go to an agent pane working in the same
 //! checkout, with its next prompt.
+//!
+//! A gateway agent may have reviewed its changes ([`ukai_acp::review`]): its
+//! summary shows above the diff, and its annotations under the lines they
+//! are about, filtered by priority, tag, and whether they are resolved. A
+//! reply goes into the annotation's thread and, as a comment naming it, to
+//! the agent with the next prompt, so the agent answers there.
 
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use ukai_acp::checkout::{CheckoutDiff, DiffBase};
+use ukai_acp::review::{AnnotateRequest, Annotation, Priority, Review};
 use ukai_acp::{Checkout, PaneWorkspace, WorkspaceScope};
+use ukai_core::annotation::{self, Filter, Placement};
 use ukai_core::diff::{self, ChangeKind, FileChange};
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource, sidebar};
 
 use crate::agent_pane::review_of;
-use crate::diff_view::DiffLines;
+use crate::diff_view::{AnnotationCard, DiffLines, LineNote, NoteActions};
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
+use crate::markdown::Markdown;
 use crate::projects::{AppSignals, project_context};
 use crate::schedules::poll;
 
@@ -143,6 +152,9 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
             *revision.write() += 1;
         }
     };
+    let mut filter = use_signal(Filter::default);
+    let mut summary_open = use_signal(|| true);
+    let mut problem = use_signal(|| None::<String>);
 
     // The agent panes working in this checkout, which comments can go to.
     let agents = {
@@ -161,8 +173,9 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
     let target = chosen()
         .filter(|pane| agents.iter().any(|agent| agent.pane == *pane))
         .or_else(|| agents.first().map(|agent| agent.pane));
-    let review = target.and_then(|pane| review_of(app, pane));
-    let pending = review.map_or(0, |review| review.read().len());
+    // Where comments on lines wait for the target's next prompt.
+    let comments = target.and_then(|pane| review_of(app, pane));
+    let pending = comments.map_or(0, |comments| comments.read().len());
     let target_name = target
         .and_then(|pane| agents.iter().find(|agent| agent.pane == pane))
         .map(|agent| agent.agent.clone());
@@ -180,6 +193,95 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
         .as_ref()
         .and_then(|path| files.iter().find(|file| file.path == *path))
         .cloned();
+    let agent_review: Option<Review> = match &current {
+        Read::Loaded { diff, .. } => diff.review.clone(),
+        _ => None,
+    };
+
+    // Reply to an annotation: in its thread, and to the agent with its next
+    // prompt, naming the annotation.
+    let reply = use_callback({
+        let project = project.clone();
+        let place = place.clone();
+        move |(id, body): (String, String)| {
+            let annotation = annotation_of(&read.peek(), &id);
+            if let (Some(mut comments), Some(annotation)) = (comments, annotation) {
+                comments
+                    .write()
+                    .push(annotation::reply_comment(&annotation, &body));
+            }
+            annotate(
+                app,
+                &project,
+                &place,
+                read,
+                problem,
+                AnnotateRequest {
+                    id,
+                    reply: Some(body),
+                    resolved: None,
+                },
+            );
+        }
+    });
+    let resolve = use_callback({
+        let project = project.clone();
+        let place = place.clone();
+        move |(id, resolved): (String, bool)| {
+            annotate(
+                app,
+                &project,
+                &place,
+                read,
+                problem,
+                AnnotateRequest {
+                    id,
+                    reply: None,
+                    resolved: Some(resolved),
+                },
+            );
+        }
+    });
+    let actions = NoteActions { reply, resolve };
+    let shown_filter = filter();
+    // The file's annotations the filter lets through: above its diff, or
+    // under their lines.
+    let (above, notes) = match (&agent_review, &file) {
+        (Some(review), Some(file)) => {
+            let mut above = Vec::new();
+            let mut notes = Vec::new();
+            for annotation in review
+                .annotations
+                .iter()
+                .filter(|a| a.path == file.path && shown_filter.shows(a))
+            {
+                match annotation::place(annotation, file) {
+                    Placement::Line {
+                        hunk,
+                        index,
+                        outdated,
+                    } => notes.push(LineNote {
+                        hunk,
+                        index,
+                        annotation: annotation.clone(),
+                        outdated,
+                    }),
+                    Placement::File => above.push((annotation.clone(), false)),
+                    Placement::Outside => above.push((annotation.clone(), true)),
+                }
+            }
+            (above, notes)
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    // Annotations on files this diff does not show.
+    let elsewhere = agent_review.as_ref().map_or(0, |review| {
+        review
+            .annotations
+            .iter()
+            .filter(|a| !a.resolved && !files.iter().any(|f| f.path == a.path))
+            .count()
+    });
 
     rsx! {
         div { class: "pane-body diff-pane",
@@ -265,6 +367,87 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
                     "The changes are too large to show in full; what is left out is at the end."
                 }
             }
+            if let Some(why) = problem() {
+                div { class: "config-error diff-hint review-problem",
+                    span { "{why}" }
+                    button {
+                        class: "icon",
+                        title: "Dismiss",
+                        onclick: move |_| problem.set(None),
+                        Svg { icon: Icon::Close, size: 11 }
+                    }
+                }
+            }
+            if let Some(review) = agent_review.clone() {
+                {
+                    let (counts, plain) = annotation::open_counts(&review);
+                    let tags = annotation::tags(&review);
+                    rsx! {
+                        div { class: "review-bar",
+                            div { class: "review-head",
+                                button {
+                                    class: if summary_open() { "fold open" } else { "fold" },
+                                    title: "Show or hide the summary",
+                                    onclick: move |_| summary_open.toggle(),
+                                    Svg { icon: Icon::Chevron, size: 10 }
+                                }
+                                span { class: "review-title", "Agent's review" }
+                                for (priority, count) in counts {
+                                    button {
+                                        key: "{priority.name()}",
+                                        class: if shown_filter.priorities.contains(&priority) { "chip priority {priority.name()} active" } else { "chip priority {priority.name()}" },
+                                        title: "Show only {priority.name()}, with the others chosen",
+                                        onclick: move |_| filter.write().toggle(priority),
+                                        "{priority.name()} {count}"
+                                    }
+                                }
+                                if plain > 0 {
+                                    span { class: "muted chip-note", "{plain} remarks" }
+                                }
+                                for tag in tags {
+                                    button {
+                                        key: "tag-{tag}",
+                                        class: if shown_filter.tag.as_deref() == Some(tag.as_str()) { "chip active" } else { "chip" },
+                                        onclick: {
+                                            let tag = tag.clone();
+                                            move |_| {
+                                                let mut filter = filter.write();
+                                                filter.tag = if filter.tag.as_deref() == Some(tag.as_str()) {
+                                                    None
+                                                } else {
+                                                    Some(tag.clone())
+                                                };
+                                            }
+                                        },
+                                        "#{tag}"
+                                    }
+                                }
+                                button {
+                                    class: if shown_filter.resolved { "chip active" } else { "chip" },
+                                    title: "Show resolved annotations too",
+                                    onclick: move |_| {
+                                        let mut filter = filter.write();
+                                        filter.resolved = !filter.resolved;
+                                    },
+                                    "resolved"
+                                }
+                                if elsewhere > 0 {
+                                    span {
+                                        class: "muted chip-note",
+                                        title: "Annotations on files this diff does not show; try the other base",
+                                        "{elsewhere} on files not shown"
+                                    }
+                                }
+                            }
+                            if summary_open() && !review.summary.is_empty() {
+                                div { class: "review-summary",
+                                    Markdown { source: review.summary.clone() }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             match current {
                 Read::Loading => rsx! {
                     p { class: "muted hint diff-hint", "Reading the changes…" }
@@ -281,6 +464,9 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
                             for changed in files.iter().cloned() {
                                 FileRow {
                                     key: "{changed.path}",
+                                    mark: agent_review
+                                        .as_ref()
+                                        .and_then(|review| annotation::file_mark(review, &changed.path)),
                                     selected: shown.as_deref() == Some(changed.path.as_str()),
                                     on_select: move |path| selected.set(Some(path)),
                                     file: changed,
@@ -296,6 +482,20 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
                                     }
                                     span { class: "badge", "{kind_label(&file.kind)}" }
                                 }
+                                for (note, outside) in above {
+                                    div { key: "above-{note.id}", class: "annotation-above",
+                                        if outside {
+                                            div { class: "muted annotation-where",
+                                                "Line {note.shown_at().unwrap_or_default()}, not in this diff"
+                                            }
+                                        }
+                                        AnnotationCard {
+                                            annotation: note,
+                                            outdated: false,
+                                            actions: Some(actions),
+                                        }
+                                    }
+                                }
                                 if file.binary {
                                     div { class: "diff-gap", "Binary or too large; its lines are not shown." }
                                 } else if file.hunks.is_empty() {
@@ -304,12 +504,14 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
                                     DiffLines {
                                         path: file.path.clone(),
                                         hunks: file.hunks.clone(),
-                                        review,
+                                        review: comments,
                                         max_lines: MAX_FILE_LINES,
                                         placeholder: match &target_name {
                                             Some(name) => format!("Comment for {name}; sent with your next message to it"),
                                             None => String::new(),
                                         },
+                                        notes,
+                                        actions: Some(actions),
                                     }
                                 }
                             }
@@ -330,9 +532,58 @@ fn kind_label(kind: &ChangeKind) -> &'static str {
     }
 }
 
-/// One changed file in the list: its kind, name, folder, and line counts.
+/// The annotation `id` of the review last read.
+fn annotation_of(read: &Read, id: &str) -> Option<Annotation> {
+    let Read::Loaded { diff, .. } = read else {
+        return None;
+    };
+    diff.review
+        .as_ref()?
+        .annotations
+        .iter()
+        .find(|annotation| annotation.id == id)
+        .cloned()
+}
+
+/// Send the user's `request` about an annotation to the checkout's relay,
+/// and show the review as it then is, or why it was refused.
+fn annotate(
+    app: AppSignals,
+    project: &ProjectId,
+    place: &ReportSource,
+    mut read: Signal<Read>,
+    mut problem: Signal<Option<String>>,
+    request: AnnotateRequest,
+) {
+    let checkout = match checkout_at(app, project, place) {
+        Ok(checkout) => checkout,
+        Err(why) => {
+            problem.set(Some(why));
+            return;
+        }
+    };
+    spawn(async move {
+        match checkout.annotate(request).await {
+            Ok(review) => {
+                problem.set(None);
+                if let Read::Loaded { diff, .. } = &mut *read.write() {
+                    diff.review = Some(review);
+                }
+            }
+            Err(error) => problem.set(Some(error.to_string())),
+        }
+    });
+}
+
+/// One changed file in the list: its kind, name, folder, line counts, and
+/// the open annotations on it, by the most pressing priority.
 #[component]
-fn FileRow(file: FileChange, selected: bool, on_select: EventHandler<String>) -> Element {
+fn FileRow(
+    file: FileChange,
+    selected: bool,
+    on_select: EventHandler<String>,
+    mark: Option<(Option<Priority>, usize)>,
+) -> Element {
     let (added, removed) = file.stats();
     let (dir, name) = match file.path.rsplit_once('/') {
         Some((dir, name)) => (dir.to_owned(), name.to_owned()),
@@ -348,6 +599,13 @@ fn FileRow(file: FileChange, selected: bool, on_select: EventHandler<String>) ->
             span { class: "kind {letter}", "{letter}" }
             span { class: "name", "{name}" }
             span { class: "dir", "{dir}" }
+            if let Some((priority, count)) = mark {
+                span {
+                    class: "note-mark {priority.map_or(\"plain\", Priority::name)}",
+                    title: "Open annotations",
+                    "{count}"
+                }
+            }
             span { class: "counts",
                 if added > 0 {
                     span { class: "added", "+{added}" }

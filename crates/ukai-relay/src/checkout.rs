@@ -11,8 +11,9 @@
 //!   ([`ukai_acp::checkout::run`]). It runs as the agent does, with nothing
 //!   the agent could not do itself.
 //! - `GET /diff?base=branch|uncommitted` … the checkout's changes
-//!   ([`ukai_acp::checkout::diff`]); 422 with what is wrong when there are
-//!   none to show, as in a checkout that is not a git repository.
+//!   ([`ukai_acp::checkout::diff`]), with the agent's review of them when it
+//!   wrote one (`crate::review`); 422 with what is wrong when there are none
+//!   to show, as in a checkout that is not a git repository.
 //!
 //! Both want the relay's token, like everything but `/health`.
 
@@ -25,20 +26,22 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ukai_acp::checkout::{self, DIFF_PATH, DiffQuery, FILES_PATH, RUN_PATH, RunRequest};
 
-/// The relay's working directory: the checkout the agent works in.
+/// The relay's working directory: the checkout the agent works in, and the
+/// file the agent's review of it is kept in.
 #[derive(Debug, Clone)]
-struct Root(PathBuf);
+struct Root(PathBuf, PathBuf);
 
-/// `GET /files`, `POST /run`, and `GET /diff` for the checkout at `root`.
-pub fn router(root: PathBuf) -> Router {
+/// `GET /files`, `POST /run`, and `GET /diff` for the checkout at `root`,
+/// whose review is kept in `review`.
+pub fn router(root: PathBuf, review: PathBuf) -> Router {
     Router::new()
         .route(FILES_PATH, get(files))
         .route(RUN_PATH, post(run))
         .route(DIFF_PATH, get(diff))
-        .with_state(Root(root))
+        .with_state(Root(root, review))
 }
 
-async fn files(State(Root(root)): State<Root>) -> Response {
+async fn files(State(Root(root, _)): State<Root>) -> Response {
     match tokio::task::spawn_blocking(move || checkout::list_files(&root)).await {
         Ok(listing) => Json(listing).into_response(),
         Err(error) => {
@@ -48,14 +51,17 @@ async fn files(State(Root(root)): State<Root>) -> Response {
     }
 }
 
-async fn diff(State(Root(root)): State<Root>, Query(query): Query<DiffQuery>) -> Response {
+async fn diff(State(Root(root, review)): State<Root>, Query(query): Query<DiffQuery>) -> Response {
     match checkout::diff(&root, query.base).await {
-        Ok(diff) => Json(diff).into_response(),
+        Ok(mut diff) => {
+            diff.review = crate::review::load(&review);
+            Json(diff).into_response()
+        }
         Err(problem) => (StatusCode::UNPROCESSABLE_ENTITY, problem).into_response(),
     }
 }
 
-async fn run(State(Root(root)): State<Root>, Json(request): Json<RunRequest>) -> Response {
+async fn run(State(Root(root, _)): State<Root>, Json(request): Json<RunRequest>) -> Response {
     tracing::info!("running a command for the user");
     match checkout::run(&root, &request.command).await {
         Ok(output) => Json(output).into_response(),
@@ -83,7 +89,7 @@ mod tests {
     }
 
     async fn send(root: &tempfile::TempDir, request: Request<Body>) -> (StatusCode, Vec<u8>) {
-        let response = router(root.path().to_owned())
+        let response = router(root.path().to_owned(), root.path().join("review.json"))
             .oneshot(request)
             .await
             .unwrap_or_else(|e| panic!("request: {e}"));

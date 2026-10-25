@@ -86,6 +86,9 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // reports; the MCP server records the ones it asks the user to look
     // at in `previews`. See `crate::ports`.
     let previews = previews_file();
+    // The agent's review of its changes, written through the MCP server
+    // and read with the diff; see `crate::review`.
+    let review = previews.with_file_name("review.json");
     let token = options.token.clone().map(Arc::<str>::from);
     let router = server
         .into_router()
@@ -94,7 +97,9 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         ))
         .merge(crate::checkout::router(
             cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+            review.clone(),
         ))
+        .merge(crate::review::router(review.clone()))
         .merge(crate::ports::router(crate::ports::Ports {
             own: options.listen.port(),
             previews: previews.clone(),
@@ -155,6 +160,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 root,
                 gateway.as_ref(),
                 Some(&previews),
+                Some(&review),
             )]
         }
         (_, Err(error)) => {

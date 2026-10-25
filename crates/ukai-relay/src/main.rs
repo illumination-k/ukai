@@ -3,7 +3,7 @@
 //! that outlive client connections. The token clients must present comes
 //! from `UKAI_RELAY_TOKEN`, never an argument, so it stays out of `ps`.
 //!
-//! `ukai-relay mcp [--root DIR] [--gateway URL] [--previews FILE]` is the MCP
+//! `ukai-relay mcp [--root DIR] [--gateway URL] [--previews FILE] [--review FILE]` is the MCP
 //! server the relay hands the agent for each session (see `ukai_relay::mcp`),
 //! on stdin/stdout; with a gateway, and the relay's token in
 //! `UKAI_RELAY_TOKEN`, it also serves the knowledge kept there for its
@@ -67,6 +67,9 @@ enum Mode {
         /// ask for.
         #[arg(long)]
         previews: Option<PathBuf>,
+        /// The file the relay keeps the agent's review of its changes in.
+        #[arg(long)]
+        review: Option<PathBuf>,
     },
 }
 
@@ -111,6 +114,7 @@ async fn serve(cli: Cli) -> ExitCode {
         root,
         gateway,
         previews,
+        review,
     }) = cli.mode
     {
         let notes = match (gateway, &token) {
@@ -125,7 +129,7 @@ async fn serve(cli: Cli) -> ExitCode {
             }
             _ => None,
         };
-        return match ukai_relay::mcp::serve(&root, notes, previews).await {
+        return match ukai_relay::mcp::serve(&root, notes, previews, review).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "mcp server failed");
@@ -195,7 +199,7 @@ mod tests {
     fn mcp_needs_no_agent() {
         let cli = parse(&["mcp", "--root", "/workspace"]).unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None }) if root == std::path::Path::new("/workspace"))
+            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None }) if root == std::path::Path::new("/workspace"))
         );
         let cli =
             parse(&["mcp", "--gateway", "http://ukai-gateway"]).unwrap_or_else(|e| panic!("{e}"));

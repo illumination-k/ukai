@@ -24,6 +24,7 @@ use ukai_proto::gateway::v1::commands_client::CommandsClient;
 use ukai_proto::gateway::v1::files_client::FilesClient;
 
 use crate::grpc::{self, Channel};
+use crate::review::{AnnotateRequest, Review};
 use crate::{PaneWorkspace, ResolveError, header_map};
 
 /// Where a relay lists its checkout's files (JSON, for the gateway).
@@ -134,6 +135,9 @@ pub struct CheckoutDiff {
     /// than a diff shows.
     #[serde(default)]
     pub truncated: bool,
+    /// What the agent says of these changes, when it has said anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
 }
 
 /// The changes of the checkout at `root` since `base`, or why there are
@@ -204,6 +208,7 @@ pub async fn diff(root: &Path, base: DiffBase) -> Result<CheckoutDiff, String> {
         base: label,
         patch,
         truncated,
+        review: None,
     })
 }
 
@@ -581,6 +586,33 @@ impl Checkout {
         }
     }
 
+    /// Reply to an annotation of the agent's review, or resolve or reopen
+    /// it. Only a gateway workspace has a review to annotate.
+    pub async fn annotate(&self, request: AnnotateRequest) -> Result<Review, CheckoutError> {
+        let Self::Gateway(gateway) = self else {
+            return Err(CheckoutError::Failed(
+                "only a gateway agent's workspace keeps a review".to_owned(),
+            ));
+        };
+        let request = gw::AnnotateRequest {
+            agent: gateway.agent.clone(),
+            workspace: Some(gateway.workspace.clone()),
+            id: request.id,
+            reply: request.reply,
+            resolved: request.resolved,
+        };
+        let review = FilesClient::new(gateway.list.clone())
+            .annotate(request)
+            .await
+            .map_err(|status| match status.code() {
+                // Why the relay refused it, word for word.
+                tonic::Code::Aborted => CheckoutError::Failed(status.message().to_owned()),
+                _ => status.into(),
+            })?
+            .into_inner();
+        Ok(review.into())
+    }
+
     pub async fn run(&self, command: &str) -> Result<CommandOutput, CheckoutError> {
         match self {
             Self::Local(root) => run(root, command)
@@ -646,6 +678,7 @@ impl From<CheckoutDiff> for gw::CheckoutDiff {
             base: diff.base,
             patch: diff.patch,
             truncated: diff.truncated,
+            review: diff.review.map(Into::into),
         }
     }
 }
@@ -656,6 +689,7 @@ impl From<gw::CheckoutDiff> for CheckoutDiff {
             base: diff.base,
             patch: diff.patch,
             truncated: diff.truncated,
+            review: diff.review.map(Into::into),
         }
     }
 }

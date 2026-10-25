@@ -379,7 +379,8 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         .list()
         .await;
     assert!(matches!(ports, Err(PortsError::Gone)), "{ports:?}");
-    // Neither the checkout's files, a command, nor a diff start one.
+    // Neither the checkout's files, a command, a diff, nor a reply to its
+    // review start one.
     let checkout = Checkout::resolve(
         &agent_spec(&token),
         |_, _| None,
@@ -396,6 +397,17 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
     assert!(
         matches!(diffed, Err(CheckoutError::NotRunning)),
         "{diffed:?}"
+    );
+    let annotated = checkout
+        .annotate(ukai_acp::review::AnnotateRequest {
+            id: "a1".into(),
+            reply: None,
+            resolved: Some(true),
+        })
+        .await;
+    assert!(
+        matches!(annotated, Err(CheckoutError::NotRunning)),
+        "{annotated:?}"
     );
     // Restarting a workspace with no pod leaves it without one.
     RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
