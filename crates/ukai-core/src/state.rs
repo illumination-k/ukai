@@ -227,6 +227,21 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::this_machine(ReportSource::Project, r#"{"kind":"diff","project":"p1"}"#)]
+    #[case::gateway(
+        ReportSource::Agent { agent: "cloud".into(), workspace: None },
+        r#"{"kind":"diff","project":"p1","place":{"kind":"agent","agent":"cloud"}}"#
+    )]
+    fn a_diff_pane_round_trips(#[case] place: ReportSource, #[case] json: &str) {
+        let mut projects = Projects::default();
+        let project = projects.add(Path::new("/work/ukai"));
+        let content = PaneContent::Diff { project, place };
+        assert_eq!(serde_json::to_string(&content).ok().as_deref(), Some(json));
+        let back: Result<PaneContent, _> = serde_json::from_str(json);
+        assert_eq!(back.ok(), Some(content));
+    }
+
     #[test]
     fn a_report_of_a_gateway_workspace_round_trips() {
         let mut projects = Projects::default();

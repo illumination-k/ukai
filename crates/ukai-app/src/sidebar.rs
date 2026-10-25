@@ -15,6 +15,7 @@ use ukai_core::{ProjectId, ReportSource};
 
 use crate::agent_pane::agent_status;
 use crate::alert::is_unread;
+use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
 use crate::knowledge::KnowledgeNode;
 use crate::layout::{Choice, choices, launch_agent, launch_target, open_agent_in};
@@ -453,6 +454,11 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
             for agent in agents {
                 AgentRow { key: "{agent.pane}", agent, depth: inner }
             }
+            ChangesRow {
+                project: project.clone(),
+                place: place.clone(),
+                depth: inner,
+            }
             ReportGroup {
                 project: project.clone(),
                 place: place.clone(),
@@ -463,6 +469,25 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
                 place: place.clone(),
                 depth: inner,
             }
+        }
+    }
+}
+
+/// What changed in a workspace's checkout: click to see it in a diff pane.
+#[component]
+fn ChangesRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
+    let app = use_context::<AppSignals>();
+    let open = diff_open(&app.layout.read(), &project, &place);
+    rsx! {
+        div {
+            class: if open { "row report-row open" } else { "row report-row" },
+            style: "--depth: {depth}",
+            title: "Everything that changed in this checkout",
+            onclick: move |_| open_diff(app, &project, &place),
+            span { class: "row-icon",
+                Svg { icon: Icon::Diff, size: 12 }
+            }
+            span { class: "name", "Changes" }
         }
     }
 }

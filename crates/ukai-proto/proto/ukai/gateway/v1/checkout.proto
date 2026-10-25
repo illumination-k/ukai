@@ -1,5 +1,5 @@
-// The checkout an agent works in, as the composer reaches it: its files, to
-// mention one with `@`, and running a command in it with `!`.
+// The checkout an agent works in, as the user reaches it: its files, to
+// mention one with `@`, running a command in it with `!`, and its changes.
 syntax = "proto3";
 
 package ukai.gateway.v1;
@@ -10,6 +10,10 @@ import "ukai/gateway/v1/common.proto";
 // FAILED_PRECONDITION: listing never starts a pod.
 service Files {
   rpc List(ListFilesRequest) returns (FileListing);
+  // The checkout's changes, as `git diff` prints them. ABORTED with what is
+  // wrong when there are none to show, as in a checkout that is not a git
+  // repository.
+  rpc Diff(DiffRequest) returns (CheckoutDiff);
 }
 
 // With the gateway's token, which already lets its holder have the agent
@@ -52,4 +56,28 @@ message CommandOutput {
   bool truncated = 3;
   // The command ran too long and was stopped.
   bool timed_out = 4;
+}
+
+// What a diff is taken from.
+enum DiffBase {
+  // Where the branch left the default branch: its commits and what is not
+  // committed yet.
+  DIFF_BASE_BRANCH = 0;
+  // `HEAD`: what is not committed yet.
+  DIFF_BASE_UNCOMMITTED = 1;
+}
+
+message DiffRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  DiffBase base = 3;
+}
+
+message CheckoutDiff {
+  // What the patch is taken from, as the user reads it.
+  string base = 1;
+  // `git diff` from the base to the working tree, untracked files as added.
+  string patch = 2;
+  // The patch was cut short, or untracked files were left out.
+  bool truncated = 3;
 }

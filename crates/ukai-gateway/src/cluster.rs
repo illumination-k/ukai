@@ -16,7 +16,7 @@ use kube::api::{
 use kube::config::InferConfigError;
 use kube::{Client, Config};
 
-use ukai_acp::checkout::{FILES_PATH, RUN_PATH};
+use ukai_acp::checkout::{DIFF_PATH, DiffBase, FILES_PATH, RUN_PATH};
 use ukai_acp::ports::{FORWARD_PATH, PORTS_PATH};
 
 use crate::job::{
@@ -399,6 +399,15 @@ impl RelayEndpoint {
     /// Where a command is run in the pod's checkout.
     pub fn run_url(&self) -> String {
         format!("http://{}{RUN_PATH}", self.address)
+    }
+
+    /// The changes of the pod's checkout since `base`.
+    pub fn diff_url(&self, base: DiffBase) -> String {
+        let base = match base {
+            DiffBase::Branch => "branch",
+            DiffBase::Uncommitted => "uncommitted",
+        };
+        format!("http://{}{DIFF_PATH}?base={base}", self.address)
     }
 
     /// The WebSocket carrying one connection to `port` in the pod.

@@ -1,12 +1,14 @@
-//! The checkout an agent works in, as the composer reaches it: its files, to
-//! mention one with `@`, and running a command in it with `!`.
+//! The checkout an agent works in, as the user reaches it: its files, to
+//! mention one with `@`, running a command in it with `!`, and its changes,
+//! for the diff pane.
 //!
-//! ACP has neither: a prompt can link a file, but the client has to know the
-//! files, and nothing asks the agent's machine to run a command for the
-//! user. So a [`Checkout`] does both itself. A local agent's checkout is the
-//! project root, listed and run here. A gateway agent's is in its pod: the
-//! relay there answers [`FILES_PATH`] and [`RUN_PATH`] with the same
-//! [`list_files`] and [`run`], and the gateway passes them on as
+//! ACP has none of these: a prompt can link a file, but the client has to
+//! know the files, nothing asks the agent's machine to run a command for the
+//! user, and the agent reports only the edits of its own tool calls. So a
+//! [`Checkout`] does them itself. A local agent's checkout is the project
+//! root, read and run here. A gateway agent's is in its pod: the relay there
+//! answers [`FILES_PATH`], [`RUN_PATH`], and [`DIFF_PATH`] with the same
+//! [`list_files`], [`run`], and [`diff`], and the gateway passes them on as
 //! `ukai.gateway.v1.Files` and `Commands` (gRPC-Web; see `crate::grpc`).
 
 use std::io::Read;
@@ -31,8 +33,28 @@ pub const FILES_PATH: &str = "/files";
 /// JSON, answered with [`CommandOutput`].
 pub const RUN_PATH: &str = "/run";
 
+/// Where a relay diffs its checkout: `GET`, with `?base=` a [`DiffBase`],
+/// answered with a [`CheckoutDiff`].
+pub const DIFF_PATH: &str = "/diff";
+
 /// Files a listing carries at most.
 pub const MAX_FILES: usize = 20_000;
+
+/// Bytes of patch a diff carries at most: well within a gRPC message.
+pub const MAX_PATCH: usize = 2 * 1024 * 1024;
+
+/// Untracked files a diff shows at most.
+const MAX_UNTRACKED: usize = 200;
+
+/// Untracked files larger than this are listed without their lines.
+const MAX_UNTRACKED_SIZE: u64 = 256 * 1024;
+
+/// How long the git commands of a diff may take, each.
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What `git hash-object -t tree /dev/null` names: a diff from it shows
+/// every file, for a branch with no commit yet.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Bytes of output kept, from the end.
 pub const MAX_OUTPUT: usize = 64 * 1024;
@@ -78,6 +100,227 @@ pub struct CommandOutput {
     pub truncated: bool,
     #[serde(default)]
     pub timed_out: bool,
+}
+
+/// What a diff is taken from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffBase {
+    /// Where the branch left the default branch: its commits and what is
+    /// not committed yet, since an agent commits as it goes.
+    #[default]
+    Branch,
+    /// `HEAD`: what is not committed yet.
+    Uncommitted,
+}
+
+/// `?base=` of [`DIFF_PATH`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffQuery {
+    #[serde(default)]
+    pub base: DiffBase,
+}
+
+/// A checkout's changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutDiff {
+    /// What the patch is taken from, as the user reads it: `origin/main @
+    /// 1a2b3c4d`, or `HEAD @ 1a2b3c4d`, and why when it is not what was asked.
+    pub base: String,
+    /// `git diff` from the base to the working tree, with untracked files
+    /// as added ones; see `ukai_core::diff` for reading it.
+    pub patch: String,
+    /// The patch was cut at [`MAX_PATCH`], or there were more untracked files
+    /// than a diff shows.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The changes of the checkout at `root` since `base`, or why there are
+/// none to show (it is not a git checkout).
+pub async fn diff(root: &Path, base: DiffBase) -> Result<CheckoutDiff, String> {
+    git(root, &["rev-parse", "--is-inside-work-tree"])
+        .await?
+        .ok_or_else(|| "this checkout is not a git repository".to_owned())?;
+    let (from, label) = base_commit(root, base).await?;
+    let mut patch = git(
+        root,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            // Whatever the user's `diff.noprefix` or `diff.mnemonicPrefix`.
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--find-renames",
+            &from,
+            "--",
+        ],
+    )
+    .await?
+    .ok_or_else(|| "git cannot diff this checkout".to_owned())?;
+    let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])
+        .await?
+        .unwrap_or_default();
+    let untracked: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
+    let mut truncated = untracked.len() > MAX_UNTRACKED;
+    for path in untracked.into_iter().take(MAX_UNTRACKED) {
+        if patch.len() > MAX_PATCH {
+            break;
+        }
+        let size = std::fs::metadata(root.join(path)).map_or(0, |m| m.len());
+        if size > MAX_UNTRACKED_SIZE {
+            // Shown as a file whose lines are not, as git shows a binary one.
+            patch.push_str(&format!(
+                "diff --git a/{path} b/{path}\nnew file mode 100644\nBinary files /dev/null and b/{path} differ\n"
+            ));
+            continue;
+        }
+        // Exits with 1 when there is a difference, which there always is.
+        if let Some(added) = git_any(
+            root,
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--no-index",
+                "--",
+                "/dev/null",
+                path,
+            ],
+        )
+        .await?
+        {
+            patch.push_str(&added);
+        }
+    }
+    if patch.len() > MAX_PATCH {
+        truncated = true;
+        patch = cut(&patch, MAX_PATCH);
+    }
+    Ok(CheckoutDiff {
+        base: label,
+        patch,
+        truncated,
+    })
+}
+
+/// `patch` cut to at most `max` bytes, at the start of a file when one
+/// starts before then, else at a line.
+fn cut(patch: &str, max: usize) -> String {
+    if patch.len() <= max {
+        return patch.to_owned();
+    }
+    let mut end = max;
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &patch[..end];
+    let at = head
+        .rfind("\ndiff --git ")
+        .filter(|&at| at > 0)
+        .map(|at| at + 1)
+        .or_else(|| head.rfind('\n').map(|at| at + 1))
+        .unwrap_or(end);
+    patch[..at].to_owned()
+}
+
+/// The commit a diff of `base` starts at, and how to name it.
+async fn base_commit(root: &Path, base: DiffBase) -> Result<(String, String), String> {
+    let Some(head) = rev(root, "HEAD").await? else {
+        return Ok((EMPTY_TREE.to_owned(), "nothing committed yet".to_owned()));
+    };
+    let short = |commit: &str| commit.get(..8).unwrap_or(commit).to_owned();
+    if base == DiffBase::Uncommitted {
+        return Ok((head.clone(), format!("HEAD @ {}", short(&head))));
+    }
+    let Some(branch) = default_branch(root).await? else {
+        return Ok((
+            head.clone(),
+            format!("HEAD @ {} (no default branch to start from)", short(&head)),
+        ));
+    };
+    match git(root, &["merge-base", "HEAD", &branch]).await? {
+        Some(found) => {
+            let found = found.trim().to_owned();
+            let label = format!("{branch} @ {}", short(&found));
+            Ok((found, label))
+        }
+        None => Ok((
+            head.clone(),
+            format!("HEAD @ {} (nothing in common with {branch})", short(&head)),
+        )),
+    }
+}
+
+/// The branch others start from: what `origin/HEAD` points at, else the
+/// first of `origin/main`, `origin/master`, `main`, and `master` there is.
+async fn default_branch(root: &Path) -> Result<Option<String>, String> {
+    if let Some(branch) = git(
+        root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .await?
+    {
+        return Ok(Some(branch.trim().to_owned()));
+    }
+    for candidate in ["origin/main", "origin/master", "main", "master"] {
+        if rev(root, candidate).await?.is_some() {
+            return Ok(Some(candidate.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// The commit `name` names, if any.
+async fn rev(root: &Path, name: &str) -> Result<Option<String>, String> {
+    let spec = format!("{name}^{{commit}}");
+    Ok(git(root, &["rev-parse", "--verify", "--quiet", &spec])
+        .await?
+        .map(|commit| commit.trim().to_owned()))
+}
+
+/// What git printed when it succeeded; `None` when it did not. `Err` when
+/// it could not be run at all.
+async fn git(root: &Path, args: &[&str]) -> Result<Option<String>, String> {
+    let output = git_output(root, args).await?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// Like [`git`], taking exit code 1 as success too, as `diff --no-index`
+/// exits when the files differ.
+async fn git_any(root: &Path, args: &[&str]) -> Result<Option<String>, String> {
+    let output = git_output(root, args).await?;
+    Ok(matches!(output.status.code(), Some(0 | 1))
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+async fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        // Paths as they are, not escaped, unless git must.
+        .args(["-c", "core.quotePath=false"])
+        .args(args)
+        .current_dir(root)
+        // Reading must not take the index lock the agent's git wants.
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    tokio::time::timeout(GIT_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "git took too long".to_owned())?
+        .map_err(|error| format!("cannot run git: {error}"))
 }
 
 /// The files under `root`, as git would see them: what `.gitignore`,
@@ -250,7 +493,7 @@ pub enum Checkout {
 pub struct GatewayCheckout {
     /// For listing: the agent's headers, and a timeout.
     list: Channel,
-    /// For commands: a timeout past the relay's own.
+    /// For commands and diffs: a timeout past the relay's own.
     run: Channel,
     agent: String,
     workspace: gw::Workspace,
@@ -314,6 +557,30 @@ impl Checkout {
         }
     }
 
+    pub async fn diff(&self, base: DiffBase) -> Result<CheckoutDiff, CheckoutError> {
+        match self {
+            Self::Local(root) => diff(root, base).await.map_err(CheckoutError::Failed),
+            Self::Gateway(gateway) => {
+                let request = gw::DiffRequest {
+                    agent: gateway.agent.clone(),
+                    workspace: Some(gateway.workspace.clone()),
+                    base: gw::DiffBase::from(base).into(),
+                };
+                // A few git commands, which a large checkout makes slow.
+                let diff = FilesClient::new(gateway.run.clone())
+                    .diff(request)
+                    .await
+                    .map_err(|status| match status.code() {
+                        // What the relay said of the checkout, word for word.
+                        tonic::Code::Aborted => CheckoutError::Failed(status.message().to_owned()),
+                        _ => status.into(),
+                    })?
+                    .into_inner();
+                Ok(diff.into())
+            }
+        }
+    }
+
     pub async fn run(&self, command: &str) -> Result<CommandOutput, CheckoutError> {
         match self {
             Self::Local(root) => run(root, command)
@@ -351,6 +618,44 @@ impl From<gw::FileListing> for FileListing {
             root: listing.root,
             files: listing.files,
             truncated: listing.truncated,
+        }
+    }
+}
+
+impl From<DiffBase> for gw::DiffBase {
+    fn from(base: DiffBase) -> Self {
+        match base {
+            DiffBase::Branch => Self::Branch,
+            DiffBase::Uncommitted => Self::Uncommitted,
+        }
+    }
+}
+
+impl From<gw::DiffBase> for DiffBase {
+    fn from(base: gw::DiffBase) -> Self {
+        match base {
+            gw::DiffBase::Branch => Self::Branch,
+            gw::DiffBase::Uncommitted => Self::Uncommitted,
+        }
+    }
+}
+
+impl From<CheckoutDiff> for gw::CheckoutDiff {
+    fn from(diff: CheckoutDiff) -> Self {
+        Self {
+            base: diff.base,
+            patch: diff.patch,
+            truncated: diff.truncated,
+        }
+    }
+}
+
+impl From<gw::CheckoutDiff> for CheckoutDiff {
+    fn from(diff: gw::CheckoutDiff) -> Self {
+        Self {
+            base: diff.base,
+            patch: diff.patch,
+            truncated: diff.truncated,
         }
     }
 }
@@ -466,5 +771,118 @@ mod tests {
         assert_eq!(output.output, "started\n");
         assert_eq!(output.exit_code, Some(0));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// Run git in `root` as a test sets a checkout up, whatever the user's
+    /// configuration.
+    fn git_in(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap_or_else(|e| panic!("git: {e}"));
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn write(root: &Path, path: &str, text: &str) {
+        std::fs::write(root.join(path), text).unwrap_or_else(|e| panic!("write: {e}"));
+    }
+
+    fn paths(patch: &str) -> Vec<String> {
+        patch
+            .lines()
+            .filter_map(|line| line.strip_prefix("+++ b/").or(line.strip_prefix("--- a/")))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `main` with one file, and `work` off it with a commit, an edit not
+    /// committed, and a file not tracked.
+    fn branched() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let root = dir.path();
+        git_in(root, &["init", "-q"]);
+        write(root, "base.txt", "one\n");
+        git_in(root, &["add", "."]);
+        git_in(root, &["commit", "-q", "-m", "base"]);
+        git_in(root, &["checkout", "-q", "-b", "work"]);
+        write(root, "committed.txt", "on the branch\n");
+        git_in(root, &["add", "."]);
+        git_in(root, &["commit", "-q", "-m", "work"]);
+        write(root, "base.txt", "one\ntwo\n");
+        write(root, "untracked.txt", "new\n");
+        dir
+    }
+
+    #[tokio::test]
+    async fn diffs_the_branch_from_where_it_left_main() {
+        let dir = branched();
+        let diff = diff(dir.path(), DiffBase::Branch)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(diff.base.starts_with("main @ "), "{}", diff.base);
+        assert!(!diff.truncated);
+        let mut found = paths(&diff.patch);
+        found.sort();
+        found.dedup();
+        assert_eq!(found, ["base.txt", "committed.txt", "untracked.txt"]);
+    }
+
+    #[tokio::test]
+    async fn diffs_what_is_not_committed_yet() {
+        let dir = branched();
+        let diff = diff(dir.path(), DiffBase::Uncommitted)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(diff.base.starts_with("HEAD @ "), "{}", diff.base);
+        let mut found = paths(&diff.patch);
+        found.sort();
+        found.dedup();
+        assert_eq!(found, ["base.txt", "untracked.txt"]);
+        assert!(diff.patch.contains("+two"), "{}", diff.patch);
+    }
+
+    #[tokio::test]
+    async fn diffs_a_repository_with_nothing_committed() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        git_in(dir.path(), &["init", "-q"]);
+        write(dir.path(), "first.txt", "hello\n");
+        let diff = diff(dir.path(), DiffBase::Branch)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(diff.base, "nothing committed yet");
+        assert_eq!(paths(&diff.patch), ["first.txt"]);
+    }
+
+    #[tokio::test]
+    async fn says_a_directory_is_not_a_repository() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        assert_eq!(
+            diff(dir.path(), DiffBase::Branch).await,
+            Err("this checkout is not a git repository".to_owned())
+        );
+    }
+
+    #[test]
+    fn cuts_a_patch_at_a_file() {
+        let patch = "diff --git a/a b/a\n+1\ndiff --git a/b b/b\n+2\n";
+        assert_eq!(cut(patch, 30), "diff --git a/a b/a\n+1\n");
+        // With no second file before the cut, at a line.
+        assert_eq!(cut(patch, 21), "diff --git a/a b/a\n");
+        assert_eq!(cut(patch, 1000), patch);
     }
 }

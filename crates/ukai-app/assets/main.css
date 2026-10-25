@@ -2249,6 +2249,139 @@ button.config-trigger:disabled {
   gap: 6px;
 }
 
+/* ---- diff pane: a checkout's changes ---------------------------------- */
+
+.diff-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.diff-toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-toolbar .segmented {
+  align-self: center;
+}
+
+.diff-toolbar .spacer {
+  flex: 1;
+}
+
+.diff-base {
+  font-size: 12px;
+}
+
+.diff-totals {
+  color: var(--muted-fg);
+  font: 11.5px var(--mono);
+}
+
+.diff-totals .added,
+.diff-file-row .added {
+  color: var(--ready);
+}
+
+.diff-totals .removed,
+.diff-file-row .removed {
+  color: var(--error);
+}
+
+.diff-hint {
+  flex: none;
+  margin: 6px 12px;
+}
+
+.diff-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.diff-files {
+  display: flex;
+  flex: 0 0 260px;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 6px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+
+.diff-file-row {
+  min-height: 26px;
+  font-size: 12.5px;
+}
+
+.diff-file-row .kind {
+  flex: none;
+  width: 14px;
+  color: var(--muted-fg);
+  font: 600 11px var(--mono);
+  text-align: center;
+}
+
+.diff-file-row .kind.A {
+  color: var(--ready);
+}
+
+.diff-file-row .kind.D {
+  color: var(--error);
+}
+
+.diff-file-row .kind.R {
+  color: var(--attention);
+}
+
+.diff-file-row .name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-row .dir {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-fg);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.diff-file-row .counts {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  font: 11px var(--mono);
+}
+
+.diff-file {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--card);
+  font: 12px/1.6 var(--mono);
+}
+
+.diff-file .diff-path {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
 /* ---- unread ----------------------------------------------------------- */
 
 .unread-mark {

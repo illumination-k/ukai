@@ -24,7 +24,7 @@ use ukai_core::keymap::{Action, Scope};
 use ukai_core::mention::{self, Mention};
 use ukai_core::recall::{self, Recall};
 use ukai_core::report::ReportKind;
-use ukai_core::review::{self, LineKind, ReviewComment};
+use ukai_core::review::{self, ReviewComment};
 use ukai_core::{
     Alert, Entry, History, PaneContent, PaneId, ProjectId, Queued, ReportSource, Status,
     Transcript, session_label, updated_label, usage_label,
@@ -33,6 +33,7 @@ use ukai_core::{shell, slash};
 
 use crate::alert;
 use crate::clipboard::{self, Pasted};
+use crate::diff_view::DiffLines;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::markdown::Markdown;
@@ -1650,35 +1651,11 @@ const MAX_DIFF_LINES: usize = 400;
 #[component]
 fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
     let app = use_context::<AppSignals>();
-    let shortcuts = use_context::<Shortcuts>();
-    let ime = use_ime();
-    let mut editing = use_signal(|| None::<(usize, usize)>);
-    let mut text = use_signal(String::new);
-    let Some(mut review) = app
-        .sessions
-        .read()
-        .get(&pane)
-        .map(|session| session.composer.review)
-    else {
+    let Some(review) = review_of(app, pane) else {
         return rsx! {};
     };
     let path = shown_path(app, pane, &diff.path);
     let hunks = review::hunks(diff.old_text.as_deref(), &diff.new_text);
-    let total: usize = hunks.iter().map(Vec::len).sum();
-    let mut budget = MAX_DIFF_LINES;
-    let shown: Vec<(usize, Vec<(usize, review::DiffLine)>)> = hunks
-        .into_iter()
-        .enumerate()
-        .map_while(|(h, hunk)| {
-            (budget > 0).then(|| {
-                let take = hunk.len().min(budget);
-                budget -= take;
-                (h, hunk.into_iter().take(take).enumerate().collect())
-            })
-        })
-        .collect();
-    let hidden = total.saturating_sub(MAX_DIFF_LINES);
-    let comments = review.read().clone();
     let is_new = diff.old_text.is_none();
 
     rsx! {
@@ -1689,142 +1666,24 @@ fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
                     span { class: "badge", "new" }
                 }
             }
-            if shown.is_empty() {
-                div { class: "diff-gap", "No changes" }
-            }
-            for (h, lines) in shown {
-                if h > 0 {
-                    div { key: "gap-{h}", class: "diff-gap", "⋯" }
-                }
-                for (i, line) in lines {
-                    {
-                        let class = match line.kind {
-                            LineKind::Added => "diff-line added",
-                            LineKind::Removed => "diff-line removed",
-                            LineKind::Context => "diff-line",
-                        };
-                        let marker = match line.kind {
-                            LineKind::Added => "+",
-                            LineKind::Removed => "-",
-                            LineKind::Context => " ",
-                        };
-                        let old = line.old.map(|n| n.to_string()).unwrap_or_default();
-                        let new = line.new.map(|n| n.to_string()).unwrap_or_default();
-                        let on_line: Vec<(usize, String)> = comments
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, c)| c.path == path && c.line == line)
-                            .map(|(index, c)| (index, c.body.clone()))
-                            .collect();
-                        let open = editing() == Some((h, i));
-                        let path = path.clone();
-                        rsx! {
-                            div { key: "{h}-{i}", class: "{class}",
-                                span { class: "ln", "{old}" }
-                                span { class: "ln", "{new}" }
-                                button {
-                                    class: "comment-add",
-                                    title: "Comment on this line",
-                                    onclick: move |_| {
-                                        text.set(String::new());
-                                        editing.set(Some((h, i)));
-                                    },
-                                    "+"
-                                }
-                                span { class: "code", "{marker}{line.text}" }
-                            }
-                            for (index, body) in on_line {
-                                div { key: "c-{h}-{i}-{index}", class: "diff-comment",
-                                    span { class: "body", "{body}" }
-                                    button {
-                                        class: "icon",
-                                        title: "Remove comment",
-                                        onclick: move |_| {
-                                            review.write().remove(index);
-                                        },
-                                        Svg { icon: Icon::Close, size: 11 }
-                                    }
-                                }
-                            }
-                            if open {
-                                div { key: "e-{h}-{i}", class: "diff-comment-editor",
-                                    textarea {
-                                        rows: "2",
-                                        placeholder: "Comment for the agent; sent with your next message",
-                                        value: "{text}",
-                                        onmounted: move |event| async move {
-                                            let _ = event.set_focus(true).await;
-                                        },
-                                        oninput: move |event| text.set(event.value()),
-                                        oncompositionend: move |_| ime.end(),
-                                        onkeyup: move |_| ime.settle(),
-                                        onkeydown: {
-                                            let path = path.clone();
-                                            let line = line.clone();
-                                            let shortcuts = shortcuts.clone();
-                                            move |event: KeyboardEvent| {
-                                                if ime.composing(&event) {
-                                                    event.stop_propagation();
-                                                } else if event.key() == Key::Escape {
-                                                    // Not the app's: escape here drops the comment.
-                                                    event.stop_propagation();
-                                                    editing.set(None);
-                                                } else if shortcuts.pressed(Scope::Composer, &event)
-                                                    == Some(Action::Send)
-                                                {
-                                                    event.prevent_default();
-                                                    event.stop_propagation();
-                                                    add_comment(review, &mut text, &path, &line);
-                                                    editing.set(None);
-                                                }
-                                            }
-                                        },
-                                    }
-                                    div { class: "actions",
-                                        button { class: "small outline", onclick: move |_| editing.set(None), "Cancel" }
-                                        button {
-                                            class: "small primary",
-                                            disabled: text.read().trim().is_empty(),
-                                            onclick: {
-                                                let path = path.clone();
-                                                let line = line.clone();
-                                                move |_| {
-                                                    add_comment(review, &mut text, &path, &line);
-                                                    editing.set(None);
-                                                }
-                                            },
-                                            "Add comment"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if hidden > 0 {
-                div { class: "diff-gap", "{hidden} more lines not shown" }
+            DiffLines {
+                path,
+                hunks,
+                review: Some(review),
+                max_lines: MAX_DIFF_LINES,
+                placeholder: "Comment for the agent; sent with your next message",
             }
         }
     }
 }
 
-fn add_comment(
-    mut review: Signal<Vec<ReviewComment>>,
-    text: &mut Signal<String>,
-    path: &str,
-    line: &review::DiffLine,
-) {
-    let body = text.read().trim().to_owned();
-    if body.is_empty() {
-        return;
-    }
-    review.write().push(ReviewComment {
-        path: path.to_owned(),
-        line: line.clone(),
-        body,
-    });
-    text.set(String::new());
+/// The comments on diff lines waiting in agent `pane`'s composer for its
+/// next prompt.
+pub fn review_of(app: AppSignals, pane: PaneId) -> Option<Signal<Vec<ReviewComment>>> {
+    app.sessions
+        .read()
+        .get(&pane)
+        .map(|session| session.composer.review)
 }
 
 /// `path` relative to the root of `pane`'s project when inside it.
