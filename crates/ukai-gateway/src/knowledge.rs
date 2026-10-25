@@ -1,22 +1,27 @@
-//! The gateway's side of `ukai-knowledge`, which keeps the notes: a gRPC
-//! client of `ukai.knowledge.v1.KnowledgeStore` that names who is asking.
+//! Knowledge, as the gateway serves it: `ukai.gateway.v1.Knowledge` to its
+//! clients and `WorkspaceKnowledge` to its agent pods (gRPC and gRPC-Web, on
+//! its own port), each answered by asking `ukai-knowledge`
+//! (`ukai.knowledge.v1.KnowledgeStore`) on behalf of whoever is asking.
 //!
-//! The gateway is what can tell who that is: a person through the gateway's
-//! token, whose scope is their agent's in `gateway.toml`, or an agent pod
-//! through its relay's token, whose scope and workspace its Job says. The
-//! service believes the [`Caller`] given here, and is reached with the token
-//! the two share.
+//! The gateway is what can tell who that is: a person by the gateway's
+//! token, whose scope is their agent's in `gateway.toml`, or an agent pod by
+//! its relay's token, whose scope and workspace its Job says. It names that
+//! [`Caller`] to `ukai-knowledge`, which believes it and is reached with the
+//! token the two share. What the service answers goes back as it is.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::HeaderMap;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Code, Request, Status};
-use ukai_acp::knowledge::wire::Malformed;
-use ukai_core::knowledge::{Editor, Note, NoteSummary, NoteWrite, Revision};
+use tonic::{Code, Request, Response, Status};
+use ukai_core::knowledge::Editor;
+use ukai_proto::gateway::v1 as gw;
 use ukai_proto::knowledge::v1 as pb;
-use ukai_proto::knowledge::v1::change_response::Outcome;
 use ukai_proto::knowledge::v1::knowledge_store_client::KnowledgeStoreClient;
+
+use crate::Gateway;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -37,47 +42,6 @@ impl From<&Caller> for pb::Caller {
             editor: pb::Editor::from(caller.editor).into(),
             workspace: caller.workspace.clone(),
         }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum KnowledgeError {
-    #[error("{}", .0.join("; "))]
-    Refused(Vec<String>),
-    /// The note is not at the revision the writer read; it is as given now.
-    #[error("the note changed since it was read")]
-    Conflict(Box<Option<Note>>),
-    #[error("no such note")]
-    NotFound,
-    #[error("this workspace has changed too many notes for now")]
-    TooMany,
-    #[error("only a person reviews notes")]
-    Forbidden,
-    /// The service, or its store, cannot be reached now.
-    #[error("{0}")]
-    Unavailable(String),
-    #[error("the knowledge service failed: {0}")]
-    Failed(String),
-}
-
-impl From<Status> for KnowledgeError {
-    fn from(status: Status) -> Self {
-        match status.code() {
-            Code::NotFound => Self::NotFound,
-            Code::ResourceExhausted => Self::TooMany,
-            Code::PermissionDenied => Self::Forbidden,
-            Code::Unavailable => Self::Unavailable(format!(
-                "the knowledge service is unavailable: {}",
-                status.message()
-            )),
-            code => Self::Failed(format!("{code:?}: {}", status.message())),
-        }
-    }
-}
-
-impl From<Malformed> for KnowledgeError {
-    fn from(error: Malformed) -> Self {
-        Self::Failed(error.to_string())
     }
 }
 
@@ -116,211 +80,362 @@ impl KnowledgeClient {
         request
     }
 
-    pub async fn list(&self, caller: &Caller) -> Result<Vec<NoteSummary>, KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .list(self.request(pb::ListRequest {
-                caller: Some(caller.into()),
-            }))
-            .await?;
-        response
-            .into_inner()
-            .notes
-            .into_iter()
-            .map(|note| NoteSummary::try_from(note).map_err(Into::into))
-            .collect()
+    /// What the service said to the gateway, as the gateway's caller should
+    /// hear it: the service refusing the gateway's own token is the
+    /// gateway's failure, not the caller's.
+    fn answer<T>(result: Result<Response<T>, Status>) -> Result<T, Status> {
+        match result {
+            Ok(response) => Ok(response.into_inner()),
+            Err(status) if status.code() == Code::Unauthenticated => {
+                tracing::warn!("ukai-knowledge does not take the gateway's UKAI_KNOWLEDGE_TOKEN");
+                Err(Status::internal(
+                    "the gateway cannot authenticate to its knowledge",
+                ))
+            }
+            Err(status) => Err(status),
+        }
     }
 
-    /// The note as it is now; `None` when there is none or it is deleted.
-    pub async fn get(&self, caller: &Caller, name: &str) -> Result<Option<Note>, KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .get(self.request(pb::GetRequest {
-                caller: Some(caller.into()),
-                name: name.to_owned(),
-            }))
-            .await?;
-        Ok(response.into_inner().note.map(Note::try_from).transpose()?)
-    }
-
-    pub async fn revisions(
-        &self,
-        caller: &Caller,
-        name: &str,
-    ) -> Result<Vec<Revision>, KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .revisions(self.request(pb::RevisionsRequest {
-                caller: Some(caller.into()),
-                name: name.to_owned(),
-            }))
-            .await?;
-        response
-            .into_inner()
-            .revisions
-            .into_iter()
-            .map(|revision| Revision::try_from(revision).map_err(Into::into))
-            .collect()
-    }
-
-    pub async fn put(
-        &self,
-        caller: &Caller,
-        name: &str,
-        write: NoteWrite,
-    ) -> Result<Note, KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .put(self.request(pb::PutRequest {
-                caller: Some(caller.into()),
-                name: name.to_owned(),
-                spec: Some(write.spec.into()),
-                base_revision: write.base_revision,
-                commit: write.commit,
-            }))
-            .await?;
-        changed(response.into_inner())?.ok_or(KnowledgeError::NotFound)
-    }
-
-    pub async fn delete(
-        &self,
-        caller: &Caller,
-        name: &str,
-        revision: u64,
-    ) -> Result<(), KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .delete(self.request(pb::DeleteRequest {
-                caller: Some(caller.into()),
-                name: name.to_owned(),
-                revision,
-            }))
-            .await?;
-        changed(response.into_inner()).map(drop)
-    }
-
-    pub async fn approve(
-        &self,
-        caller: &Caller,
-        name: &str,
-        revision: u64,
-    ) -> Result<Note, KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .approve(self.review(caller, name, revision))
-            .await?;
-        changed(response.into_inner())?.ok_or(KnowledgeError::NotFound)
-    }
-
-    /// The note as the rejection left it; `None` once it is deleted.
-    pub async fn reject(
-        &self,
-        caller: &Caller,
-        name: &str,
-        revision: u64,
-    ) -> Result<Option<Note>, KnowledgeError> {
-        let response = self
-            .client
-            .clone()
-            .reject(self.review(caller, name, revision))
-            .await?;
-        changed(response.into_inner())
-    }
-
-    fn review(&self, caller: &Caller, name: &str, revision: u64) -> Request<pb::ReviewRequest> {
-        self.request(pb::ReviewRequest {
+    async fn list(&self, caller: &Caller) -> Result<pb::ListResponse, Status> {
+        let request = self.request(pb::ListRequest {
             caller: Some(caller.into()),
-            name: name.to_owned(),
+        });
+        Self::answer(self.client.clone().list(request).await)
+    }
+
+    async fn get(&self, caller: &Caller, name: String) -> Result<pb::GetResponse, Status> {
+        let request = self.request(pb::GetRequest {
+            caller: Some(caller.into()),
+            name,
+        });
+        Self::answer(self.client.clone().get(request).await)
+    }
+
+    async fn revisions(
+        &self,
+        caller: &Caller,
+        name: String,
+    ) -> Result<pb::RevisionsResponse, Status> {
+        let request = self.request(pb::RevisionsRequest {
+            caller: Some(caller.into()),
+            name,
+        });
+        Self::answer(self.client.clone().revisions(request).await)
+    }
+
+    async fn put(
+        &self,
+        caller: &Caller,
+        name: String,
+        spec: Option<pb::NoteSpec>,
+        base_revision: u64,
+        commit: Option<String>,
+    ) -> Result<pb::ChangeResponse, Status> {
+        let request = self.request(pb::PutRequest {
+            caller: Some(caller.into()),
+            name,
+            spec,
+            base_revision,
+            commit,
+        });
+        Self::answer(self.client.clone().put(request).await)
+    }
+
+    async fn delete(
+        &self,
+        caller: &Caller,
+        name: String,
+        revision: u64,
+    ) -> Result<pb::ChangeResponse, Status> {
+        let request = self.request(pb::DeleteRequest {
+            caller: Some(caller.into()),
+            name,
             revision,
+        });
+        Self::answer(self.client.clone().delete(request).await)
+    }
+
+    async fn review(
+        &self,
+        caller: &Caller,
+        name: String,
+        revision: u64,
+        approve: bool,
+    ) -> Result<pb::ChangeResponse, Status> {
+        let request = self.request(pb::ReviewRequest {
+            caller: Some(caller.into()),
+            name,
+            revision,
+        });
+        let mut client = self.client.clone();
+        Self::answer(if approve {
+            client.approve(request).await
+        } else {
+            client.reject(request).await
         })
     }
 }
 
-/// What a change came to: the note as it is now, or why there is none.
-fn changed(response: pb::ChangeResponse) -> Result<Option<Note>, KnowledgeError> {
-    match response.outcome {
-        Some(Outcome::Changed(changed)) => Ok(changed.note.map(Note::try_from).transpose()?),
-        Some(Outcome::Conflict(conflict)) => Err(KnowledgeError::Conflict(Box::new(
-            conflict.current.map(Note::try_from).transpose()?,
-        ))),
-        Some(Outcome::Refused(refused)) => Err(KnowledgeError::Refused(refused.problems)),
-        None => Err(Malformed("outcome").into()),
+/// `ukai-knowledge`, or why there is none to ask.
+fn store(gateway: &Gateway) -> Result<&KnowledgeClient, Status> {
+    gateway.knowledge.as_ref().ok_or_else(|| {
+        Status::unavailable(
+            "this gateway keeps no knowledge: set UKAI_KNOWLEDGE_URL and UKAI_KNOWLEDGE_TOKEN",
+        )
+    })
+}
+
+/// The bearer token of a request.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+}
+
+/// `ukai.gateway.v1.Knowledge`: a person, through one of the gateway's
+/// agents.
+pub struct ClientKnowledge {
+    pub gateway: Arc<Gateway>,
+}
+
+impl ClientKnowledge {
+    /// A person asking through `agent`, and the store, or why they may not.
+    fn caller<T>(
+        &self,
+        request: &Request<T>,
+        agent: &str,
+    ) -> Result<(Caller, &KnowledgeClient), Status> {
+        let headers = request.metadata().clone().into_headers();
+        if !crate::authorized(&self.gateway, &headers) {
+            return Err(Status::unauthenticated(
+                "the gateway's token is missing or wrong",
+            ));
+        }
+        let agent = self
+            .gateway
+            .agents
+            .get(agent)
+            .ok_or_else(|| Status::not_found(format!("the gateway has no agent `{agent}`")))?;
+        let caller = Caller {
+            scope: agent.knowledge_scope(),
+            editor: Editor::User,
+            workspace: None,
+        };
+        Ok((caller, store(&self.gateway)?))
+    }
+}
+
+#[tonic::async_trait]
+impl gw::knowledge_server::Knowledge for ClientKnowledge {
+    async fn list(
+        &self,
+        request: Request<gw::AgentRequest>,
+    ) -> Result<Response<gw::Listing>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let notes = store.list(&caller).await?.notes;
+        Ok(Response::new(gw::Listing {
+            scope: caller.scope,
+            notes,
+        }))
+    }
+
+    async fn get(
+        &self,
+        request: Request<gw::NoteRequest>,
+    ) -> Result<Response<pb::GetResponse>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let name = request.into_inner().name;
+        store.get(&caller, name).await.map(Response::new)
+    }
+
+    async fn revisions(
+        &self,
+        request: Request<gw::NoteRequest>,
+    ) -> Result<Response<pb::RevisionsResponse>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let name = request.into_inner().name;
+        store.revisions(&caller, name).await.map(Response::new)
+    }
+
+    async fn put(
+        &self,
+        request: Request<gw::PutRequest>,
+    ) -> Result<Response<pb::ChangeResponse>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let request = request.into_inner();
+        store
+            .put(
+                &caller,
+                request.name,
+                request.spec,
+                request.base_revision,
+                None,
+            )
+            .await
+            .map(Response::new)
+    }
+
+    async fn delete(
+        &self,
+        request: Request<gw::RevisionRequest>,
+    ) -> Result<Response<pb::ChangeResponse>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let request = request.into_inner();
+        store
+            .delete(&caller, request.name, request.revision)
+            .await
+            .map(Response::new)
+    }
+
+    async fn approve(
+        &self,
+        request: Request<gw::RevisionRequest>,
+    ) -> Result<Response<pb::ChangeResponse>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let request = request.into_inner();
+        store
+            .review(&caller, request.name, request.revision, true)
+            .await
+            .map(Response::new)
+    }
+
+    async fn reject(
+        &self,
+        request: Request<gw::RevisionRequest>,
+    ) -> Result<Response<pb::ChangeResponse>, Status> {
+        let (caller, store) = self.caller(&request, &request.get_ref().agent)?;
+        let request = request.into_inner();
+        store
+            .review(&caller, request.name, request.revision, false)
+            .await
+            .map(Response::new)
+    }
+}
+
+/// `ukai.gateway.v1.WorkspaceKnowledge`: an agent pod, known by its relay's
+/// token. There is no review here.
+pub struct PodKnowledge {
+    pub gateway: Arc<Gateway>,
+}
+
+impl PodKnowledge {
+    /// The pod whose relay token the request carries, and the store, or why
+    /// there is none. The scope and workspace are the pod's Job's, never the
+    /// pod's say.
+    async fn caller<T>(&self, request: &Request<T>) -> Result<(Caller, &KnowledgeClient), Status> {
+        let headers = request.metadata().clone().into_headers();
+        let token = bearer(&headers)
+            .ok_or_else(|| Status::unauthenticated("a pod asks with its relay's token"))?;
+        let pod = match self.gateway.cluster.pod_of(token).await {
+            Ok(Some(pod)) => pod,
+            Ok(None) => return Err(Status::unauthenticated("no agent pod has this token")),
+            Err(error) => {
+                tracing::warn!(%error, "cannot look up the pod asking for knowledge");
+                return Err(Status::unavailable("cannot look up the pod asking"));
+            }
+        };
+        let caller = Caller {
+            scope: pod.scope,
+            editor: Editor::Agent,
+            workspace: Some(pod.workspace),
+        };
+        Ok((caller, store(&self.gateway)?))
+    }
+}
+
+#[tonic::async_trait]
+impl gw::workspace_knowledge_server::WorkspaceKnowledge for PodKnowledge {
+    async fn list(
+        &self,
+        request: Request<gw::WorkspaceListRequest>,
+    ) -> Result<Response<gw::Listing>, Status> {
+        let (caller, store) = self.caller(&request).await?;
+        let notes = store.list(&caller).await?.notes;
+        Ok(Response::new(gw::Listing {
+            scope: caller.scope,
+            notes,
+        }))
+    }
+
+    async fn get(
+        &self,
+        request: Request<gw::WorkspaceNoteRequest>,
+    ) -> Result<Response<pb::GetResponse>, Status> {
+        let (caller, store) = self.caller(&request).await?;
+        let name = request.into_inner().name;
+        store.get(&caller, name).await.map(Response::new)
+    }
+
+    async fn revisions(
+        &self,
+        request: Request<gw::WorkspaceNoteRequest>,
+    ) -> Result<Response<pb::RevisionsResponse>, Status> {
+        let (caller, store) = self.caller(&request).await?;
+        let name = request.into_inner().name;
+        store.revisions(&caller, name).await.map(Response::new)
+    }
+
+    async fn put(
+        &self,
+        request: Request<gw::WorkspacePutRequest>,
+    ) -> Result<Response<pb::ChangeResponse>, Status> {
+        let (caller, store) = self.caller(&request).await?;
+        let request = request.into_inner();
+        store
+            .put(
+                &caller,
+                request.name,
+                request.spec,
+                request.base_revision,
+                request.commit,
+            )
+            .await
+            .map(Response::new)
+    }
+
+    async fn delete(
+        &self,
+        request: Request<gw::WorkspaceRevisionRequest>,
+    ) -> Result<Response<pb::ChangeResponse>, Status> {
+        let (caller, store) = self.caller(&request).await?;
+        let request = request.into_inner();
+        store
+            .delete(&caller, request.name, request.revision)
+            .await
+            .map(Response::new)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use ukai_core::knowledge::{NoteSpec, Provenance};
 
     use super::*;
 
-    fn note() -> Note {
-        Note {
-            name: "build".into(),
-            spec: NoteSpec {
-                description: "Building".into(),
-                body: "b".into(),
-                tags: Vec::new(),
-                on_demand: false,
-            },
-            revision: 2,
-            updated: 1,
-            updated_by: Editor::User,
-            provenance: Provenance::default(),
-            approved: None,
-        }
-    }
-
-    fn response(outcome: Option<Outcome>) -> pb::ChangeResponse {
-        pb::ChangeResponse { outcome }
-    }
-
-    #[test]
-    fn a_change_comes_back_as_the_note_or_why_not() {
-        let changed = |note: Option<Note>| {
-            Some(Outcome::Changed(pb::Changed {
-                note: note.map(Into::into),
-            }))
-        };
-        assert_eq!(
-            super::changed(response(changed(Some(note())))).ok(),
-            Some(Some(note()))
-        );
-        assert_eq!(super::changed(response(changed(None))).ok(), Some(None));
-        assert!(matches!(
-            super::changed(response(Some(Outcome::Conflict(pb::Conflict {
-                current: Some(note().into()),
-            })))),
-            Err(KnowledgeError::Conflict(current)) if *current == Some(note())
-        ));
-        assert!(matches!(
-            super::changed(response(Some(Outcome::Refused(pb::Refused {
-                problems: vec!["no".into()],
-            })))),
-            Err(KnowledgeError::Refused(problems)) if problems == ["no"]
-        ));
-        assert!(matches!(
-            super::changed(response(None)),
-            Err(KnowledgeError::Failed(_))
-        ));
-    }
-
     #[rstest]
-    #[case::not_found(Code::NotFound, "NotFound")]
-    #[case::too_many(Code::ResourceExhausted, "TooMany")]
-    #[case::forbidden(Code::PermissionDenied, "Forbidden")]
-    #[case::unavailable(Code::Unavailable, "Unavailable")]
-    #[case::other(Code::Internal, "Failed")]
-    fn statuses_say_what_went_wrong(#[case] code: Code, #[case] expected: &str) {
-        let error = KnowledgeError::from(Status::new(code, "m"));
-        assert!(format!("{error:?}").starts_with(expected), "{error:?}");
+    #[case::bearer(Some("Bearer t0k"), Some("t0k"))]
+    #[case::empty(Some("Bearer "), None)]
+    #[case::basic(Some("Basic dTpw"), None)]
+    #[case::none(None, None)]
+    fn reads_the_bearer_token(#[case] header: Option<&str>, #[case] expected: Option<&str>) {
+        let mut headers = HeaderMap::new();
+        if let Some(header) = header {
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                header.parse().unwrap_or_else(|e| panic!("{e}")),
+            );
+        }
+        assert_eq!(bearer(&headers), expected);
+    }
+
+    #[tokio::test]
+    async fn the_services_refusal_of_the_gateway_is_the_gateways_failure() {
+        let refused = KnowledgeClient::answer::<()>(Err(Status::unauthenticated("no")));
+        assert_eq!(refused.map_err(|s| s.code()), Err(Code::Internal));
+        let missing = KnowledgeClient::answer::<()>(Err(Status::not_found("no")));
+        assert_eq!(missing.map_err(|s| s.code()), Err(Code::NotFound));
     }
 
     #[tokio::test]

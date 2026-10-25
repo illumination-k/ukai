@@ -44,7 +44,7 @@ fn explain(error: &KnowledgeError) -> Vec<String> {
     match error {
         KnowledgeError::Refused(problems) => problems.clone(),
         KnowledgeError::NotFound => {
-            vec!["The gateway does not know this note or agent; it may need upgrading.".to_owned()]
+            vec!["The gateway does not know this note or agent.".to_owned()]
         }
         other => vec![other.to_string()],
     }

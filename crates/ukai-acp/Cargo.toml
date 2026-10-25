@@ -13,6 +13,7 @@ agent-client-protocol = { workspace = true, features = ["process"] }
 agent-client-protocol-http = { workspace = true, features = ["client"] }
 base64 = { workspace = true }
 futures = { workspace = true }
+http-body-util = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,6 +22,10 @@ tokio = { workspace = true, features = ["net", "io-util"] }
 # Only the framing: the tunnel's upgrade goes through reqwest, which has the
 # agent's TLS configuration and headers.
 tokio-tungstenite = { workspace = true, features = ["handshake"] }
+# The gateway's gRPC services, spoken as gRPC-Web over reqwest (`grpc`).
+tonic = { workspace = true }
+tonic-web = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 ukai-config = { workspace = true }
 ukai-proto = { workspace = true }
@@ -30,6 +35,7 @@ ukai-proto = { workspace = true }
 security-framework = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
