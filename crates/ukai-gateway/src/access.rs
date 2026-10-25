@@ -138,11 +138,15 @@ pub fn pane_of_headers(headers: &HeaderMap) -> Result<Option<String>, Denial> {
     }
 }
 
-/// The pane key a gRPC request's `Workspace` asks for, likewise. A scope
-/// this gateway does not know is refused rather than taken for another.
+/// The pane key a gRPC request's `Workspace` asks for, likewise. A request
+/// that does not say, or names a scope this gateway does not know, is
+/// refused rather than taken for the shared workspace.
 pub fn pane_of(workspace: Option<gw::Workspace>) -> Result<Option<String>, Denial> {
     let workspace = workspace.unwrap_or_default();
     match gw::WorkspaceScope::try_from(workspace.scope) {
+        Ok(gw::WorkspaceScope::Unspecified) => Err(Denial::BadWorkspace(
+            "the request does not say which workspace",
+        )),
         Ok(gw::WorkspaceScope::Shared) => Ok(None),
         Ok(gw::WorkspaceScope::Pod) if valid_pane_key(&workspace.key) => Ok(Some(workspace.key)),
         Ok(gw::WorkspaceScope::Pod) => Err(Denial::BadWorkspace(
@@ -301,6 +305,7 @@ mod tests {
     #[case::pod_without_key(gw::WorkspaceScope::Pod.into(), "", Err(()))]
     #[case::pod_bad_key(gw::WorkspaceScope::Pod.into(), "a/b", Err(()))]
     #[case::unknown_scope(7, "k", Err(()))]
+    #[case::unspecified(gw::WorkspaceScope::Unspecified.into(), "", Err(()))]
     fn a_request_names_its_workspace(
         #[case] scope: i32,
         #[case] key: &str,

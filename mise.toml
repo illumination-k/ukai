@@ -8,6 +8,8 @@ dprint = "0.54.0"
 prek = "0.3.8"
 shfmt = "3.13.1"
 shellcheck = "0.11.0"
+# Lints and formats the .proto files in crates/ukai-proto (builds use protox).
+"aqua:bufbuild/buf" = "1.75.0"
 actionlint = "1.7.12"
 "aqua:zizmorcore/zizmor" = "1.23.1"
 "aqua:suzuki-shunsuke/ghalint" = "1.5.5"
@@ -75,18 +77,21 @@ depends = ["lint", "test"]
 # ---- base --------------------------------------------------------------------
 
 [tasks."fmt:base"]
-description = "Format with dprint and shfmt"
+description = "Format with dprint, shfmt, and buf (protos)"
 run = [
   "dprint fmt",
   "git ls-files -z -- '*.sh' | xargs -0 shfmt -w",
+  "buf format -w",
 ]
 
 [tasks."lint:base"]
-description = "Lint with dprint, shfmt, shellcheck"
+description = "Lint with dprint, shfmt, shellcheck, and buf (protos)"
 run = [
   "dprint check",
   "git ls-files -z -- '*.sh' | xargs -0 shfmt -d",
   "git ls-files -z -- '*.sh' | xargs -0 shellcheck",
+  "buf lint",
+  "buf format --diff --exit-code",
 ]
 
 [tasks."lint:gha"]
