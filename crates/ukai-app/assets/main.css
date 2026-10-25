@@ -1634,17 +1634,37 @@ button.new-tab {
   background: color-mix(in srgb, var(--muted) 40%, var(--card));
 }
 
+/* The textarea and a hidden copy of the draft share one grid cell, so the
+   copy's height (three lines up to 40% of the window) sizes the textarea. */
+.composer-input {
+  display: grid;
+}
+
+.composer-input::after {
+  content: attr(data-value) " ";
+  visibility: hidden;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+
+.composer-input::after,
 .composer textarea {
-  width: 100%;
-  min-height: 44px;
-  max-height: 200px;
+  grid-area: 1 / 1;
+  min-height: calc(3 * 1.5em + 8px);
+  max-height: 40vh;
   padding: 4px 8px;
   border: none;
+  font: 13.5px/1.5 var(--font);
+  overflow-wrap: break-word;
+}
+
+.composer textarea {
+  width: 100%;
+  overflow-y: auto;
   outline: none;
   resize: none;
   background: transparent;
   color: var(--chat-strong);
-  font: 13.5px/1.5 var(--font);
 }
 
 .composer textarea::placeholder {

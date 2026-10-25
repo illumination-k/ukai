@@ -13,7 +13,7 @@ use crate::icons::{Icon, Svg};
 use crate::layout::{close_pane, launch_agent, launch_target, open_report, pane_label};
 use crate::projects::{AppSignals, Paths, pick_and_add_project, project_context};
 use crate::remote_reports::Listing;
-use crate::shortcuts::Shortcuts;
+use crate::shortcuts::{Shortcuts, use_ime};
 
 /// Rows shown at once; the query narrows the rest.
 const LIMIT: usize = 50;
@@ -164,6 +164,7 @@ pub fn Palette() -> Element {
     let all = use_hook(|| items(app, &shortcuts));
     let mut query = use_signal(String::new);
     let mut selected = use_signal(|| 0_usize);
+    let ime = use_ime();
     let mut open = app.palette;
 
     let matches: Vec<Item> = palette::filter(
@@ -196,6 +197,10 @@ pub fn Palette() -> Element {
         let matches = matches.clone();
         let mut run = run.clone();
         move |event: KeyboardEvent| {
+            if ime.composing(&event) {
+                event.stop_propagation();
+                return;
+            }
             let mut step = |delta: isize| {
                 let len = matches.len().max(1);
                 let next = (current as isize + delta).rem_euclid(len as isize);
@@ -208,7 +213,7 @@ pub fn Palette() -> Element {
                 Key::ArrowDown => step(1),
                 Key::ArrowUp => step(-1),
                 Key::Escape => close(),
-                Key::Enter if !event.is_composing() => {
+                Key::Enter => {
                     if let Some(item) = matches.get(current) {
                         run(item.action.clone());
                     }
@@ -239,6 +244,8 @@ pub fn Palette() -> Element {
                             query.set(event.value());
                             selected.set(0);
                         },
+                        oncompositionend: move |_| ime.end(),
+                        onkeyup: move |_| ime.settle(),
                         onkeydown: on_key,
                     }
                 }
