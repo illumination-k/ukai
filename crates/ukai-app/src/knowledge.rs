@@ -1,29 +1,35 @@
 //! Knowledge: notes a gateway keeps outside the repositories its agents
 //! work on, per scope (a project `gateway.toml` names, else a repository).
-//! The app lists them under the selected project's gateway agents, those
-//! sharing a scope together, and shows one in a note pane, to read or edit;
+//! The app lists every project's in the sidebar, the gateway agents sharing
+//! a scope together, and shows one in a note pane, to read or edit;
 //! the agents read and write the same notes through the relay's MCP server,
 //! so a note can change under the pane, which then shows the new one. Notes
 //! open in the note pane already there, so one pane follows the sidebar.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use ukai_acp::knowledge::{KnowledgeEndpoint, KnowledgeError};
-use ukai_config::Config;
+use ukai_config::{AgentSpec, Config};
 use ukai_core::knowledge::{
     self, Editor, Listing, Note, NoteSpec, NoteSummary, NoteWrite, Revision,
 };
 use ukai_core::review::{self, LineKind};
+use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId};
 
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::markdown::Markdown;
 use crate::projects::AppSignals;
-use crate::schedules::{config_of, gateway_agents, local_now, poll, when_unix};
+use crate::remote_reports::{Endpoints, Workspace};
+use crate::schedules::{config_of, gateways, local_now, poll, when_unix};
+use crate::sidebar::Head;
 
-/// How often the sidebar asks the gateways for their notes.
+/// How often the app asks the gateways for their notes.
 const LIST_EVERY: Duration = Duration::from_secs(15);
 /// How often an open note pane asks for its note.
 const PANE_EVERY: Duration = Duration::from_secs(5);
@@ -50,7 +56,7 @@ fn explain(error: &KnowledgeError) -> Vec<String> {
     }
 }
 
-/// Ask the sidebar and open note panes to read their notes again.
+/// Ask the note listings and open note panes to read again.
 fn refresh(app: AppSignals) {
     let mut revision = app.knowledge_revision;
     *revision.write() += 1;
@@ -124,9 +130,9 @@ fn tags_label(tags: &[String], on_demand: bool) -> String {
 }
 
 /// What one gateway agent listed.
-type Fetched = (String, Result<Listing, String>);
+pub type Fetched = (String, Result<Listing, String>);
 
-/// One section of the sidebar: the gateway agents that share a scope, and
+/// One section of a project's notes in the sidebar: the gateway agents that share a scope, and
 /// its notes, or one agent whose notes cannot be read.
 #[derive(Debug, Clone, PartialEq)]
 struct Section {
@@ -165,58 +171,131 @@ fn sections(fetched: &[Fetched]) -> Vec<Section> {
     sections
 }
 
-/// The notes of the selected project's gateway agents, one section per
-/// scope they share.
+/// What each project's gateway agents last listed, kept by
+/// [`FollowKnowledge`].
+pub type KnowledgeListings = Signal<HashMap<ProjectId, Vec<Fetched>>>;
+
+fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<KnowledgeEndpoint, String> {
+    KnowledgeEndpoint::resolve(spec, ukai_acp::system_lookup)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "agent `{}` is not a gateway agent, so it keeps no knowledge",
+                workspace.agent
+            )
+        })
+}
+
+/// Reads the notes of every project's gateway agents, over and over, so the
+/// sidebar can say what awaits review while it is folded. Rendered once by
+/// the app; it draws nothing.
 #[component]
-pub fn KnowledgeList(project: ProjectId, name: String) -> Element {
+pub fn FollowKnowledge() -> Element {
     let app = use_context::<AppSignals>();
-    let endpoints = use_memo({
-        let project = project.clone();
-        move || -> Vec<(String, Result<KnowledgeEndpoint, String>)> {
-            let Ok(config) = config_of(app, &project) else {
-                return Vec::new();
-            };
-            gateway_agents(&config)
-                .into_iter()
-                .map(|agent| {
-                    let endpoint = endpoint(&config, &agent);
-                    (agent, endpoint)
-                })
-                .collect()
-        }
-    });
-    let mut fetched = use_signal(Vec::<Fetched>::new);
+    let mut listings = app.knowledge;
     use_future(move || {
-        poll(app.knowledge_revision, LIST_EVERY, move || async move {
-            let mut now = Vec::new();
-            for (agent, endpoint) in endpoints.peek().clone() {
-                let listed = match endpoint {
-                    Ok(endpoint) => endpoint.list().await.map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
-                now.push((agent, listed));
-            }
-            if *fetched.peek() != now {
-                fetched.set(now);
+        let endpoints = Rc::new(RefCell::new(Endpoints::new(resolve)));
+        poll(app.knowledge_revision, LIST_EVERY, move || {
+            let endpoints = endpoints.clone();
+            async move {
+                let mut fetched = HashMap::new();
+                let mut asked = Vec::new();
+                for (project, _, agents) in gateways(app) {
+                    let mut listed = Vec::new();
+                    for agent in agents {
+                        let workspace = Workspace::of(&project, &agent, None);
+                        let endpoint = endpoints.borrow_mut().get(&app.configs.peek(), &workspace);
+                        let list = match endpoint {
+                            Ok(endpoint) => {
+                                endpoint.list().await.map_err(|error| error.to_string())
+                            }
+                            Err(error) => Err(error),
+                        };
+                        listed.push((agent, list));
+                        asked.push(workspace);
+                    }
+                    fetched.insert(project, listed);
+                }
+                endpoints.borrow_mut().keep(&asked);
+                if *listings.peek() != fetched {
+                    listings.set(fetched);
+                }
             }
         })
     });
-    let open = match app.layout.read().content(app.layout.read().focused()) {
+    rsx! {}
+}
+
+/// How many notes of `sections` wait for the user's review.
+fn awaiting(sections: &[Section]) -> usize {
+    sections
+        .iter()
+        .filter_map(|section| section.notes.as_ref().ok())
+        .flatten()
+        .filter(|note| note.awaits_review())
+        .count()
+}
+
+/// A project's notes in the sidebar, under each scope its gateway agents
+/// share when there are several.
+#[component]
+pub fn KnowledgeNode(project: ProjectId, depth: u8) -> Element {
+    let app = use_context::<AppSignals>();
+    let sections = sections(
+        app.knowledge
+            .read()
+            .get(&project)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
+    let fold = Fold::new(&project, Node::Knowledge);
+    let open = app.folds.read().is_open(&fold);
+    let focused = match app.layout.read().content(app.layout.read().focused()) {
         Some(PaneContent::Note { agent, note, .. }) => Some((agent.clone(), note.clone())),
         _ => None,
     };
-    let no_agents = endpoints.read().is_empty();
-    let sections = sections(&fetched.read());
     let now = local_now();
+    let review = awaiting(&sections);
+    let (marker, meta) = match (review, sections.as_slice()) {
+        (0, [only]) => (None, only.scope.clone().unwrap_or_default()),
+        (0, _) => (None, String::new()),
+        (n, _) => (Some("attention"), format!("{n} to review")),
+    };
+    let single = match sections.as_slice() {
+        [only] => only.agents.first().cloned(),
+        _ => None,
+    };
 
     rsx! {
-        div { class: "sidebar-section",
-            div { class: "sidebar-header",
-                span { class: "section-label", "Knowledge · {name}" }
+        Head {
+            fold,
+            depth,
+            icon: Icon::Book,
+            label: "Knowledge",
+            meta,
+            marker,
+            title: "Notes the gateway keeps for its agents, outside the repository",
+            if let Some(agent) = single.clone() {
+                button {
+                    class: "icon",
+                    title: "New note",
+                    onclick: {
+                        let project = project.clone();
+                        move |event: MouseEvent| {
+                            event.stop_propagation();
+                            open_note(app, &project, &agent, None);
+                        }
+                    },
+                    Svg { icon: Icon::Plus }
+                }
             }
-            if no_agents {
-                p { class: "muted hint",
-                    "A gateway keeps notes for its agents outside their repositories. This project has no gateway agent."
+        }
+        if open {
+            if sections.is_empty() {
+                p {
+                    class: "muted hint tree-hint",
+                    style: "--depth: {depth + 1}",
+                    "Listing…"
                 }
             }
             for section in sections {
@@ -226,45 +305,64 @@ pub fn KnowledgeList(project: ProjectId, name: String) -> Element {
                         Some(scope) => format!("{scope} · {}", section.agents.join(", ")),
                         None => first.clone(),
                     };
-                    let focused = open
+                    let shown = focused
                         .as_ref()
                         .filter(|(agent, _)| section.agents.contains(agent))
                         .and_then(|(_, note)| note.clone());
+                    let inner = if single.is_some() { depth + 1 } else { depth + 2 };
                     rsx! {
-                        div { key: "{label}", class: "schedule-agent",
-                            div { class: "schedule-agent-head",
-                                span { class: "muted", title: "Agents sharing these notes", "{label}" }
-                                button {
-                                    class: "icon",
-                                    title: "New note",
-                                    onclick: {
-                                        let project = project.clone();
-                                        let first = first.clone();
-                                        move |_| open_note(app, &project, &first, None)
-                                    },
-                                    Svg { icon: Icon::Plus }
+                        if single.is_none() {
+                            div {
+                                key: "head-{label}",
+                                class: "row tree-subhead",
+                                style: "--depth: {depth + 1}",
+                                title: "Agents sharing these notes",
+                                span { class: "name", "{label}" }
+                                span { class: "row-actions",
+                                    button {
+                                        class: "icon",
+                                        title: "New note",
+                                        onclick: {
+                                            let project = project.clone();
+                                            let first = first.clone();
+                                            move |_| open_note(app, &project, &first, None)
+                                        },
+                                        Svg { icon: Icon::Plus }
+                                    }
                                 }
                             }
-                            match section.notes {
-                                Err(error) => rsx! {
-                                    p { class: "muted hint", title: "{error}", "Cannot read notes: {error}" }
-                                },
-                                Ok(list) if list.is_empty() => rsx! {
-                                    p { class: "muted hint", "No notes yet. Agents write what they learn here instead of committing it." }
-                                },
-                                Ok(list) => rsx! {
-                                    for note in list {
-                                        NoteRow {
-                                            key: "{note.name}",
-                                            project: project.clone(),
-                                            agent: first.clone(),
-                                            focused: focused.as_deref() == Some(note.name.as_str()),
-                                            updated: when_unix(note.updated, now),
-                                            note,
-                                        }
+                        }
+                        match section.notes {
+                            Err(error) => rsx! {
+                                p {
+                                    key: "error-{label}",
+                                    class: "muted hint tree-hint",
+                                    style: "--depth: {inner}",
+                                    title: "{error}",
+                                    "Cannot read notes: {error}"
+                                }
+                            },
+                            Ok(list) if list.is_empty() => rsx! {
+                                p {
+                                    key: "empty-{label}",
+                                    class: "muted hint tree-hint",
+                                    style: "--depth: {inner}",
+                                    "No notes yet. Agents write what they learn here."
+                                }
+                            },
+                            Ok(list) => rsx! {
+                                for note in list {
+                                    NoteRow {
+                                        key: "{label}-{note.name}",
+                                        project: project.clone(),
+                                        agent: first.clone(),
+                                        focused: shown.as_deref() == Some(note.name.as_str()),
+                                        updated: when_unix(note.updated, now),
+                                        depth: inner,
+                                        note,
                                     }
-                                },
-                            }
+                                }
+                            },
                         }
                     }
                 }
@@ -280,6 +378,7 @@ fn NoteRow(
     note: NoteSummary,
     focused: bool,
     updated: String,
+    depth: u8,
 ) -> Element {
     let app = use_context::<AppSignals>();
     let waits = note.awaits_review();
@@ -296,6 +395,7 @@ fn NoteRow(
     rsx! {
         div {
             class: if focused { "row schedule-row focused" } else { "row schedule-row" },
+            style: "--depth: {depth}",
             title: "{title}",
             onclick: move |_| open_note(app, &project, &agent, Some(note.name.clone())),
             if waits {

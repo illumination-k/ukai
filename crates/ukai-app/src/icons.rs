@@ -24,6 +24,9 @@ pub enum Icon {
     Back,
     Globe,
     Terminal,
+    Book,
+    Cloud,
+    Monitor,
 }
 
 impl Icon {
@@ -63,6 +66,12 @@ impl Icon {
             ],
             Self::Back => &["M10 4l-4 4 4 4"],
             Self::Terminal => &["M3.5 4.5l3.5 3.5-3.5 3.5", "M8.5 11.5h4"],
+            Self::Book => &[
+                "M8 4.5c-1.3-1-3-1.5-5.5-1.5v9c2.5 0 4.2.5 5.5 1.5 1.3-1 3-1.5 5.5-1.5V3c-2.5 0-4.2.5-5.5 1.5z",
+                "M8 4.5v9",
+            ],
+            Self::Cloud => &["M4.5 12.5a3 3 0 0 1-.4-6 4 4 0 0 1 7.7-.9 3.2 3.2 0 0 1-.3 6.9z"],
+            Self::Monitor => &["M2.5 3.5h11v7.5h-11z", "M6 13.5h4", "M8 11v2.5"],
             Self::Globe => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
                 "M2.5 8h11",

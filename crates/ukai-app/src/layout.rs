@@ -134,13 +134,7 @@ pub fn open_agent(
     agent: &str,
     scope: Option<WorkspaceScope>,
 ) {
-    let AppSignals {
-        mut layout,
-        mut projects,
-        configs,
-        ..
-    } = app;
-    let default_scope = match configs.peek().get(project) {
+    let default_scope = match app.configs.peek().get(project) {
         Some(Ok(config)) => match config.agents.get(agent) {
             Some(AgentSpec::Gateway { workspace, .. }) => Some(*workspace),
             _ => None,
@@ -151,6 +145,24 @@ pub fn open_agent(
         key: uuid::Uuid::new_v4().simple().to_string(),
         scope: scope.unwrap_or(default_scope),
     });
+    open_agent_in(app, pane, project, agent, workspace);
+}
+
+/// Open `agent` of `project` in `pane`, working in `workspace` (`None` for
+/// an agent that is not a gateway's), and start its session. Another pane
+/// with the same workspace shares its pod.
+pub fn open_agent_in(
+    app: AppSignals,
+    pane: PaneId,
+    project: &ProjectId,
+    agent: &str,
+    workspace: Option<PaneWorkspace>,
+) {
+    let AppSignals {
+        mut layout,
+        mut projects,
+        ..
+    } = app;
     layout.write().set_content(
         pane,
         PaneContent::Agent {
@@ -176,10 +188,16 @@ pub fn launch_target(app: AppSignals) -> Option<PaneId> {
     }
 }
 
-/// Open `agent` of `project` where [`launch_target`] puts it.
-pub fn launch_agent(app: AppSignals, project: &ProjectId, agent: &str) {
+/// Open `agent` of `project` where [`launch_target`] puts it, a gateway
+/// agent in a workspace of `scope`, else of its default.
+pub fn launch_agent(
+    app: AppSignals,
+    project: &ProjectId,
+    agent: &str,
+    scope: Option<WorkspaceScope>,
+) {
     if let Some(pane) = launch_target(app) {
-        open_agent(app, pane, project, agent, None);
+        open_agent(app, pane, project, agent, scope);
     }
 }
 
@@ -858,14 +876,14 @@ fn Picker(pane: PaneId) -> Element {
 
 /// One way to open an agent in the picker. A gateway agent is offered once
 /// per workspace scope, its default first.
-struct Choice {
-    agent: String,
-    line: String,
-    badge: &'static str,
-    scope: Option<WorkspaceScope>,
+pub struct Choice {
+    pub agent: String,
+    pub line: String,
+    pub badge: &'static str,
+    pub scope: Option<WorkspaceScope>,
 }
 
-fn choices((agent, spec): (&String, &AgentSpec)) -> Vec<Choice> {
+pub fn choices((agent, spec): (&String, &AgentSpec)) -> Vec<Choice> {
     let choice = |badge, scope| Choice {
         agent: agent.clone(),
         line: launch_line(spec),

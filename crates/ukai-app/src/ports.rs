@@ -2,10 +2,10 @@
 //! on them.
 //!
 //! Like reports ([`crate::remote_reports`]), what listens in a pod is asked of
-//! the gateway, per workspace of an open agent pane: [`FollowPorts`] keeps
-//! every workspace's listing in one signal for the sidebar to read. The
-//! listing also carries the previews the agent asked for; one that is new
-//! since the app last looked opens in a pane beside the agent's.
+//! the gateway, per workspace the app follows: [`FollowPorts`] keeps every
+//! workspace's listing in one signal for the sidebar to read. The listing
+//! also carries the previews the agent asked for; one that is new since the
+//! app last looked opens in a pane beside the agent's, when one is open.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,12 +15,14 @@ use ukai_acp::PortsEndpoint;
 use ukai_acp::ports::{PortListing, PortsError, Preview};
 use ukai_config::{AgentSpec, Config};
 use ukai_core::browser::{new_previews, parse_target};
+use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{Direction, PaneContent, PaneId, ProjectId, ReportSource};
 
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::projects::AppSignals;
-use crate::remote_reports::{Endpoints, Workspace, declaration, workspaces};
+use crate::remote_reports::{Endpoints, Workspace, declaration, followed, workspaces};
+use crate::sidebar::Head;
 
 /// How often the listings are read again while agent panes are open.
 const RELIST: Duration = Duration::from_secs(3);
@@ -51,9 +53,9 @@ fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<PortsEndpoint, Str
         .ok_or_else(|| format!("agent `{}` runs on this machine", workspace.agent))
 }
 
-/// Reads the port listings of the open agent panes' workspaces, over and
-/// over, and opens the previews asked for meanwhile. Rendered once by the
-/// app; it draws nothing.
+/// Reads the port listings of the [`followed`] workspaces, over and over,
+/// and opens the previews asked for meanwhile in those an agent pane works
+/// in. Rendered once by the app; it draws nothing.
 #[component]
 pub fn FollowPorts() -> Element {
     let app = use_context::<AppSignals>();
@@ -63,10 +65,13 @@ pub fn FollowPorts() -> Element {
         // The newest preview of each workspace the app knows of.
         let mut seen: HashMap<Workspace, u64> = HashMap::new();
         loop {
-            let wanted = {
+            let (wanted, open) = {
                 let layout = app.layout.peek();
                 let configs = app.configs.peek();
-                workspaces(&layout, &configs)
+                (
+                    followed(&layout, &configs, &app.folds.peek()),
+                    workspaces(&layout, &configs),
+                )
             };
             for workspace in &wanted {
                 // Bound first, so the borrow of the configurations ends
@@ -84,8 +89,10 @@ pub fn FollowPorts() -> Element {
                     let (fresh, newest) =
                         new_previews(seen.get(workspace).copied(), &listing.previews);
                     seen.insert(workspace.clone(), newest);
-                    for preview in fresh {
-                        show_preview(app, workspace, &preview);
+                    if open.contains(workspace) {
+                        for preview in fresh {
+                            show_preview(app, workspace, &preview);
+                        }
                     }
                 }
                 let changed = listings.peek().get(workspace) != Some(&ports);
@@ -251,106 +258,139 @@ fn rows(listing: &PortListing) -> Vec<PortRow> {
     rows
 }
 
-/// The ports section of the sidebar: the open gateway workspaces of
-/// `project`, each with what listens in it, and a way to open a port of
-/// this machine.
+/// The browser panes of `project` on this machine's ports, as rows: these
+/// are not listed by anyone, so the sidebar shows what is open.
+fn local_rows(layout: &ukai_core::Layout, project: &ProjectId) -> Vec<PortRow> {
+    let mut rows: Vec<PortRow> = layout
+        .contents()
+        .filter_map(|(_, content)| match content {
+            PaneContent::Browser {
+                project: p,
+                port,
+                path,
+                source: ReportSource::Project,
+            } if p == project => Some(PortRow {
+                port: *port,
+                meta: if path == "/" {
+                    String::new()
+                } else {
+                    path.clone()
+                },
+                path: path.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    rows.sort_by_key(|row| row.port);
+    rows.dedup_by_key(|row| row.port);
+    rows
+}
+
+/// The ports of one workspace of a project in the sidebar: for a gateway
+/// workspace, what listens in it; for this machine, the pages open, and a
+/// way to open another.
 #[component]
-pub fn PortList(project: ProjectId, name: String) -> Element {
+pub fn PortGroup(project: ProjectId, place: ReportSource, depth: u8) -> Element {
     let app = use_context::<AppSignals>();
     let mut prompting = use_signal(|| false);
-    let workspaces: Vec<(Workspace, Option<Ports>)> = {
-        let wanted = {
-            let layout = app.layout.read();
-            let configs = app.configs.read();
-            workspaces(&layout, &configs)
-        };
-        let listings = app.ports.read();
-        wanted
-            .into_iter()
-            .filter(|workspace| workspace.project == project)
-            .map(|workspace| {
-                let ports = listings.get(&workspace).cloned();
-                (workspace, ports)
-            })
-            .collect()
+    let local = place.is_project();
+    let listing = match Workspace::at(&project, &place) {
+        None => Some(Ports::Listed(PortListing::default())),
+        Some(workspace) => app.ports.read().get(&workspace).cloned(),
     };
+    let rows = match (&listing, local) {
+        (_, true) => local_rows(&app.layout.read(), &project),
+        (Some(Ports::Listed(listing)), false) => rows(listing),
+        _ => Vec::new(),
+    };
+    let fold = Fold::new(
+        &project,
+        Node::Ports {
+            place: place.clone(),
+        },
+    );
+    let mut folds = app.folds;
+    let open = folds.read().is_open(&fold);
+    let count = if rows.is_empty() {
+        String::new()
+    } else {
+        rows.len().to_string()
+    };
+    let inner = depth + 1;
 
     rsx! {
-        div { class: "sidebar-section",
-            div { class: "sidebar-header",
-                span { class: "section-label", "Ports · {name}" }
+        Head {
+            fold: fold.clone(),
+            depth,
+            icon: Icon::Globe,
+            label: "Ports",
+            meta: count,
+            if local {
                 button {
                     class: "icon",
                     title: "Open a port of this machine…",
-                    onclick: move |_| prompting.toggle(),
+                    onclick: move |event: MouseEvent| {
+                        event.stop_propagation();
+                        folds.write().open(fold.clone());
+                        prompting.toggle();
+                    },
                     Svg { icon: Icon::Plus }
                 }
             }
+        }
+        if open {
             if prompting() {
-                PortPrompt {
-                    on_open: {
-                        let project = project.clone();
-                        move |(port, path): (u16, String)| {
-                            prompting.set(false);
-                            launch_browser(app, &project, port, path, ReportSource::Project);
-                        }
-                    },
-                    on_cancel: move |()| prompting.set(false),
-                }
-            } else if workspaces.is_empty() {
-                p { class: "muted hint", "Open a page served on this machine with +." }
-            }
-            for (workspace, ports) in workspaces {
-                div {
-                    key: "{workspace.agent}-{workspace.workspace.as_ref().map(|w| w.key.clone()).unwrap_or_default()}",
-                    class: "sidebar-subsection",
-                    div { class: "sidebar-header",
-                        span { class: "section-label", "In {workspace.label()}" }
-                    }
-                    match ports {
-                        None => rsx! {
-                            p { class: "muted hint", "Listing…" }
-                        },
-                        Some(Ports::NotRunning) => rsx! {
-                            p { class: "muted hint", "The workspace is not running." }
-                        },
-                        Some(Ports::Failed(problem)) => rsx! {
-                            pre { class: "config-error", "{problem}" }
-                        },
-                        Some(Ports::Listed(listing)) => {
-                            let rows = rows(&listing);
-                            if rows.is_empty() {
-                                rsx! {
-                                    p { class: "muted hint", "Nothing listens yet." }
-                                }
-                            } else {
-                                rsx! {
-                                    for row in rows {
-                                        PortRowView {
-                                            key: "{row.port}",
-                                            project: project.clone(),
-                                            row,
-                                            source: workspace.source(),
-                                        }
-                                    }
-                                }
+                div { class: "tree-hint", style: "--depth: {inner}",
+                    PortPrompt {
+                        on_open: {
+                            let project = project.clone();
+                            move |(port, path): (u16, String)| {
+                                prompting.set(false);
+                                launch_browser(app, &project, port, path, ReportSource::Project);
                             }
-                        }
+                        },
+                        on_cancel: move |()| prompting.set(false),
                     }
                 }
+            }
+            match listing {
+                None => rsx! {
+                    p { class: "muted hint tree-hint", style: "--depth: {inner}", "Listing…" }
+                },
+                Some(Ports::NotRunning) => rsx! {
+                    p { class: "muted hint tree-hint", style: "--depth: {inner}", "The workspace is not running." }
+                },
+                Some(Ports::Failed(problem)) => rsx! {
+                    pre { class: "config-error tree-hint", style: "--depth: {inner}", "{problem}" }
+                },
+                Some(Ports::Listed(_)) if rows.is_empty() && !local => rsx! {
+                    p { class: "muted hint tree-hint", style: "--depth: {inner}", "Nothing listens yet." }
+                },
+                Some(Ports::Listed(_)) => rsx! {
+                    for row in rows {
+                        PortRowView {
+                            key: "{row.port}",
+                            project: project.clone(),
+                            row,
+                            source: place.clone(),
+                            depth: inner,
+                        }
+                    }
+                },
             }
         }
     }
 }
 
 #[component]
-fn PortRowView(project: ProjectId, row: PortRow, source: ReportSource) -> Element {
+fn PortRowView(project: ProjectId, row: PortRow, source: ReportSource, depth: u8) -> Element {
     let app = use_context::<AppSignals>();
     let shown = browser_pane(&app.layout.read(), &project, row.port, &source).is_some();
     let PortRow { port, meta, path } = row;
     rsx! {
         div {
             class: if shown { "row report-row open" } else { "row report-row" },
+            style: "--depth: {depth}",
             title: "Open port {port} in a pane",
             onclick: move |_| launch_browser(app, &project, port, path.clone(), source.clone()),
             span { class: "row-icon",

@@ -331,10 +331,10 @@ button:focus-visible,
   font-size: 12px;
 }
 
-.project-list {
+.tree {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   padding: 0 8px;
 }
 
@@ -390,12 +390,91 @@ button:focus-visible,
 }
 
 .row:hover .row-actions {
-  max-width: 60px;
+  max-width: 80px;
   opacity: 1;
 }
 
-.row:hover .count {
+/* ---- the tree --------------------------------------------------------- */
+
+/* Each row is indented by its depth in the tree, set as `--depth`. */
+.tree .row {
+  padding-left: calc(4px + var(--depth, 0) * 14px);
+}
+
+.tree-head .fold {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 12px;
+  margin-right: -4px;
+  color: var(--muted-fg);
+  transition: transform 0.15s;
+}
+
+.tree-head .fold.open {
+  transform: rotate(90deg);
+}
+
+.tree .row .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-head .meta {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-head .dot {
+  flex: none;
+  margin-left: auto;
+}
+
+.tree-head .dot + .meta {
+  margin-left: 0;
+}
+
+/* The actions take the place of what the row says while it is hovered. */
+.tree-head:has(.row-actions button):hover .meta,
+.tree-head:has(.row-actions button):hover .dot {
   display: none;
+}
+
+.tree-head:not(.project-row) {
+  min-height: 26px;
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  font-size: 12.5px;
+}
+
+.tree-head .row-actions {
+  margin-left: auto;
+}
+
+.tree-subhead {
+  min-height: 24px;
+  color: var(--muted-fg);
+  font-size: 11.5px;
+  cursor: default;
+}
+
+.tree-subhead:hover {
+  background: none;
+}
+
+.tree-subhead .row-actions {
+  margin-left: auto;
+}
+
+/* Hints and errors line up with the rows at their depth. */
+.tree .tree-hint {
+  margin: 2px 8px 4px calc(10px + var(--depth, 0) * 14px);
 }
 
 .row-actions button.icon {
@@ -405,7 +484,6 @@ button:focus-visible,
 
 .agent-row {
   min-height: 28px;
-  margin-left: 12px;
   font-size: 12.5px;
 }
 
@@ -425,14 +503,6 @@ button:focus-visible,
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   text-align: right;
-}
-
-.sidebar-section {
-  padding: 0 8px;
-}
-
-.sidebar-section .sidebar-header {
-  padding-left: 8px;
 }
 
 .launch-row {
@@ -465,16 +535,6 @@ button:focus-visible,
 
 .report-row.open .row-icon {
   color: var(--fg);
-}
-
-/* The reports of one gateway agent's workspace, under the project's own. */
-.sidebar-subsection .sidebar-header {
-  padding-left: 8px;
-}
-
-.sidebar-subsection .section-label {
-  color: color-mix(in srgb, var(--muted-fg) 85%, transparent);
-  font-size: 10.5px;
 }
 
 .hint {
@@ -2349,15 +2409,6 @@ button.config-trigger:disabled {
 
 .schedule-row .dot {
   margin: 0 4px;
-}
-
-.schedule-agent-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 26px;
-  padding: 0 0 0 8px;
-  font-size: 12px;
 }
 
 .schedule {

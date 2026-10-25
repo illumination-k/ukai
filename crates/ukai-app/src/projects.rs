@@ -7,12 +7,15 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 use ukai_config::Config;
-use ukai_core::{Layout, PaneContent, PaneId, ProjectId, Projects};
+use ukai_core::sidebar::Folds;
+use ukai_core::{Layout, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
+use crate::knowledge::KnowledgeListings;
 use crate::layout::Drag;
 use crate::ports::PortListings;
 use crate::remote_reports::Listings;
+use crate::schedules::ScheduleListings;
 
 /// Locations resolved at startup.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +43,14 @@ pub struct AppSignals {
     /// What each gateway workspace last listed of its ports, kept by
     /// [`crate::ports::FollowPorts`].
     pub ports: PortListings,
+    /// What each project's gateway agents last listed of their schedules,
+    /// kept by [`crate::schedules::FollowSchedules`].
+    pub schedules: ScheduleListings,
+    /// What each project's gateway agents last listed of their notes, kept
+    /// by [`crate::knowledge::FollowKnowledge`].
+    pub knowledge: KnowledgeListings,
+    /// What of the sidebar's tree is folded.
+    pub folds: Signal<Folds>,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
     /// A pane boundary or pane the user is dragging.
@@ -125,6 +136,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
         mut configs,
         mut layout,
         mut sessions,
+        mut folds,
         ..
     } = app;
     let panes: Vec<_> = layout
@@ -143,6 +155,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
     }
     projects.write().remove(id);
     configs.write().remove(id);
+    folds.write().forget(id);
 }
 
 /// Ask for a folder with the native dialog and open it as a project.
@@ -156,30 +169,4 @@ pub fn pick_and_add_project(paths: Paths, app: AppSignals) {
             add_project(&paths, app, folder.path());
         }
     });
-}
-
-/// An agent pane as the sidebar lists it under its project.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OpenAgent {
-    pub pane: PaneId,
-    pub agent: String,
-    /// Index of the tab holding the pane.
-    pub tab: usize,
-}
-
-/// Agent panes per project, in tab and then pane order.
-pub fn open_agents(layout: &Layout) -> HashMap<ProjectId, Vec<OpenAgent>> {
-    let mut open: HashMap<ProjectId, Vec<OpenAgent>> = HashMap::new();
-    for (tab, panes) in layout.tabs().iter().map(|t| t.root.panes()).enumerate() {
-        for pane in panes {
-            if let Some(PaneContent::Agent { project, agent, .. }) = layout.content(pane) {
-                open.entry(project.clone()).or_default().push(OpenAgent {
-                    pane,
-                    agent: agent.clone(),
-                    tab,
-                });
-            }
-        }
-    }
-    open
 }

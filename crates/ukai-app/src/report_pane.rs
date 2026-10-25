@@ -32,6 +32,7 @@ use ukai_acp::ReportsEndpoint;
 use ukai_acp::reports::ReportsError;
 use ukai_core::markdown::LINK_SCHEMES;
 use ukai_core::report::{self, CONFINED_CSP, IMAGE_VIEW_QUERY, ReportFile, ReportKind};
+use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource};
 
 use crate::child_view::{ChildView, use_child_view};
@@ -40,6 +41,7 @@ use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, project_context};
 use crate::remote_reports::{self, Listing, Workspace};
 use crate::schedules::{local_now, when_unix};
+use crate::sidebar::Head;
 
 const SCHEME: &str = "ukai-report";
 
@@ -441,13 +443,15 @@ const REPORT_EXTENSIONS: &[&str] = &[
     "html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp",
 ];
 
-/// The selected project's reports in the sidebar: what `reports.dirs` holds,
-/// newest first, rescanned while shown.
+/// The reports of one workspace of a project in the sidebar: for this
+/// machine, what `reports.dirs` holds, rescanned while shown; for a gateway
+/// workspace, what [`remote_reports::Follow`] last listed. Newest first.
 #[component]
-pub fn ReportList(project: ProjectId, name: String) -> Element {
+pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Element {
     let app = use_context::<AppSignals>();
     let mut found = use_signal(Vec::<PathBuf>::new);
-    let watched = {
+    let local = place.is_project();
+    let watched = local && {
         let configs = app.configs.read();
         match configs.get(&project) {
             Some(Ok(config)) => !config.reports.dirs.is_empty(),
@@ -459,6 +463,10 @@ pub fn ReportList(project: ProjectId, name: String) -> Element {
         move || {
             let project = project.clone();
             async move {
+                // Only this machine's directories are scanned here.
+                if !local {
+                    return;
+                }
                 loop {
                     let scan = project_context(&app.projects.peek(), &app.configs.peek(), &project)
                         .map(|context| report::list(&context.root, &context.config.reports))
@@ -471,89 +479,102 @@ pub fn ReportList(project: ProjectId, name: String) -> Element {
             }
         }
     });
+    let listing = match Workspace::at(&project, &place) {
+        None => Listing::Reports(found()),
+        Some(workspace) => app
+            .reports
+            .read()
+            .get(&workspace)
+            .cloned()
+            .unwrap_or(Listing::Reports(Vec::new())),
+    };
+    let fold = Fold::new(
+        &project,
+        Node::Reports {
+            place: place.clone(),
+        },
+    );
+    let open_now = app.folds.read().is_open(&fold);
     let open = layout_open_reports(&app.layout.read(), &project);
-    let workspaces = remote_reports::of_project(app, &project);
+    let count = match &listing {
+        Listing::Reports(paths) | Listing::Saved { paths, .. } if !paths.is_empty() => {
+            paths.len().to_string()
+        }
+        _ => String::new(),
+    };
+    let inner = depth + 1;
 
     rsx! {
-        div { class: "sidebar-section",
-            div { class: "sidebar-header",
-                span { class: "section-label", "Reports · {name}" }
+        Head {
+            fold,
+            depth,
+            icon: Icon::Document,
+            label: "Reports",
+            meta: count,
+            if local {
                 button {
                     class: "icon",
                     title: "Open report or image…",
                     onclick: {
                         let project = project.clone();
-                        move |_| pick_report(app, None, project.clone())
+                        move |event: MouseEvent| {
+                            event.stop_propagation();
+                            pick_report(app, None, project.clone());
+                        }
                     },
                     Svg { icon: Icon::Plus }
                 }
             }
-            // The hint is about this project's own files, so it would only be
-            // in the way once a workspace is listing its own below.
-            if !watched && workspaces.is_empty() {
-                p { class: "muted hint",
-                    "List reports here with "
-                    code { "[reports] dirs" }
-                    " in ukai.toml."
-                }
-            } else if watched && found.read().is_empty() {
-                p { class: "muted hint", "No reports yet." }
-            }
-            for path in found() {
-                ReportRow {
-                    key: "{path.display()}",
-                    project: project.clone(),
-                    path: path.clone(),
-                    source: ReportSource::Project,
-                    open: open.clone(),
-                }
-            }
-            for (workspace, listing) in workspaces {
-                div {
-                    key: "{workspace.agent}-{workspace.workspace.as_ref().map(|w| w.key.clone()).unwrap_or_default()}",
-                    class: "sidebar-subsection",
-                    div { class: "sidebar-header",
-                        span { class: "section-label", "In {workspace.label()}" }
+        }
+        if open_now {
+            match listing {
+                Listing::NotRunning => rsx! {
+                    p { class: "muted hint tree-hint", style: "--depth: {inner}", "The workspace is not running." }
+                },
+                Listing::Failed(problem) => rsx! {
+                    pre { class: "config-error tree-hint", style: "--depth: {inner}", "{problem}" }
+                },
+                Listing::Reports(paths) if paths.is_empty() => rsx! {
+                    if local && !watched {
+                        p { class: "muted hint tree-hint", style: "--depth: {inner}",
+                            "List them here with "
+                            code { "[reports] dirs" }
+                            " in ukai.toml."
+                        }
+                    } else {
+                        p { class: "muted hint tree-hint", style: "--depth: {inner}", "No reports yet." }
                     }
-                    match listing {
-                        Listing::NotRunning => rsx! {
-                            p { class: "muted hint", "The workspace is not running." }
-                        },
-                        Listing::Failed(problem) => rsx! {
-                            pre { class: "config-error", "{problem}" }
-                        },
-                        Listing::Reports(paths) if paths.is_empty() => rsx! {
-                            p { class: "muted hint", "No reports yet." }
-                        },
-                        Listing::Saved { paths, synced } => rsx! {
-                            p {
-                                class: "muted hint",
-                                title: "The workspace is not running; these are the copies the gateway kept.",
-                                "Saved {when_unix(synced as i64, local_now())} · not running"
-                            }
-                            for path in paths {
-                                ReportRow {
-                                    key: "{path.display()}",
-                                    project: project.clone(),
-                                    path: path.clone(),
-                                    source: workspace.source(),
-                                    open: open.clone(),
-                                }
-                            }
-                        },
-                        Listing::Reports(paths) => rsx! {
-                            for path in paths {
-                                ReportRow {
-                                    key: "{path.display()}",
-                                    project: project.clone(),
-                                    path: path.clone(),
-                                    source: workspace.source(),
-                                    open: open.clone(),
-                                }
-                            }
-                        },
+                },
+                Listing::Saved { paths, synced } => rsx! {
+                    p {
+                        class: "muted hint tree-hint",
+                        style: "--depth: {inner}",
+                        title: "The workspace is not running; these are the copies the gateway kept.",
+                        "Saved {when_unix(synced as i64, local_now())} · not running"
                     }
-                }
+                    for path in paths {
+                        ReportRow {
+                            key: "{path.display()}",
+                            project: project.clone(),
+                            path: path.clone(),
+                            source: place.clone(),
+                            open: open.clone(),
+                            depth: inner,
+                        }
+                    }
+                },
+                Listing::Reports(paths) => rsx! {
+                    for path in paths {
+                        ReportRow {
+                            key: "{path.display()}",
+                            project: project.clone(),
+                            path: path.clone(),
+                            source: place.clone(),
+                            open: open.clone(),
+                            depth: inner,
+                        }
+                    }
+                },
             }
         }
     }
@@ -567,6 +588,7 @@ fn ReportRow(
     path: PathBuf,
     source: ReportSource,
     open: Vec<(PaneId, PathBuf, ReportSource)>,
+    depth: u8,
 ) -> Element {
     let app = use_context::<AppSignals>();
     let shown = open
@@ -585,6 +607,7 @@ fn ReportRow(
     rsx! {
         div {
             class: if shown.is_some() { "row report-row open" } else { "row report-row" },
+            style: "--depth: {depth}",
             title: "{path.display()}",
             onclick: move |_| {
                 if let Some(pane) = shown {
@@ -603,7 +626,7 @@ fn ReportRow(
     }
 }
 
-/// How often the sidebar rescans the report directories.
+/// How often the sidebar rescans this machine's report directories.
 const RESCAN: Duration = Duration::from_secs(2);
 
 /// Report panes of `project`, with what each shows.
