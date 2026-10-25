@@ -47,6 +47,79 @@ checksum = "sha256:89706aa5215c164d8d091597a470fee72308ac87e8553af395ea77db844a8
 url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.18.1/cargo-binstall-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/cargo-bins/cargo-binstall/releases/assets/395392416"
 
+[[tools."aqua:kubernetes-sigs/kind"]]
+version = "0.33.0"
+backend = "aqua:kubernetes-sigs/kind"
+specifiers = ["0.33.0"]
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.linux-arm64"]
+checksum = "sha256:20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-arm64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396478"
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.linux-arm64-musl"]
+checksum = "sha256:20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-arm64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396478"
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.linux-x64"]
+checksum = "sha256:aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396433"
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.linux-x64-musl"]
+checksum = "sha256:aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396433"
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.macos-arm64"]
+checksum = "sha256:0c8c7dbe5e23594a198b786c4bc13dacc101fa6196b0cb0b23a1ca44e61f4b4f"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-darwin-arm64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396417"
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.macos-x64"]
+checksum = "sha256:5a99f26f57246dc9319dd294803313197a0f34d33c525b3ea8b655db5916ece0"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-darwin-amd64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396367"
+
+[tools."aqua:kubernetes-sigs/kind"."platforms.windows-x64"]
+checksum = "sha256:4b22adaa135368c5a465d56bbd8e520cbea87272a06ca00b6078e7b81515c9fc"
+url = "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-windows-amd64"
+url_api = "https://api.github.com/repos/kubernetes-sigs/kind/releases/assets/531396499"
+
+[[tools."aqua:kubernetes/kubectl"]]
+version = "1.37.1"
+backend = "aqua:kubernetes/kubectl"
+specifiers = ["1.37.1"]
+
+[tools."aqua:kubernetes/kubectl"."platforms.linux-arm64"]
+checksum = "sha256:ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7"
+url = "https://dl.k8s.io/v1.37.1/bin/linux/arm64/kubectl"
+
+[tools."aqua:kubernetes/kubectl"."platforms.linux-arm64-musl"]
+checksum = "sha256:ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7"
+url = "https://dl.k8s.io/v1.37.1/bin/linux/arm64/kubectl"
+
+[tools."aqua:kubernetes/kubectl"."platforms.linux-x64"]
+checksum = "sha256:65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8"
+url = "https://dl.k8s.io/v1.37.1/bin/linux/amd64/kubectl"
+
+[tools."aqua:kubernetes/kubectl"."platforms.linux-x64-musl"]
+checksum = "sha256:65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8"
+url = "https://dl.k8s.io/v1.37.1/bin/linux/amd64/kubectl"
+
+[tools."aqua:kubernetes/kubectl"."platforms.macos-arm64"]
+checksum = "sha256:fd65982c97ddad3106754b69ffa196d0e543aa591930ae52aed1adfb92f8c77f"
+url = "https://dl.k8s.io/v1.37.1/bin/darwin/arm64/kubectl"
+
+[tools."aqua:kubernetes/kubectl"."platforms.macos-x64"]
+checksum = "sha256:6851381c486ff6edd691623e3d65c87cb9a5b02887ff8fbbb38d8a031b748387"
+url = "https://dl.k8s.io/v1.37.1/bin/darwin/amd64/kubectl"
+
+[tools."aqua:kubernetes/kubectl"."platforms.windows-x64"]
+checksum = "sha256:14b93c4916a6f37a06fbc1f46b0a1d2404c4f9741be09f00d6caf8af3b05f1d3"
+url = "https://dl.k8s.io/v1.37.1/bin/windows/amd64/kubectl.exe"
+
 [[tools."aqua:suzuki-shunsuke/ghalint"]]
 version = "1.5.5"
 backend = "aqua:suzuki-shunsuke/ghalint"

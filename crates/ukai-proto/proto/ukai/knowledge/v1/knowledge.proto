@@ -1,0 +1,189 @@
+// Knowledge: notes kept outside the repositories they are about, per scope.
+// See "ナレッジ" in docs/design.md.
+syntax = "proto3";
+
+package ukai.knowledge.v1;
+
+// The notes as `ukai-knowledge` keeps them. Only the gateway calls it, with
+// the token it shares with it: the gateway is what tells who is asking and
+// which scope they may use, and this service trusts the `Caller` it says.
+service KnowledgeStore {
+  // The scope's notes, by name; deleted ones are not listed.
+  rpc List(ListRequest) returns (ListResponse);
+  // A note as it is now.
+  rpc Get(GetRequest) returns (GetResponse);
+  // Every write and delete of a note, newest first.
+  rpc Revisions(RevisionsRequest) returns (RevisionsResponse);
+  // Create or replace a note, if it is still at the revision the writer read.
+  rpc Put(PutRequest) returns (ChangeResponse);
+  // Delete a note, if it is still at the revision the writer read.
+  rpc Delete(DeleteRequest) returns (ChangeResponse);
+  // Approve a note's latest revision. A person's only.
+  rpc Approve(ReviewRequest) returns (ChangeResponse);
+  // Reject a note's latest revision, which awaits review: write the approved
+  // one back, or delete the note when none was. A person's only.
+  rpc Reject(ReviewRequest) returns (ChangeResponse);
+}
+
+// Who asks, as the gateway found out.
+message Caller {
+  // What the notes are kept under: a project `gateway.toml` names, or a
+  // repository.
+  string scope = 1;
+  Editor editor = 2;
+  // The agent pod's workspace, for an agent; its changes are capped per
+  // workspace.
+  optional string workspace = 3;
+}
+
+enum Editor {
+  EDITOR_UNSPECIFIED = 0;
+  // Someone through the app.
+  EDITOR_USER = 1;
+  // An agent, through the relay's MCP server.
+  EDITOR_AGENT = 2;
+}
+
+// The part of a note its writer sets.
+message NoteSpec {
+  string description = 1;
+  // Markdown.
+  string body = 2;
+  repeated string tags = 3;
+  // Whether sessions are left to ask for the note rather than shown it.
+  bool on_demand = 4;
+}
+
+message Provenance {
+  optional string workspace = 1;
+  optional string commit = 2;
+}
+
+// The last revision of a note a person approved.
+message Approved {
+  uint64 revision = 1;
+  NoteSpec spec = 2;
+  // Unix seconds.
+  int64 updated = 3;
+  Editor updated_by = 4;
+  Provenance provenance = 5;
+}
+
+message Note {
+  string name = 1;
+  NoteSpec spec = 2;
+  uint64 revision = 3;
+  int64 updated = 4;
+  Editor updated_by = 5;
+  Provenance provenance = 6;
+  optional Approved approved = 7;
+}
+
+message ApprovedSummary {
+  uint64 revision = 1;
+  string description = 2;
+  repeated string tags = 3;
+  bool on_demand = 4;
+}
+
+// A note as listed: everything but the body.
+message NoteSummary {
+  string name = 1;
+  string description = 2;
+  repeated string tags = 3;
+  bool on_demand = 4;
+  uint64 revision = 5;
+  int64 updated = 6;
+  Editor updated_by = 7;
+  optional ApprovedSummary approved = 8;
+}
+
+message Revision {
+  uint64 revision = 1;
+  // The note as written; for a delete, as it was before.
+  NoteSpec spec = 2;
+  int64 updated = 3;
+  Editor updated_by = 4;
+  Provenance provenance = 5;
+  bool deleted = 6;
+}
+
+message ListRequest {
+  Caller caller = 1;
+}
+
+message ListResponse {
+  repeated NoteSummary notes = 1;
+}
+
+message GetRequest {
+  Caller caller = 1;
+  string name = 2;
+}
+
+message GetResponse {
+  // Absent when there is no such note, or it is deleted.
+  optional Note note = 1;
+}
+
+message RevisionsRequest {
+  Caller caller = 1;
+  string name = 2;
+}
+
+message RevisionsResponse {
+  // Empty when the name was never written.
+  repeated Revision revisions = 1;
+}
+
+message PutRequest {
+  Caller caller = 1;
+  string name = 2;
+  NoteSpec spec = 3;
+  // The revision the writer read: 0 for a new note.
+  uint64 base_revision = 4;
+  // The commit the writer's checkout was at, as it says.
+  optional string commit = 5;
+}
+
+message DeleteRequest {
+  Caller caller = 1;
+  string name = 2;
+  // The revision the writer read.
+  uint64 revision = 3;
+}
+
+message ReviewRequest {
+  Caller caller = 1;
+  string name = 2;
+  // The revision reviewed, which must be the latest.
+  uint64 revision = 3;
+}
+
+// What a change came to. A conflict and a refusal are answers, not errors:
+// they carry what the writer needs to try again. A missing note is
+// NOT_FOUND, too many changes RESOURCE_EXHAUSTED, a review by an agent
+// PERMISSION_DENIED, and a store not reached yet UNAVAILABLE.
+message ChangeResponse {
+  oneof outcome {
+    Changed changed = 1;
+    Conflict conflict = 2;
+    Refused refused = 3;
+  }
+}
+
+message Changed {
+  // The note as it is now; absent once it is deleted.
+  optional Note note = 1;
+}
+
+// The note is not at the revision the writer read.
+message Conflict {
+  // As it is now; absent when it was deleted.
+  optional Note current = 1;
+}
+
+// Every reason the change was refused.
+message Refused {
+  repeated string problems = 1;
+}

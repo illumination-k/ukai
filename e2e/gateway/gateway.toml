@@ -1,0 +1,8 @@
+# The agents of the e2e gateway. No pod of theirs is started: the tests
+# reach the knowledge through the gateway, and the service directly.
+
+[agents.e2e]
+image = "busybox:1.37"
+command = "true"
+workspace = { git = "https://github.com/illumination-k/ukai.git" }
+knowledge = "e2e"

@@ -1,0 +1,79 @@
+name: E2E Gateway
+
+# Deploys deploy/gateway, with the runtime image built from this commit, into
+# a kind cluster and checks it from outside (e2e/gateway/run.sh): knowledge
+# through the gateway and ukai-knowledge, their tokens, and the
+# NetworkPolicies.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/ukai-acp/**"
+      - "crates/ukai-config/**"
+      - "crates/ukai-core/**"
+      - "crates/ukai-gateway/**"
+      - "crates/ukai-knowledge/**"
+      - "crates/ukai-proto/**"
+      - "crates/ukai-relay/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/gateway/**"
+      - "images/runtime/**"
+      - "e2e/gateway/**"
+      - "mise.toml"
+      - ".github/workflows/e2e_gateway.yml"
+  pull_request:
+    paths:
+      - "crates/ukai-acp/**"
+      - "crates/ukai-config/**"
+      - "crates/ukai-core/**"
+      - "crates/ukai-gateway/**"
+      - "crates/ukai-knowledge/**"
+      - "crates/ukai-proto/**"
+      - "crates/ukai-relay/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/gateway/**"
+      - "images/runtime/**"
+      - "e2e/gateway/**"
+      - "mise.toml"
+      - ".github/workflows/e2e_gateway.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # The image as images/runtime builds it, with a quicker profile.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/runtime/Dockerfile
+          platforms: linux/amd64
+          build-args: CARGO_PROFILE=dev
+          tags: ukai-runtime:e2e
+          load: true
+          push: false
+          cache-from: type=gha,scope=e2e-gateway
+          cache-to: type=gha,scope=e2e-gateway,mode=max
+
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: e2e-gateway
+
+      - name: E2E
+        run: mise run e2e:gateway
