@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::use_wry_event_handler;
@@ -55,6 +55,7 @@ pub fn App() -> Element {
             schedule_names: Signal::new(HashMap::new()),
             schedule_revision: Signal::new(0),
             knowledge_revision: Signal::new(0),
+            editing_notes: Signal::new(HashSet::new()),
         }
     });
     use_hook(|| {

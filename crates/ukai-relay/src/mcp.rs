@@ -395,11 +395,11 @@ fn tools(knowledge: bool, previews: bool) -> Vec<Value> {
                             "type": "array",
                             "items": { "type": "string" },
                             "maxItems": TAGS_MAX,
-                            "description": "A few words to find the note by, lowercase letters, digits, and `-`, like `research` or `build`. Reuse tags other notes have."
+                            "description": "A few words to find the note by, lowercase letters, digits, and `-`, like `research` or `build`. Reuse tags other notes have. Leave it out to keep the note's tags."
                         },
                         "on_demand": {
                             "type": "boolean",
-                            "description": "Leave the note out of what every session is shown, for sessions to find by tag when their task calls for it: research, background, and other notes most tasks do not need. Defaults to false."
+                            "description": "Leave the note out of what every session is shown, for sessions to find by tag when their task calls for it: research, background, and other notes most tasks do not need. Leave it out to keep the note's; a new note defaults to false."
                         },
                         "revision": {
                             "type": "integer",
@@ -480,22 +480,31 @@ async fn call_knowledge<N: Notes>(
             .await
             .map_err(failed)
             .and_then(|note| show(&note, arguments.get("revision").and_then(Value::as_u64))),
-        WRITE_KNOWLEDGE => {
+        WRITE_KNOWLEDGE => 'write: {
+            let (tags, on_demand) = match labels(arguments) {
+                Ok(labels) => labels,
+                Err(problem) => break 'write Err(problem),
+            };
+            // What is left out stays as the note has it: its latest
+            // revision, which this write replaces.
+            let kept = if (tags.is_none() || on_demand.is_none()) && revision > 0 {
+                match notes.get(name).await {
+                    Ok(note) => Some(note.spec),
+                    Err(KnowledgeError::NotFound) => None,
+                    Err(error) => break 'write Err(failed(error)),
+                }
+            } else {
+                None
+            };
             let write = NoteWrite {
                 spec: NoteSpec {
                     description: text("description").to_owned(),
                     body: text("body").to_owned(),
-                    tags: arguments
-                        .get("tags")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect(),
-                    on_demand: arguments
-                        .get("on_demand")
-                        .and_then(Value::as_bool)
+                    tags: tags
+                        .or_else(|| kept.as_ref().map(|spec| spec.tags.clone()))
+                        .unwrap_or_default(),
+                    on_demand: on_demand
+                        .or_else(|| kept.as_ref().map(|spec| spec.on_demand))
                         .unwrap_or(false),
                 },
                 base_revision: revision,
@@ -518,6 +527,28 @@ async fn call_knowledge<N: Notes>(
         session.changes.set(session.changes.get() + 1);
     }
     Some(outcome)
+}
+
+/// The `tags` and `on_demand` a write gives, each `None` when left out; a
+/// value of the wrong kind is refused rather than dropped.
+fn labels(arguments: &Value) -> Result<(Option<Vec<String>>, Option<bool>), String> {
+    let tags = match arguments.get("tags") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .map(|tag| tag.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("`tags` is a list of words, like [\"research\"].")?,
+        ),
+        Some(_) => return Err("`tags` is a list of words, like [\"research\"].".to_owned()),
+    };
+    let on_demand = match arguments.get("on_demand") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(on_demand)) => Some(*on_demand),
+        Some(_) => return Err("`on_demand` is true or false.".to_owned()),
+    };
+    Ok((tags, on_demand))
 }
 
 /// A note as the agent reads it: which revision, whether a person reviewed
@@ -571,8 +602,8 @@ fn show(note: &Note, wanted: Option<u64>) -> Result<String, String> {
     };
     Ok(format!(
         "Revision {reading} of `{}`, {by}{at}, {review}.{newer}{tags}{on_demand}\n\
-         To change this note, write it with revision {latest}, passing its tags and \
-         on_demand again.\n\n{}\n\n{}",
+         To change this note, write it with revision {latest}; its tags and on_demand \
+         stay unless you give them.\n\n{}\n\n{}",
         note.name, spec.description, spec.body
     ))
 }

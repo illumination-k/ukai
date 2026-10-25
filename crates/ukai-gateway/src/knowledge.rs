@@ -208,18 +208,9 @@ impl ClientKnowledge {
         agent: &str,
     ) -> Result<(Caller, &KnowledgeClient), Status> {
         let headers = request.metadata().clone().into_headers();
-        if !crate::authorized(&self.gateway, &headers) {
-            return Err(Status::unauthenticated(
-                "the gateway's token is missing or wrong",
-            ));
-        }
-        let agent = self
-            .gateway
-            .agents
-            .get(agent)
-            .ok_or_else(|| Status::not_found(format!("the gateway has no agent `{agent}`")))?;
+        crate::access::authorize(&self.gateway, &headers)?;
         let caller = Caller {
-            scope: agent.knowledge_scope(),
+            scope: crate::access::agent(&self.gateway, agent)?.knowledge_scope(),
             editor: Editor::User,
             workspace: None,
         };

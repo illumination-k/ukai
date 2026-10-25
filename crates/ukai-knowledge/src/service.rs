@@ -101,7 +101,7 @@ impl Service {
 fn failed(error: KnowledgeError) -> Status {
     match error {
         KnowledgeError::NotFound => Status::not_found("no such note"),
-        KnowledgeError::Refused(problems) => Status::failed_precondition(problems.join("; ")),
+        KnowledgeError::Refused(problems) => Status::invalid_argument(problems.join("; ")),
         KnowledgeError::Conflict(_) => Status::aborted("the note changed since it was read"),
         error @ (KnowledgeError::Store(_) | KnowledgeError::Unreadable(_)) => {
             tracing::warn!(%error, "knowledge request failed");
@@ -265,7 +265,7 @@ pub fn authorize(token: String) -> impl FnMut(Request<()>) -> Result<Request<()>
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
-        if presented.is_some_and(|presented| same_secret(&token, presented)) {
+        if presented.is_some_and(|presented| ukai_core::secret::same_secret(&token, presented)) {
             Ok(request)
         } else {
             Err(Status::unauthenticated(
@@ -273,17 +273,6 @@ pub fn authorize(token: String) -> impl FnMut(Request<()>) -> Result<Request<()>
             ))
         }
     }
-}
-
-/// Whether `presented` is `secret`, taking as long for every `presented` of
-/// the same length.
-fn same_secret(secret: &str, presented: &str) -> bool {
-    presented.len() == secret.len()
-        && presented
-            .bytes()
-            .zip(secret.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
 }
 
 #[cfg(test)]

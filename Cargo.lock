@@ -10099,6 +10099,7 @@ dependencies = [
  "base64 0.23.1",
  "futures",
  "http-body-util",
+ "percent-encoding",
  "reqwest 0.13.5",
  "rstest",
  "security-framework",

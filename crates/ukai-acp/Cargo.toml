@@ -14,6 +14,7 @@ agent-client-protocol-http = { workspace = true, features = ["client"] }
 base64 = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
+percent-encoding = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

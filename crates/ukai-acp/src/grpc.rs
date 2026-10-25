@@ -63,19 +63,20 @@ impl tower::Service<http::Request<GrpcWebCall<tonic::body::Body>>> for Web {
 
 /// A gateway agent's `/acp` URL as the gateway's root and the agent's id:
 /// `wss://gw.example.com/agents/claude/acp` is `https://gw.example.com` and
-/// `claude`, where the gRPC services are `<root>/<service>/<method>`.
+/// `claude`, where the gRPC services are `<root>/<service>/<method>`. The
+/// URL is read as for the agent's other endpoints
+/// (`crate::reports::endpoint_base`), and the id decoded as the gateway
+/// decodes it in a path.
 pub fn agent_root(url: &str) -> Option<(String, String)> {
-    let (scheme, rest) = match url.split_once("://")? {
-        ("ws" | "http", rest) => ("http", rest),
-        ("wss" | "https", rest) => ("https", rest),
-        _ => return None,
-    };
-    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-    let rest = rest.trim_end_matches('/');
-    let rest = rest.strip_suffix("/acp")?;
-    let (root, agent) = rest.rsplit_once("/agents/")?;
-    (!root.is_empty() && !agent.is_empty() && !agent.contains('/'))
-        .then(|| (format!("{scheme}://{root}"), agent.to_owned()))
+    let agent = crate::reports::endpoint_base(url, "")?;
+    let (root, id) = agent.rsplit_once("/agents/")?;
+    let id = percent_encoding::percent_decode_str(id)
+        .decode_utf8()
+        .ok()?;
+    let has_root = root
+        .split_once("://")
+        .is_some_and(|(_, host)| !host.is_empty());
+    (has_root && !id.is_empty() && !id.contains('/')).then(|| (root.to_owned(), id.into_owned()))
 }
 
 /// The workspace a pane's request is about, as for its `/acp`: the pane's
@@ -144,6 +145,8 @@ mod tests {
     #[case::prefix("https://example.com/ukai/agents/a/acp/", Some(("https://example.com/ukai", "a")))]
     #[case::query("wss://gw/agents/a/acp?x=1", Some(("https://gw", "a")))]
     #[case::not_acp("wss://gw/agents/a/other", None)]
+    #[case::encoded("wss://gw/agents/my%20agent/acp", Some(("https://gw", "my agent")))]
+    #[case::encoded_slash("wss://gw/agents/a%2Fb/acp", None)]
     #[case::no_agent("wss://gw/acp", None)]
     #[case::nested("wss://gw/agents/a/b/acp", None)]
     #[case::scheme("ftp://gw/agents/a/acp", None)]
