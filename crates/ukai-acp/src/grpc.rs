@@ -4,13 +4,14 @@
 //! requests, and so does any HTTP/1.1 proxy in front of the gateway, such as
 //! IAP, which might not pass gRPC's HTTP/2. Unary calls only.
 
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use http_body_util::BodyExt;
 use tonic::Code;
-use tonic::codegen::http;
+use tonic::codegen::{Bytes, http};
 use tonic_web::{GrpcWebCall, GrpcWebClientService};
 use ukai_config::WorkspaceScope;
 use ukai_proto::gateway::v1 as gw;
@@ -56,9 +57,43 @@ impl tower::Service<http::Request<GrpcWebCall<tonic::body::Body>>> for Web {
                 .body(body)
                 .send()
                 .await?;
-            Ok(http::Response::from(response))
+            // So is its answer, with the trailers after it.
+            let (parts, body) = http::Response::from(response).into_parts();
+            let body = body.collect().await?.to_bytes();
+            Ok(http::Response::from_parts(parts, apart(body)))
         })
     }
+}
+
+/// A gRPC-Web answer with its trailers as a chunk of their own. tonic-web
+/// 0.14 drops trailers that arrive in the same chunk as a message, and tonic
+/// then fails the call for want of a status, as it would a truncated one; a
+/// proxy may well pass a small answer in one chunk.
+fn apart(body: Bytes) -> reqwest::Body {
+    match trailers_at(&body) {
+        Some(at) if at > 0 => {
+            let chunks = [Ok::<_, Infallible>(body.slice(..at)), Ok(body.slice(at..))];
+            reqwest::Body::wrap_stream(futures::stream::iter(chunks))
+        }
+        _ => reqwest::Body::from(body),
+    }
+}
+
+/// Where the trailers frame of a gRPC-Web body starts, past its messages,
+/// each a flag byte, a big-endian `u32` length, and that many bytes.
+fn trailers_at(body: &[u8]) -> Option<usize> {
+    const TRAILERS: u8 = 0x80;
+    let mut at = 0;
+    while let Some(flag) = body.get(at) {
+        if flag & TRAILERS != 0 {
+            return Some(at);
+        }
+        let len = body.get(at + 1..at + 5)?.try_into().ok()?;
+        at = at
+            .checked_add(5)?
+            .checked_add(u32::from_be_bytes(len) as usize)?;
+    }
+    None
 }
 
 /// A gateway agent's `/acp` URL as the gateway's root and the agent's id:
@@ -136,8 +171,45 @@ impl From<tonic::Status> for Failure {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use tonic_web::GrpcWebClientService;
+    use ukai_proto::gateway::v1::ports_client::PortsClient;
 
     use super::*;
+
+    const EMPTY_MESSAGE: &[u8] = b"\0\0\0\0\0";
+    const OK: &[u8] = b"\x80\0\0\0\x0fgrpc-status:0\r\n";
+
+    #[rstest]
+    #[case::message_then_trailers(&[EMPTY_MESSAGE, OK], Some(5))]
+    #[case::two_messages(&[&b"\0\0\0\0\x01x"[..], EMPTY_MESSAGE, OK], Some(11))]
+    #[case::trailers_only(&[OK], Some(0))]
+    #[case::no_trailers(&[EMPTY_MESSAGE], None)]
+    #[case::cut_short(&[&b"\0\0\0\0\x09abc"[..]], None)]
+    #[case::empty(&[], None)]
+    fn finds_the_trailers(#[case] frames: &[&[u8]], #[case] expected: Option<usize>) {
+        assert_eq!(trailers_at(&frames.concat()), expected);
+    }
+
+    /// What a proxy may do with a small answer: send the message and its
+    /// trailers in one chunk.
+    #[tokio::test]
+    async fn reads_a_message_and_its_trailers_sent_together() {
+        let gateway = tower::service_fn(|_: http::Request<_>| async {
+            let body = Bytes::from([EMPTY_MESSAGE, OK].concat());
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/grpc-web+proto")
+                    .body(apart(body))
+                    .unwrap_or_else(|e| panic!("{e}")),
+            )
+        });
+        let listing = PortsClient::new(GrpcWebClientService::new(gateway))
+            .list(gw::ListPortsRequest::default())
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status.to_string());
+        assert_eq!(listing, Ok(gw::PortListing::default()));
+    }
 
     #[rstest]
     #[case::wss("wss://gw.example.com/agents/claude/acp", Some(("https://gw.example.com", "claude")))]
