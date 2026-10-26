@@ -19,6 +19,7 @@
 
 pub mod checkout;
 mod fs;
+mod gateway;
 pub mod gateways;
 mod grpc;
 pub mod knowledge;

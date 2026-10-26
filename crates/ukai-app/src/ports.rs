@@ -13,15 +13,15 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use ukai_acp::PortsEndpoint;
 use ukai_acp::ports::{PortListing, PortsError, Preview};
-use ukai_config::{AgentSpec, Config};
+use ukai_config::AgentSpec;
 use ukai_core::browser::{new_previews, parse_target};
 use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{Direction, PaneContent, PaneId, ProjectId, ReportSource};
 
+use crate::follow::{Endpoints, Workspace, followed, relist, workspaces};
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::projects::AppSignals;
-use crate::remote_reports::{Endpoints, Workspace, declaration, followed, workspaces};
 use crate::sidebar::Head;
 
 /// How often the listings are read again while agent panes are open.
@@ -39,15 +39,9 @@ pub enum Ports {
 /// Every workspace's last listing, kept by [`FollowPorts`].
 pub type PortListings = Signal<HashMap<Workspace, Ports>>;
 
-/// Where a workspace's ports are listed and reached.
-pub fn endpoint(
-    configs: &HashMap<ProjectId, Result<Config, String>>,
-    workspace: &Workspace,
-) -> Result<PortsEndpoint, String> {
-    resolve(&declaration(configs, workspace)?, workspace)
-}
-
-fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<PortsEndpoint, String> {
+/// Where a workspace's ports are listed and reached, for
+/// [`crate::follow::endpoint`].
+pub fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<PortsEndpoint, String> {
     PortsEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.workspace.as_ref())
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("agent `{}` runs on this machine", workspace.agent))
@@ -59,7 +53,6 @@ fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<PortsEndpoint, Str
 #[component]
 pub fn FollowPorts() -> Element {
     let app = use_context::<AppSignals>();
-    let mut listings = app.ports;
     use_future(move || async move {
         let mut endpoints = Endpoints::new(resolve);
         // The newest preview of each workspace the app knows of.
@@ -73,43 +66,44 @@ pub fn FollowPorts() -> Element {
                     workspaces(&layout, &configs),
                 )
             };
-            for workspace in &wanted {
-                // Bound first, so the borrow of the configurations ends
-                // before the request is awaited.
-                let endpoint = endpoints.get(&app.configs.peek(), workspace);
-                let ports = match endpoint {
-                    Ok(endpoint) => match endpoint.list().await {
-                        Ok(listing) => Ports::Listed(listing),
-                        Err(PortsError::Gone) => Ports::NotRunning,
-                        Err(error) => Ports::Failed(error.to_string()),
-                    },
-                    Err(problem) => Ports::Failed(problem),
-                };
-                if let Ports::Listed(listing) = &ports {
-                    let (fresh, newest) =
-                        new_previews(seen.get(workspace).copied(), &listing.previews);
-                    seen.insert(workspace.clone(), newest);
-                    if open.contains(workspace) {
-                        for preview in fresh {
-                            show_preview(app, workspace, &preview);
+            relist(
+                app,
+                app.ports,
+                &mut endpoints,
+                &wanted,
+                async |workspace, endpoint| {
+                    let ports = list(endpoint).await;
+                    if let Ports::Listed(listing) = &ports {
+                        let (fresh, newest) =
+                            new_previews(seen.get(workspace).copied(), &listing.previews);
+                        seen.insert(workspace.clone(), newest);
+                        if open.contains(workspace) {
+                            for preview in fresh {
+                                show_preview(app, workspace, &preview);
+                            }
                         }
                     }
-                }
-                let changed = listings.peek().get(workspace) != Some(&ports);
-                if changed {
-                    listings.write().insert(workspace.clone(), ports);
-                }
-            }
-            let stale = listings.peek().keys().any(|known| !wanted.contains(known));
-            if stale {
-                listings.write().retain(|known, _| wanted.contains(known));
-            }
+                    ports
+                },
+            )
+            .await;
             seen.retain(|known, _| wanted.contains(known));
-            endpoints.keep(&wanted);
             tokio::time::sleep(RELIST).await;
         }
     });
     rsx! {}
+}
+
+/// What `endpoint` lists, as the sidebar shows it.
+async fn list(endpoint: Result<PortsEndpoint, String>) -> Ports {
+    match endpoint {
+        Ok(endpoint) => match endpoint.list().await {
+            Ok(listing) => Ports::Listed(listing),
+            Err(PortsError::Gone) => Ports::NotRunning,
+            Err(error) => Ports::Failed(error.to_string()),
+        },
+        Err(problem) => Ports::Failed(problem),
+    }
 }
 
 /// Show the page on `port` at `path` in `pane`.

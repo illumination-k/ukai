@@ -34,8 +34,9 @@ use ukai_proto::gateway::v1::workspace_knowledge_client::WorkspaceKnowledgeClien
 use ukai_proto::knowledge::v1 as pb;
 use ukai_proto::knowledge::v1::change_response::Outcome;
 
+use crate::ResolveError;
+use crate::gateway::GatewayAgent;
 use crate::grpc::{self, Channel};
-use crate::{ResolveError, header_map};
 
 pub mod wire;
 
@@ -314,21 +315,13 @@ impl KnowledgeEndpoint {
         spec: &AgentSpec,
         lookup: impl Fn(Source, &str) -> Option<String> + Copy,
     ) -> Result<Option<Self>, ResolveError> {
-        let AgentSpec::Gateway { url, headers, .. } = spec else {
+        let Some(agent) = GatewayAgent::resolve(spec, lookup)? else {
             return Ok(None);
         };
-        let Some((root, agent)) = grpc::agent_root(&ukai_config::interpolate(url, lookup)?) else {
-            return Ok(None);
-        };
-        let client = reqwest::Client::builder()
-            .default_headers(header_map(headers, &[], lookup)?)
-            .timeout(TIMEOUT)
-            .build()
-            .map_err(|error| ResolveError::Client(error.to_string()))?;
         Ok(Some(Self {
-            channel: grpc::channel(client, root.clone()),
-            root,
-            asker: Asker::Agent(agent),
+            channel: agent.channel(TIMEOUT)?,
+            root: agent.root,
+            asker: Asker::Agent(agent.id),
         }))
     }
 

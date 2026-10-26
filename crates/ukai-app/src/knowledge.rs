@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use ukai_acp::knowledge::{KnowledgeEndpoint, KnowledgeError};
-use ukai_config::{AgentSpec, Config};
+use ukai_config::AgentSpec;
 use ukai_core::knowledge::{
     self, Editor, Listing, Note, NoteSpec, NoteSummary, NoteWrite, Revision,
 };
@@ -21,28 +21,18 @@ use ukai_core::review::{self, LineKind};
 use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId};
 
+use crate::follow::{self, Endpoints, Workspace, list_gateway_agents, poll};
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::markdown::Markdown;
 use crate::projects::AppSignals;
-use crate::remote_reports::{Endpoints, Workspace};
-use crate::schedules::{config_of, gateways, local_now, poll, when_unix};
+use crate::schedules::{local_now, when_unix};
 use crate::sidebar::Head;
 
 /// How often the app asks the gateways for their notes.
 const LIST_EVERY: Duration = Duration::from_secs(15);
 /// How often an open note pane asks for its note.
 const PANE_EVERY: Duration = Duration::from_secs(5);
-
-/// Where `agent`'s notes are kept.
-fn endpoint(config: &Config, agent: &str) -> Result<KnowledgeEndpoint, String> {
-    let spec = config
-        .agent(agent)
-        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    KnowledgeEndpoint::resolve(&spec, ukai_acp::system_lookup)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent `{agent}` is not a gateway agent, so it keeps no knowledge"))
-}
 
 /// `error` as the user reads it, one problem per line.
 fn explain(error: &KnowledgeError) -> Vec<String> {
@@ -174,6 +164,7 @@ fn sections(fetched: &[Fetched]) -> Vec<Section> {
 /// [`FollowKnowledge`].
 pub type KnowledgeListings = Signal<HashMap<ProjectId, Vec<Fetched>>>;
 
+/// Where `workspace`'s agent keeps its notes.
 fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<KnowledgeEndpoint, String> {
     KnowledgeEndpoint::resolve(spec, ukai_acp::system_lookup)
         .map_err(|error| error.to_string())?
@@ -197,25 +188,14 @@ pub fn FollowKnowledge() -> Element {
         poll(app.knowledge_revision, LIST_EVERY, move || {
             let endpoints = endpoints.clone();
             async move {
-                let mut fetched = HashMap::new();
-                let mut asked = Vec::new();
-                for (project, _, agents) in gateways(app) {
-                    let mut listed = Vec::new();
-                    for agent in agents {
-                        let workspace = Workspace::of(&project, &agent, None);
-                        let endpoint = endpoints.borrow_mut().get(&app.configs.peek(), &workspace);
-                        let list = match endpoint {
-                            Ok(endpoint) => {
-                                endpoint.list().await.map_err(|error| error.to_string())
-                            }
-                            Err(error) => Err(error),
-                        };
-                        listed.push((agent, list));
-                        asked.push(workspace);
-                    }
-                    fetched.insert(project, listed);
-                }
-                endpoints.borrow_mut().keep(&asked);
+                let fetched: HashMap<_, _> =
+                    list_gateway_agents(app, &endpoints, async |endpoint| {
+                        endpoint.list().await.map_err(|error| error.to_string())
+                    })
+                    .await
+                    .into_iter()
+                    .map(|(project, _, listed)| (project, listed))
+                    .collect();
                 if *listings.peek() != fetched {
                     listings.set(fetched);
                 }
@@ -558,7 +538,10 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
     let endpoint = use_memo({
         let agent = agent.clone();
         let project = project.clone();
-        move || config_of(app, &project).and_then(|config| endpoint(&config, &agent))
+        move || {
+            let workspace = Workspace::of(&project, &agent, None);
+            follow::endpoint(&app.configs.read(), &workspace, resolve)
+        }
     });
     let mut loaded = use_signal(|| {
         if note.is_some() {

@@ -1,0 +1,6 @@
+# Profiles for `agent-lens run <name>` and `agent-lens baseline`.
+[profile.audit]
+path = "crates"
+tools = ["hotspot", "complexity", "similarity", "cohesion"]
+format = "md"
+exclude-tests = true

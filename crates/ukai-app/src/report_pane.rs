@@ -36,10 +36,11 @@ use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource};
 
 use crate::child_view::{ChildView, use_child_view};
+use crate::follow::{self, Workspace};
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
 use crate::projects::{AppSignals, project_context};
-use crate::remote_reports::{self, Listing, Workspace};
+use crate::remote_reports::{self, Listing};
 use crate::schedules::{local_now, when_unix};
 use crate::sidebar::Head;
 
@@ -176,13 +177,14 @@ fn open_source(
         ReportSource::Agent { agent, workspace } => {
             let kind = ReportKind::of(path)
                 .ok_or_else(|| format!("{} is neither HTML nor an image", path.display()))?;
-            let endpoint = remote_reports::endpoint(
+            let endpoint = follow::endpoint(
                 &app.configs.read(),
                 &Workspace {
                     project: project.clone(),
                     agent: agent.clone(),
                     workspace: workspace.clone(),
                 },
+                remote_reports::resolve,
             )?;
             Ok(Source::Remote(Remote {
                 endpoint,

@@ -23,11 +23,11 @@ use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource, sidebar};
 
 use crate::agent_pane::review_of;
 use crate::diff_view::{AnnotationCard, DiffLines, LineNote, NoteActions};
+use crate::follow::poll;
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::markdown::Markdown;
 use crate::projects::{AppSignals, project_context};
-use crate::schedules::poll;
 
 /// How often an open diff pane reads the checkout again.
 const RELOAD: Duration = Duration::from_secs(10);
