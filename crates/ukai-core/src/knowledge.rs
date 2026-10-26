@@ -128,7 +128,7 @@ pub fn problems(name: &str, spec: &NoteSpec) -> Vec<Problem> {
 /// The first character in `text` that renders as nothing or reorders what
 /// is around it: zero-width and joining characters, bidirectional controls,
 /// and Unicode tags, which can carry instructions a reviewer never sees.
-fn invisible(text: &str) -> Option<char> {
+pub(crate) fn invisible(text: &str) -> Option<char> {
     text.chars().find(|c| {
         matches!(
             u32::from(*c),

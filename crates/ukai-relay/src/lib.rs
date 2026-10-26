@@ -15,4 +15,5 @@ pub mod init;
 pub mod mcp;
 pub mod ports;
 pub mod reports;
+pub mod review;
 pub mod server;

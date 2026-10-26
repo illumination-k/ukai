@@ -27,6 +27,7 @@ pub enum Icon {
     Book,
     Cloud,
     Monitor,
+    Diff,
 }
 
 impl Icon {
@@ -72,6 +73,7 @@ impl Icon {
             ],
             Self::Cloud => &["M4.5 12.5a3 3 0 0 1-.4-6 4 4 0 0 1 7.7-.9 3.2 3.2 0 0 1-.3 6.9z"],
             Self::Monitor => &["M2.5 3.5h11v7.5h-11z", "M6 13.5h4", "M8 11v2.5"],
+            Self::Diff => &["M5 2.5v5", "M2.5 5h5", "M8.5 11h5", "M3.5 13.5l9-9"],
             Self::Globe => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
                 "M2.5 8h11",

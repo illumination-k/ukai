@@ -364,7 +364,7 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
     use std::path::Path;
 
     use ukai_acp::PaneWorkspace;
-    use ukai_acp::checkout::{Checkout, CheckoutError};
+    use ukai_acp::checkout::{Checkout, CheckoutError, DiffBase};
     use ukai_acp::ports::{PortsEndpoint, PortsError};
     use ukai_acp::updates::RestartEndpoint;
 
@@ -379,7 +379,8 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         .list()
         .await;
     assert!(matches!(ports, Err(PortsError::Gone)), "{ports:?}");
-    // Neither the checkout's files nor a command start one.
+    // Neither the checkout's files, a command, a diff, nor a reply to its
+    // review start one.
     let checkout = Checkout::resolve(
         &agent_spec(&token),
         |_, _| None,
@@ -392,6 +393,22 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
     assert!(matches!(files, Err(CheckoutError::NotRunning)), "{files:?}");
     let ran = checkout.run("true").await;
     assert!(matches!(ran, Err(CheckoutError::NotRunning)), "{ran:?}");
+    let diffed = checkout.diff(DiffBase::Branch).await;
+    assert!(
+        matches!(diffed, Err(CheckoutError::NotRunning)),
+        "{diffed:?}"
+    );
+    let annotated = checkout
+        .annotate(ukai_acp::review::AnnotateRequest {
+            id: "a1".into(),
+            reply: None,
+            resolved: Some(true),
+        })
+        .await;
+    assert!(
+        matches!(annotated, Err(CheckoutError::NotRunning)),
+        "{annotated:?}"
+    );
     // Restarting a workspace with no pod leaves it without one.
     RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
         .unwrap_or_else(|e| panic!("{e}"))

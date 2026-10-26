@@ -1,11 +1,11 @@
 //! Checks that serde cannot express: every agent a permission rule names has
-//! to be declared, the report and voice settings have to make sense, and a
-//! project file holds nothing that only the user file may set.
+//! to be declared, the report, review, and voice settings have to make
+//! sense, and a project file holds nothing that only the user file may set.
 
 use std::path::{Component, PathBuf};
 
 use crate::layered::REPORT_DIRS_ENV;
-use crate::schema::Config;
+use crate::schema::{Config, PRIORITIES, REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, Review};
 
 /// One problem with a configuration. Validation collects all of them rather
 /// than stopping at the first, so a user fixes the file in one pass.
@@ -25,6 +25,28 @@ pub enum Problem {
     VoiceInProject,
     #[error("voice.language: `{0}` is not an ISO 639-1 code such as `ja` or `en`")]
     InvalidVoiceLanguage(String),
+    #[error(
+        "review.tags: `{0}` is not lowercase letters, digits, and `-`, at most {REVIEW_TAG_MAX} characters"
+    )]
+    InvalidReviewTag(String),
+    #[error("review.priorities: `{0}` is not one of p0, p1, p2, p3")]
+    UnknownPriority(String),
+    #[error("review.{0}: {1}")]
+    ReviewDescription(String, DescriptionProblem),
+}
+
+/// What is wrong with a description in `[review]`, which the agent is told
+/// as it is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DescriptionProblem {
+    #[error("say what it means")]
+    Empty,
+    #[error("keep it to one line")]
+    Multiline,
+    #[error("keep it to {REVIEW_DESCRIPTION_MAX} characters")]
+    Long,
+    #[error("it has a character that does not show; remove it")]
+    Invisible,
 }
 
 /// What a project's `ukai.toml` may not hold, whatever the user file says.
@@ -72,7 +94,79 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         .chain(outside_dirs)
         .chain(bad_globs)
         .chain(bad_language)
+        .chain(review_problems(&config.review))
         .collect()
+}
+
+fn review_problems(review: &Review) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (tag, description) in &review.tags {
+        if !is_tag(tag) {
+            problems.push(Problem::InvalidReviewTag(tag.clone()));
+        }
+        problems.extend(
+            description_problems(description)
+                .map(|why| Problem::ReviewDescription(format!("tags.{tag}"), why)),
+        );
+    }
+    for (priority, description) in &review.priorities {
+        if !PRIORITIES.contains(&priority.as_str()) {
+            problems.push(Problem::UnknownPriority(priority.clone()));
+        }
+        problems.extend(
+            description_problems(description)
+                .map(|why| Problem::ReviewDescription(format!("priorities.{priority}"), why)),
+        );
+    }
+    problems
+}
+
+/// Whether `tag` is lowercase letters, digits, and `-` between them.
+pub fn is_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= REVIEW_TAG_MAX
+        && !tag.starts_with('-')
+        && !tag.ends_with('-')
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn description_problems(description: &str) -> impl Iterator<Item = DescriptionProblem> {
+    let text = description.trim();
+    [
+        (text.is_empty(), DescriptionProblem::Empty),
+        (text.contains(['\n', '\r']), DescriptionProblem::Multiline),
+        (
+            text.chars().count() > REVIEW_DESCRIPTION_MAX,
+            DescriptionProblem::Long,
+        ),
+        (
+            text.chars()
+                .any(|c| (c.is_control() && !matches!(c, '\n' | '\r')) || invisible(c)),
+            DescriptionProblem::Invisible,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(wrong, problem)| wrong.then_some(problem))
+}
+
+/// Whether `c` renders as nothing or reorders what is around it, as
+/// `ukai_core::knowledge` refuses in notes.
+fn invisible(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x061C
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0xE0000..=0xE007F
+    )
 }
 
 /// Whether a report directory names a place inside the project: relative,

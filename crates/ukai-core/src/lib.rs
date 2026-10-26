@@ -1,9 +1,11 @@
 //! Application state that does not depend on the UI framework, so it can be
 //! tested headless. `ukai-app` wraps these types in signals and renders them.
 
+pub mod annotation;
 pub mod attachment;
 pub mod browser;
 pub mod config;
+pub mod diff;
 pub mod keymap;
 pub mod knowledge;
 mod layout;

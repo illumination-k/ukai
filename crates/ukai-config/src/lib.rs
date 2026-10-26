@@ -17,9 +17,10 @@ pub use layered::{
     state_dir,
 };
 pub use schema::{
-    AgentSpec, Config, Decision, Keys, PermissionRule, Project, Reports, Voice, WorkspaceScope,
+    AgentSpec, Config, Decision, Keys, PRIORITIES, PermissionRule, Project, REVIEW_DESCRIPTION_MAX,
+    REVIEW_TAG_MAX, Reports, Review, Voice, WorkspaceScope,
 };
-pub use validate::Problem;
+pub use validate::{DescriptionProblem, Problem, is_tag};
 
 /// File name looked up at the project root.
 pub const FILE_NAME: &str = "ukai.toml";

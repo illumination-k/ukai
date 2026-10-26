@@ -19,6 +19,7 @@ use ukai_core::{
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect};
 use crate::alert::{is_unread, mark_read};
 use crate::browser_pane::BrowserView;
+use crate::diff_pane::DiffPane;
 use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
 use crate::ports::{PortPrompt, open_browser};
@@ -292,6 +293,13 @@ pub fn pane_label(
         Some(PaneContent::Note { project, note, .. }) => (
             Some(project_name(project)),
             note.clone().unwrap_or_else(|| "New note".to_owned()),
+        ),
+        Some(PaneContent::Diff { project, place }) => (
+            Some(project_name(project)),
+            match place.agent() {
+                Some(agent) => format!("Changes · {agent}"),
+                None => "Changes".to_owned(),
+            },
         ),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
     }
@@ -674,6 +682,14 @@ fn PaneView(pane: PaneId) -> Element {
                         project,
                         agent,
                         note,
+                    }
+                },
+                PaneContent::Diff { project, place } => rsx! {
+                    DiffPane {
+                        key: "{project}-{place:?}",
+                        pane,
+                        project,
+                        place,
                     }
                 },
                 PaneContent::Report { project, path, source } => rsx! {

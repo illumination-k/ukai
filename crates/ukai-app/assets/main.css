@@ -2249,6 +2249,330 @@ button.config-trigger:disabled {
   gap: 6px;
 }
 
+/* ---- diff pane: a checkout's changes ---------------------------------- */
+
+.diff-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.diff-toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-toolbar .segmented {
+  align-self: center;
+}
+
+.diff-toolbar .spacer {
+  flex: 1;
+}
+
+.diff-base {
+  font-size: 12px;
+}
+
+.diff-totals {
+  color: var(--muted-fg);
+  font: 11.5px var(--mono);
+}
+
+.diff-totals .added,
+.diff-file-row .added {
+  color: var(--ready);
+}
+
+.diff-totals .removed,
+.diff-file-row .removed {
+  color: var(--error);
+}
+
+.diff-hint {
+  flex: none;
+  margin: 6px 12px;
+}
+
+.diff-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.diff-files {
+  display: flex;
+  flex: 0 0 260px;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 6px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+
+.diff-file-row {
+  min-height: 26px;
+  font-size: 12.5px;
+}
+
+.diff-file-row .kind {
+  flex: none;
+  width: 14px;
+  color: var(--muted-fg);
+  font: 600 11px var(--mono);
+  text-align: center;
+}
+
+.diff-file-row .kind.A {
+  color: var(--ready);
+}
+
+.diff-file-row .kind.D {
+  color: var(--error);
+}
+
+.diff-file-row .kind.R {
+  color: var(--attention);
+}
+
+.diff-file-row .name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-row .dir {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-fg);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.diff-file-row .counts {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  font: 11px var(--mono);
+}
+
+.diff-file {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--card);
+  font: 12px/1.6 var(--mono);
+}
+
+.diff-file .diff-path {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* ---- the agent's review of a diff -------------------------------------- */
+
+.review-bar {
+  flex: none;
+  max-height: 40%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+}
+
+.review-head .fold {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: none;
+  color: var(--muted-fg);
+  transition: transform 0.15s;
+}
+
+.review-head .fold.open {
+  transform: rotate(90deg);
+}
+
+.review-title {
+  margin-right: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.chip {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: none;
+  color: var(--muted-fg);
+  font: 11px var(--font);
+}
+
+.chip:hover {
+  color: var(--fg);
+}
+
+.chip.active {
+  border-color: var(--fg);
+  background: var(--selected);
+  color: var(--fg);
+}
+
+.chip-note {
+  font-size: 11px;
+}
+
+/* p0 most pressing: red, orange, yellow, then grey. */
+.p0 {
+  --priority: var(--error);
+}
+
+.p1 {
+  --priority: var(--attention);
+}
+
+.p2 {
+  --priority: var(--working);
+}
+
+.p3,
+.plain {
+  --priority: var(--muted-fg);
+}
+
+.chip.priority {
+  border-color: color-mix(in srgb, var(--priority) 50%, transparent);
+  color: var(--priority);
+  font-weight: 600;
+}
+
+.chip.priority.active {
+  background: color-mix(in srgb, var(--priority) 14%, transparent);
+}
+
+.review-summary {
+  padding: 0 14px 8px 34px;
+  color: var(--chat-fg);
+  font-size: 13px;
+}
+
+.review-problem {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.note-mark {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--priority) 16%, transparent);
+  color: var(--priority);
+  font: 600 10.5px/16px var(--mono);
+  text-align: center;
+}
+
+.annotation {
+  margin: 4px 8px 8px 98px;
+  padding: 6px 10px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--priority, var(--unread));
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font: 12.5px/1.5 var(--font);
+}
+
+.annotation.resolved {
+  border-left-color: var(--idle);
+  opacity: 0.7;
+}
+
+.annotation-above .annotation {
+  margin-left: 12px;
+}
+
+.annotation-where {
+  margin: 8px 12px 0;
+  font-size: 11px;
+}
+
+.annotation-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.annotation-head .spacer {
+  flex: 1;
+}
+
+.annotation-head .priority {
+  color: var(--priority);
+  font: 700 11px var(--mono);
+  text-transform: uppercase;
+}
+
+.annotation-head .id {
+  font: 11px var(--mono);
+}
+
+.badge.outdated {
+  border-color: color-mix(in srgb, var(--attention) 40%, transparent);
+  color: var(--attention);
+}
+
+.annotation-reply {
+  margin-top: 6px;
+  padding: 4px 0 0 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.annotation-reply .by {
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.annotation-reply.user .by {
+  color: var(--unread);
+}
+
+.annotation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.annotation .annotation-editor {
+  margin: 6px 0 0;
+}
+
 /* ---- unread ----------------------------------------------------------- */
 
 .unread-mark {

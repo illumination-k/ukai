@@ -124,6 +124,13 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// The changes of a workspace's checkout: this machine's, or a gateway
+    /// agent's, named as a report's source names it.
+    Diff {
+        project: ProjectId,
+        #[serde(default, skip_serializing_if = "ReportSource::is_project")]
+        place: ReportSource,
+    },
 }
 
 /// Where a report pane reads its file from, and where a browser pane's port
@@ -174,7 +181,8 @@ impl PaneContent {
             | PaneContent::Report { project, .. }
             | PaneContent::Browser { project, .. }
             | PaneContent::Schedule { project, .. }
-            | PaneContent::Note { project, .. } => Some(project),
+            | PaneContent::Note { project, .. }
+            | PaneContent::Diff { project, .. } => Some(project),
         }
     }
 }

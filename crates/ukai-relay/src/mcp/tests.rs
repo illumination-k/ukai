@@ -220,6 +220,7 @@ fn server_entry_runs_the_relay_for_the_checkout() {
             Path::new("/relay/ukai-relay"),
             Path::new("/workspace"),
             None,
+            None,
             None
         ),
         json!({
@@ -242,6 +243,7 @@ fn server_entry_hands_the_gateway_on_with_the_token_in_the_environment() {
             Path::new("/relay/ukai-relay"),
             Path::new("/workspace"),
             Some(&gateway),
+            None,
             None
         ),
         json!({
@@ -920,4 +922,191 @@ fn a_write_of_the_wrong_kind_is_refused(#[case] extra: Value, #[case] expected: 
     assert!(failed);
     assert!(text.contains(expected), "{text}");
     assert!(notes.notes.borrow().is_empty());
+}
+
+#[test]
+fn server_entry_hands_on_the_previews_and_review_files() {
+    let entry = server_entry(
+        Path::new("/relay/ukai-relay"),
+        Path::new("/workspace"),
+        None,
+        Some(Path::new("/tmp/r/previews.jsonl")),
+        Some(Path::new("/tmp/r/review.json")),
+    );
+    assert_eq!(
+        entry["args"],
+        json!([
+            "mcp",
+            "--root",
+            "/workspace",
+            "--previews",
+            "/tmp/r/previews.jsonl",
+            "--review",
+            "/tmp/r/review.json"
+        ])
+    );
+}
+
+/// What a review tool answered, in a session keeping the review in `file`:
+/// its text, and whether it failed.
+fn review_tool(root: &Path, file: &Path, name: &str, arguments: Value) -> (String, bool) {
+    let message = req(
+        "tools/call",
+        json!({ "name": name, "arguments": arguments }),
+    );
+    let session = session().with_review(file.to_owned());
+    let reply = block_on(handle::<Fake>(root, None, &session, &message))
+        .unwrap_or_else(|| panic!("no reply to {name}"));
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text in {reply}"))
+        .to_owned();
+    (text, reply["result"]["isError"] == json!(true))
+}
+
+#[test]
+fn offers_the_review_tools_only_with_a_file_to_keep_it_in() {
+    let dir = checkout(None);
+    let file = dir.path().join("review.json");
+    let session = session().with_review(file);
+    let reply = block_on(handle::<Fake>(
+        dir.path(),
+        None,
+        &session,
+        &req("tools/list", json!({})),
+    ))
+    .unwrap_or_else(|| panic!("no reply"));
+    assert_eq!(
+        tool_names(&reply),
+        [
+            "list_reports",
+            "review_diff",
+            "reply_annotation",
+            "read_review"
+        ]
+    );
+    let reply = block_on(handle::<Fake>(
+        dir.path(),
+        None,
+        &session,
+        &req(
+            "initialize",
+            json!({ "protocolVersion": PROTOCOL_VERSIONS[0] }),
+        ),
+    ))
+    .unwrap_or_else(|| panic!("no reply"));
+    let text = reply["result"]["instructions"].as_str().unwrap_or_default();
+    assert!(text.contains("Reviewing your changes"), "{text}");
+    assert!(text.contains("`review_diff`"), "{text}");
+
+    let unoffered = call(
+        dir.path(),
+        "tools/call",
+        json!({ "name": "review_diff", "arguments": { "annotations": [] } }),
+    );
+    assert_eq!(unoffered["error"]["code"], json!(-32602));
+}
+
+#[test]
+fn tells_the_agent_the_projects_tags_and_priorities() {
+    let dir = checkout(Some(
+        "[review.tags]\nsecurity = \"auth and secrets\"\n\n[review.priorities]\np0 = \"breaks prod\"\n",
+    ));
+    let text = review_instructions(dir.path());
+    assert!(text.contains("- `p0`: breaks prod"), "{text}");
+    assert!(text.contains("- `security`: auth and secrets"), "{text}");
+}
+
+#[test]
+fn writes_a_review_anchored_to_the_lines_as_they_are() {
+    let dir = checkout(None);
+    write(&dir, "src/lib.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+    let file = dir.path().join("review.json");
+    let (text, failed) = review_tool(
+        dir.path(),
+        &file,
+        "review_diff",
+        json!({
+            "summary": "Adds b and c.",
+            "annotations": [
+                { "path": "src/lib.rs", "line": 2, "end_line": 3, "priority": "p1", "tags": ["risk"], "body": "No tests." },
+                { "path": "src/lib.rs", "body": "Whole file." }
+            ]
+        }),
+    );
+    assert!(!failed, "{text}");
+    assert!(text.contains("2 annotations (a1, a2)"), "{text}");
+    let review = crate::review::load(&file).unwrap_or_else(|| panic!("no review"));
+    assert_eq!(review.summary, "Adds b and c.");
+    assert_eq!(review.annotations[0].anchor, "fn c() {}");
+    assert_eq!(review.annotations[0].priority, Some(Priority::P1));
+    assert_eq!(review.annotations[1].line, None);
+
+    // The user replies; the agent answers in the thread and resolves.
+    let mut replied = review.clone();
+    annotation::respond(&mut replied, "a1", Author::User, Some("Add one?"), None, 1)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    crate::review::save(&file, &replied).unwrap_or_else(|e| panic!("{e}"));
+    let (text, failed) = review_tool(
+        dir.path(),
+        &file,
+        "reply_annotation",
+        json!({ "id": "a1", "body": "Added.", "resolved": true }),
+    );
+    assert!(!failed, "{text}");
+    assert_eq!(text, "Answered and resolved `a1`.");
+    let (text, _) = review_tool(dir.path(), &file, "read_review", json!({}));
+    assert!(
+        text.contains("`a1` at `src/lib.rs:2-3` (p1, risk, resolved)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("> user: Add one?") && text.contains("> you: Added."),
+        "{text}"
+    );
+
+    // A second review keeps the thread and drops the rest.
+    let (text, failed) = review_tool(
+        dir.path(),
+        &file,
+        "review_diff",
+        json!({ "annotations": [{ "path": "src/lib.rs", "line": 1, "body": "Renamed." }] }),
+    );
+    assert!(!failed, "{text}");
+    assert!(text.contains("(a3)") && text.contains("Kept 1"), "{text}");
+}
+
+#[test]
+fn refuses_a_review_with_every_problem_named() {
+    let dir = checkout(Some("[review.tags]\nrisk = \"risky\"\n"));
+    let file = dir.path().join("review.json");
+    let (text, failed) = review_tool(
+        dir.path(),
+        &file,
+        "review_diff",
+        json!({
+            "annotations": [
+                { "path": "../x", "line": 1, "body": "x" },
+                { "path": "a", "priority": "urgent", "body": "x" },
+                { "path": "a", "tags": ["perf"], "body": " " }
+            ]
+        }),
+    );
+    assert!(failed, "{text}");
+    for expected in [
+        "annotations[1]: `priority` is p0, p1, p2, or p3",
+        "annotations[0]: `../x` is not a path inside the checkout",
+        "annotations[2]: say something",
+        "annotations[2]: the tag `perf` is not one of this project's: risk",
+    ] {
+        assert!(text.contains(expected), "{expected} in {text}");
+    }
+    assert!(crate::review::load(&file).is_none());
+    let (text, failed) = review_tool(
+        dir.path(),
+        &file,
+        "reply_annotation",
+        json!({ "id": "a1", "body": "hi" }),
+    );
+    assert!(failed, "{text}");
 }
