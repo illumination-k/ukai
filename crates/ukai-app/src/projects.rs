@@ -11,6 +11,7 @@ use ukai_core::sidebar::Folds;
 use ukai_core::{Layout, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
+use crate::gateways::{GatewayListings, list_gateways};
 use crate::knowledge::KnowledgeListings;
 use crate::layout::Drag;
 use crate::ports::PortListings;
@@ -35,6 +36,9 @@ pub type Configs = Signal<HashMap<ProjectId, Result<Config, String>>>;
 pub struct AppSignals {
     pub projects: Signal<Projects>,
     pub configs: Configs,
+    /// What each project's gateways last listed of their agents, kept by
+    /// [`crate::gateways::list_gateways`].
+    pub gateways: GatewayListings,
     pub layout: Signal<Layout>,
     pub sessions: Sessions,
     /// What each gateway workspace last listed, kept by
@@ -111,7 +115,10 @@ pub fn add_project(paths: &Paths, app: AppSignals, root: &Path) {
     } = app;
     let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
     let id = projects.write().add(&root);
-    configs.write().insert(id, load_config(paths, &root));
+    configs
+        .write()
+        .insert(id.clone(), load_config(paths, &root));
+    list_gateways(app, &id);
 }
 
 /// Re-read a project's configuration files.
@@ -127,6 +134,7 @@ pub fn reload_project(paths: &Paths, app: AppSignals, id: &ProjectId) {
     configs
         .write()
         .insert(id.clone(), load_config(paths, &root));
+    list_gateways(app, id);
 }
 
 /// Forget a project, closing its panes and ending their sessions.
@@ -134,6 +142,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
     let AppSignals {
         mut projects,
         mut configs,
+        mut gateways,
         mut layout,
         mut sessions,
         mut folds,
@@ -155,6 +164,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
     }
     projects.write().remove(id);
     configs.write().remove(id);
+    gateways.write().remove(id);
     folds.write().forget(id);
 }
 

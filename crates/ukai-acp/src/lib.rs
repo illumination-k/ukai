@@ -19,6 +19,7 @@
 
 pub mod checkout;
 mod fs;
+pub mod gateways;
 mod grpc;
 pub mod knowledge;
 pub mod ports;
@@ -31,6 +32,7 @@ pub mod updates;
 
 pub use checkout::Checkout;
 pub use fs::{FsError, FsRoot};
+pub use gateways::{GatewayAgent, GatewayEndpoint};
 pub use ports::{PortsEndpoint, Tunnel};
 pub use reports::ReportsEndpoint;
 pub use secrets::system_lookup;

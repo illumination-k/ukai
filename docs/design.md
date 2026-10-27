@@ -110,7 +110,7 @@ ukai は ACP の "Client" なので、エージェントからの要求に応え
   これは手元で動くエージェント（stdio と、手元のツリーを見ているリモートエージェント）の経路。
 - `terminal/*` … 初期は capability を広告しない。
 
-`transport = "gateway"` のエージェントは別で、`fs/*` は**通らない**。間に立つ `ukai-relay` はエージェントに
+gateway のエージェント（`[gateways]`）は別で、`fs/*` は**通らない**。間に立つ `ukai-relay` はエージェントに
 client capability を広告しない（クライアントがいない間に動くターンが応答者のいない `fs/*` で止まるし、
 エージェントの編集は Pod の checkout に入るべきで、手元のツリーに向けるものではない）。
 Pod の中で書かれたレポートは relay の読み取り専用 HTTP から読み戻す（後述「HTML レポートと画像」）。
@@ -196,8 +196,9 @@ Streamable HTTP の RFD v1 では、セッションは接続とは独立にサ�
 
 stdio の ACP エージェント（claude-agent-acp など）は 1 接続 = 1 プロセスで、上の「セッションは接続より長く
 生きる」を自分では満たせない。ukai はその役を Kubernetes 上の 2 つのコンポーネントで持つ。クライアントの
-ukai は ACP の WebSocket プロファイルで話すクライアントのまま（`transport = "gateway"`）で、Kubernetes を
-知らない。gateway について知っているのは、pane ごとのワークスペースの選び方（後述）だけ。
+ukai は ACP の WebSocket プロファイルで話すクライアントのまま（`[gateways.<id>]`）で、Kubernetes を
+知らない。gateway について知っているのは、どのエージェントを出しているか（`Agents.List`）と、pane ごとの
+ワークスペースの選び方（後述）だけ。
 
 ```
 ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <pod IP>:7070 ukai-relay ──stdio──▶ agent
@@ -303,7 +304,7 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
 - プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を gRPC の `ukai.gateway.v1.Knowledge` と、
   Pod 向けの `WorkspaceKnowledge` で出す。持つのは `ukai-knowledge` で、gateway は誰が聞いているかを決めて取り次ぐ。
 - `Agents.Restart` はワークスペースの Job を消し（foreground）、次の接続で新しい Pod を立てさせる。
-  ワークスペース（要求の `Workspace`）とトークンは `/acp` と同じ。`Agents.List` は `gateway.toml` のエージェントの id。サイドカーは TERM でスナップショットを取ってから終わるので、
+  ワークスペース（要求の `Workspace`）とトークンは `/acp` と同じ。`Agents.List` は `gateway.toml` のエージェントの id と、見分けるための command / args。サイドカーは TERM でスナップショットを取ってから終わるので、
   作業ツリーは idle で止まったときと同じく残る。そのワークスペースのセッションはすべて切れる。
   エージェントの新しい版を入れる（イメージを pull し直す、`npx ...@latest` で取り直す）ためのもの。
 - 権限は namespace の Role だけ（jobs、pods と events の参照、スケジュールのコマンド用の `pods/exec`、
@@ -472,7 +473,7 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 2. プロジェクト: プロジェクトルートの `ukai.toml`（任意）… プロジェクト固有のエージェント
 3. （今後）ローカル上書き: `ukai.local.toml`（gitignore 前提）… 個人の URL やトークン参照
 
-`ukai_config::load_layered` が後勝ちで合成する: `agents.<id>` は id 単位で置換、`permissions` は
+`ukai_config::load_layered` が後勝ちで合成する: `agents.<id>` と `gateways.<id>` は id 単位で置換、`permissions` は
 プロジェクトの規則を先に評価、`project` / `reports` はプロジェクトのもの、`keybindings` / `voice` はユーザーのもの。検証は合成後に 1 回だけ行う
 （ユーザー側で定義したエージェントをプロジェクトの規則から参照できるように）。
 **秘密情報はファイルに書かせない**。`${env:NAME}`（環境変数）と `${keychain:NAME}`（OS のキーチェーン、
@@ -486,6 +487,13 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
 
 設定ファイルが宣言するのは「何を開けるか」だけで、「どこに開くか」は持たない。
 `[agents.<id>]` 1 つが「pane でこのエージェントを開くときに起動するコマンド / 接続先」に当たる。
+`[gateways.<id>]` は `ukai-gateway` 1 つで、そのエージェントはクライアントに書かない。設定を読むたびに
+gateway の `Agents.List` で聞き、`<gateway>/<agent>`（`plekti/opencode` など）として `agents` に加える
+（`Config::list_gateway`）。pane が覚えるのもこの id で、一覧が届く前に復元した pane も
+`<root>/agents/<agent>/acp` に解決できる（`Config::agent`）。`[agents]` の id は `/` を含めない。
+ピッカーとサイドバーの「Open an agent」は、手元のエージェントのあと gateway ごとにそのエージェントを並べる
+（gateway → エージェントの順に選ぶ。`ukai_core::launch`）。gateway にエージェントを足せば、どのクライアントの
+設定も変えずに出てくる。
 
 ```toml
 [project]
@@ -502,9 +510,9 @@ transport = "http"
 url = "https://agents.example.com/acp"
 headers = { Authorization = "Bearer ${env:GOOSE_TOKEN}" }
 
-[agents.cluster-claude] # ukai-gateway のエージェント（「クラウド実行」）
-transport = "gateway"
-url = "wss://ukai.example.com/agents/claude/acp"
+# ---- ukai-gateway（「クラウド実行」）。エージェントは gateway が一覧する ----------
+[gateways.cluster] # pane では cluster/claude, cluster/opencode, ...
+url = "https://ukai.example.com" # gateway のルート（wss:// でも同じ）
 headers = { Authorization = "Bearer ${keychain:ukai-gateway}" }
 workspace = "pod" # 新しい pane の既定: shared | pod
 

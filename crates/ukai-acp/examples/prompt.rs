@@ -41,8 +41,7 @@ async fn run(agent: &str, prompt: &str) -> Result<(), Box<dyn std::error::Error>
     let root = std::env::current_dir()?;
     let config = ukai_config::load(&root.join(ukai_config::FILE_NAME))?;
     let spec = config
-        .agents
-        .get(agent)
+        .agent(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared"))?;
     let workspace = std::env::var("UKAI_POD_KEY")
         .ok()
@@ -50,7 +49,7 @@ async fn run(agent: &str, prompt: &str) -> Result<(), Box<dyn std::error::Error>
             key,
             scope: ukai_acp::WorkspaceScope::Pod,
         });
-    let transport = ukai_acp::resolve(spec, ukai_acp::system_lookup, workspace.as_ref())?;
+    let transport = ukai_acp::resolve(&spec, ukai_acp::system_lookup, workspace.as_ref())?;
     let restore = std::env::var("UKAI_RESTORE").ok();
     let detach_after = std::env::var("UKAI_DETACH_AFTER")
         .ok()

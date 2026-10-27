@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
+use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::{
     Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource, Side,
     boundary_span,
@@ -136,8 +137,8 @@ pub fn open_agent(
     scope: Option<WorkspaceScope>,
 ) {
     let default_scope = match app.configs.peek().get(project) {
-        Some(Ok(config)) => match config.agents.get(agent) {
-            Some(AgentSpec::Gateway { workspace, .. }) => Some(*workspace),
+        Some(Ok(config)) => match config.agent(agent) {
+            Some(AgentSpec::Gateway { workspace, .. }) => Some(workspace),
             _ => None,
         },
         _ => None,
@@ -782,10 +783,10 @@ fn Picker(pane: PaneId) -> Element {
         .clone()
         .filter(|id| projects.iter().any(|(p, _)| p == id))
         .or_else(|| projects.first().map(|(id, _)| id.clone()));
-    let agents: Result<Vec<Choice>, String> = match &current {
+    let groups: Result<Vec<Group>, String> = match &current {
         None => Ok(Vec::new()),
         Some(id) => match app.configs.read().get(id) {
-            Some(Ok(config)) => Ok(config.agents.iter().flat_map(choices).collect()),
+            Some(Ok(config)) => Ok(launch::groups(config, app.gateways.read().get(id))),
             Some(Err(error)) => Err(error.clone()),
             None => Ok(Vec::new()),
         },
@@ -815,38 +816,61 @@ fn Picker(pane: PaneId) -> Element {
                     } else if let Some((_, name)) = projects.first() {
                         p { class: "muted", "in {name}" }
                     }
-                    match agents {
+                    match groups {
                         Err(error) => rsx! {
                             pre { class: "config-error", "{error}" }
                         },
-                        Ok(agents) if agents.is_empty() => rsx! {
+                        Ok(groups) if groups.is_empty() => rsx! {
                             p { class: "muted",
-                                "No agents for this project. Declare them in its ukai.toml or in ~/.config/ukai/config.toml."
+                                "No agents for this project. Declare them, or a gateway, in its ukai.toml or in ~/.config/ukai/config.toml."
                             }
                         },
-                        Ok(agents) => rsx! {
-                            div { class: "choices",
-                                for Choice { agent, line, badge, scope } in agents {
-                                    button {
-                                        key: "{agent}-{badge}",
-                                        class: "choice",
-                                        onclick: {
-                                            let project = current.clone();
-                                            let agent = agent.clone();
-                                            move |_| {
-                                                if let Some(project) = &project {
-                                                    open_agent(app, pane, project, &agent, scope);
+                        Ok(groups) => rsx! {
+                            for Group { gateway, status, choices } in groups {
+                                div { key: "{gateway:?}", class: "choice-group",
+                                    if let Some(gateway) = &gateway {
+                                        h3 { class: "choice-group-head",
+                                            Svg { icon: Icon::Globe, size: 12 }
+                                            "{gateway}"
+                                        }
+                                    }
+                                    match status {
+                                        Status::Loading => rsx! {
+                                            p { class: "muted", "Asking the gateway for its agents…" }
+                                        },
+                                        Status::Failed(why) => rsx! {
+                                            pre { class: "config-error", "{why}" }
+                                        },
+                                        Status::Ready if choices.is_empty() => rsx! {
+                                            p { class: "muted", "The gateway serves no agents." }
+                                        },
+                                        Status::Ready => rsx! {
+                                            div { class: "choices",
+                                                for Choice { agent, name, line, badge, scope } in choices {
+                                                    button {
+                                                        key: "{agent}-{badge}",
+                                                        class: "choice",
+                                                        onclick: {
+                                                            let project = current.clone();
+                                                            let agent = agent.clone();
+                                                            move |_| {
+                                                                if let Some(project) = &project {
+                                                                    open_agent(app, pane, project, &agent, scope);
+                                                                }
+                                                            }
+                                                        },
+                                                        span { class: "choice-head",
+                                                            span { class: "name", "{name}" }
+                                                            span { class: "badge", "{badge}" }
+                                                        }
+                                                        code { "{line}" }
+                                                        span { class: "chevron",
+                                                            Svg { icon: Icon::Chevron }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         },
-                                        span { class: "choice-head",
-                                            span { class: "name", "{agent}" }
-                                            span { class: "badge", "{badge}" }
-                                        }
-                                        code { "{line}" }
-                                        span { class: "chevron",
-                                            Svg { icon: Icon::Chevron }
-                                        }
                                     }
                                 }
                             }
@@ -887,64 +911,5 @@ fn Picker(pane: PaneId) -> Element {
                 }
             }
         }
-    }
-}
-
-/// One way to open an agent in the picker. A gateway agent is offered once
-/// per workspace scope, its default first.
-pub struct Choice {
-    pub agent: String,
-    pub line: String,
-    pub badge: &'static str,
-    pub scope: Option<WorkspaceScope>,
-}
-
-pub fn choices((agent, spec): (&String, &AgentSpec)) -> Vec<Choice> {
-    let choice = |badge, scope| Choice {
-        agent: agent.clone(),
-        line: launch_line(spec),
-        badge,
-        scope,
-    };
-    match spec {
-        AgentSpec::Gateway { workspace, .. } => {
-            let other = match workspace {
-                WorkspaceScope::Shared => WorkspaceScope::Pod,
-                WorkspaceScope::Pod => WorkspaceScope::Shared,
-            };
-            [*workspace, other]
-                .into_iter()
-                .map(|scope| choice(scope_label(scope), Some(scope)))
-                .collect()
-        }
-        _ => vec![choice(transport_label(spec), None)],
-    }
-}
-
-fn scope_label(scope: WorkspaceScope) -> &'static str {
-    match scope {
-        WorkspaceScope::Shared => "gateway · shared",
-        WorkspaceScope::Pod => "gateway · own pod",
-    }
-}
-
-pub fn transport_label(spec: &AgentSpec) -> &'static str {
-    match spec {
-        AgentSpec::Http { .. } => "http",
-        AgentSpec::Websocket { .. } => "ws",
-        AgentSpec::Gateway { .. } => "gateway",
-        AgentSpec::Stdio { .. } => "stdio",
-    }
-}
-
-fn launch_line(spec: &AgentSpec) -> String {
-    match spec {
-        AgentSpec::Http { url, .. }
-        | AgentSpec::Websocket { url, .. }
-        | AgentSpec::Gateway { url, .. } => url.clone(),
-        AgentSpec::Stdio { command, args, .. } => std::iter::once(command.as_str())
-            .chain(args.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(" "),
     }
 }

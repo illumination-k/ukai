@@ -38,18 +38,21 @@ fn dir(
     non_empty("HOME").map(|home| PathBuf::from(home).join(home_relative).join("ukai"))
 }
 
-/// Overlay `project` on `user`: agents are replaced by id, project
+/// Overlay `project` on `user`: agents and gateways are replaced by id, project
 /// permission rules are consulted before the user's, project, report, and
 /// review settings come from the project, and keybindings and voice from the
 /// user.
 pub fn merge(user: Config, project: Config) -> Config {
     let mut agents = user.agents;
     agents.extend(project.agents);
+    let mut gateways = user.gateways;
+    gateways.extend(project.gateways);
     let mut permissions = project.permissions;
     permissions.extend(user.permissions);
     Config {
         project: project.project,
         agents,
+        gateways,
         permissions,
         reports: project.reports,
         review: project.review,
@@ -192,6 +195,32 @@ mod tests {
             merged.agents.get("cloud"),
             Some(AgentSpec::Http { url, .. }) if url == "https://project.example/acp"
         ));
+    }
+
+    #[test]
+    fn project_gateways_override_user_gateways_by_id() {
+        let user = config(
+            r#"
+            [gateways.team]
+            url = "https://user.example"
+            [gateways.mine]
+            url = "https://mine.example"
+            "#,
+        );
+        let project = config("[gateways.team]\nurl = \"https://project.example\"\n");
+        let merged = merge(user, project);
+        let urls: Vec<(&str, &str)> = merged
+            .gateways
+            .iter()
+            .map(|(id, gateway)| (id.as_str(), gateway.url.as_str()))
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                ("mine", "https://mine.example"),
+                ("team", "https://project.example")
+            ]
+        );
     }
 
     #[test]

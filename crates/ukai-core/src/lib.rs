@@ -8,6 +8,7 @@ pub mod config;
 pub mod diff;
 pub mod keymap;
 pub mod knowledge;
+pub mod launch;
 mod layout;
 pub mod markdown;
 pub mod mention;

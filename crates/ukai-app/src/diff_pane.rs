@@ -79,8 +79,7 @@ fn checkout_at(
     };
     let spec = context
         .config
-        .agents
-        .get(agent)
+        .agent(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
     // A place names the shared workspace by leaving the key out.
     let workspace = workspace.clone().unwrap_or(PaneWorkspace {
@@ -88,7 +87,7 @@ fn checkout_at(
         scope: WorkspaceScope::Shared,
     });
     Checkout::resolve(
-        spec,
+        &spec,
         ukai_acp::system_lookup,
         Some(&workspace),
         &context.root,

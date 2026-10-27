@@ -13,6 +13,12 @@ use crate::schema::{Config, PRIORITIES, REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, 
 pub enum Problem {
     #[error("{context} refers to unknown agent `{agent}`")]
     UnknownAgent { context: String, agent: String },
+    #[error("agents.{0}: an agent id has no `/`, which names a gateway's agent")]
+    AgentIdWithSlash(String),
+    #[error("gateways.{0}: a gateway id is not empty and has no `/`")]
+    InvalidGatewayId(String),
+    #[error("gateways.{id}.url: `{url}` is not an http(s):// or ws(s):// URL")]
+    InvalidGatewayUrl { id: String, url: String },
     #[error("reports.dirs: `{}` is not inside the project", .0.display())]
     ReportDirOutsideProject(PathBuf),
     #[error("{REPORT_DIRS_ENV}: `{}` is not inside the project", .0.display())]
@@ -63,11 +69,28 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         .enumerate()
         .filter_map(|(index, rule)| {
             let agent = rule.agent.as_ref()?;
-            (!config.agents.contains_key(agent)).then(|| Problem::UnknownAgent {
-                context: format!("permissions[{index}]"),
-                agent: agent.clone(),
-            })
+            config
+                .agent(agent)
+                .is_none()
+                .then(|| Problem::UnknownAgent {
+                    context: format!("permissions[{index}]"),
+                    agent: agent.clone(),
+                })
         });
+    let slashed_agents = config
+        .agents
+        .keys()
+        .filter(|id| id.contains('/'))
+        .map(|id| Problem::AgentIdWithSlash(id.clone()));
+    let bad_gateways = config.gateways.iter().flat_map(|(id, gateway)| {
+        let bad_id =
+            (id.is_empty() || id.contains('/')).then(|| Problem::InvalidGatewayId(id.clone()));
+        let bad_url = (!is_gateway_url(&gateway.url)).then(|| Problem::InvalidGatewayUrl {
+            id: id.clone(),
+            url: gateway.url.clone(),
+        });
+        bad_id.into_iter().chain(bad_url)
+    });
     let outside_dirs = config
         .reports
         .dirs
@@ -91,11 +114,20 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         })
         .map(|language| Problem::InvalidVoiceLanguage(language.clone()));
     unknown_agents
+        .chain(slashed_agents)
+        .chain(bad_gateways)
         .chain(outside_dirs)
         .chain(bad_globs)
         .chain(bad_language)
         .chain(review_problems(&config.review))
         .collect()
+}
+
+/// Whether `url` names a host over http(s) or ws(s).
+fn is_gateway_url(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, rest)| {
+        matches!(scheme, "http" | "https" | "ws" | "wss") && !rest.trim_end_matches('/').is_empty()
+    })
 }
 
 fn review_problems(review: &Review) -> Vec<Problem> {
