@@ -179,6 +179,55 @@ fn mounts_share_one_volume_per_claim_and_expand_home() {
     );
 }
 
+#[test]
+fn tokens_project_one_volume_per_directory() {
+    let job = json(&plan(
+        r#"tokens = [
+            { audience = "https://infer.example/wif/a", path = "/var/run/secrets/inference/subject-token" },
+            { audience = "https://other.example", path = "/var/run/secrets/inference/other-token" },
+            { audience = "https://vault.example", path = "~/.vault/token" },
+        ]"#,
+    ));
+    let volumes = job
+        .pointer("/spec/template/spec/volumes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let projected: Vec<&Value> = volumes
+        .iter()
+        .filter(|v| v["projected"].is_object())
+        .collect();
+    assert_eq!(
+        projected,
+        [
+            &json!({ "name": "token-0", "projected": { "sources": [
+                { "serviceAccountToken": { "audience": "https://infer.example/wif/a", "path": "subject-token" } },
+                { "serviceAccountToken": { "audience": "https://other.example", "path": "other-token" } },
+            ] } }),
+            &json!({ "name": "token-1", "projected": { "sources": [
+                { "serviceAccountToken": { "audience": "https://vault.example", "path": "token" } },
+            ] } }),
+        ]
+    );
+
+    // Whole directories, never a `subPath`, so refreshed tokens show up.
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    let mounts = &agent["volumeMounts"];
+    assert_eq!(
+        mounts[3],
+        json!({ "name": "token-0", "mountPath": "/var/run/secrets/inference", "readOnly": true })
+    );
+    assert_eq!(
+        mounts[4],
+        json!({ "name": "token-1", "mountPath": "/home/agent/.vault", "readOnly": true })
+    );
+    let sidecar = container(&job, "/spec/template/spec/initContainers", "workspace");
+    assert!(
+        !sidecar.to_string().contains("token-"),
+        "the sidecar never sees the tokens"
+    );
+}
+
 #[rstest]
 #[case::defaults("", "", "1800", "300", "refs/ukai/wip/")]
 #[case::configured(

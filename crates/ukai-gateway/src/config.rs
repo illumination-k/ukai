@@ -49,6 +49,8 @@ pub struct KubernetesAgent {
     #[serde(default)]
     pub mounts: Vec<Mount>,
     #[serde(default)]
+    pub tokens: Vec<Token>,
+    #[serde(default)]
     pub resources: Resources,
     /// Labels of the pod and its Job, on top of the gateway's own, e.g. one
     /// an admission webhook injects credentials by.
@@ -134,6 +136,18 @@ pub struct Mount {
     pub read_only: bool,
 }
 
+/// A token of the pod's ServiceAccount for `audience`, projected into the
+/// agent container as a file the kubelet keeps fresh, e.g. the subject token
+/// of a workload identity federation.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Token {
+    pub audience: String,
+    /// The file, absolute or `~/...` relative to `home`. Its directory is
+    /// mounted whole, since a `subPath` mount never sees a refreshed token.
+    pub path: String,
+}
+
 /// Requests of the agent container, and its memory limit.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -197,6 +211,10 @@ pub enum Problem {
     InvalidSecretRef { context: String, value: String },
     #[error("{context}: `{path}` must be absolute or start with `~/`")]
     InvalidMountPath { context: String, path: String },
+    #[error(
+        "{context}: `{path}` must be a file in a directory of its own, absolute or under `~/`, like `/var/run/secrets/x/token`"
+    )]
+    InvalidTokenPath { context: String, path: String },
     #[error(
         "{context}: `{value}` is not a project name: lowercase letters, digits, and `-`, `_`, `.`, `/`"
     )]
@@ -304,6 +322,33 @@ fn validate(context: &str, agent: &KubernetesAgent, problems: &mut Vec<Problem>)
             });
         }
     }
+    for (index, token) in agent.tokens.iter().enumerate() {
+        let context = format!("{context}.tokens[{index}]");
+        if token.audience.trim().is_empty() {
+            problems.push(Problem::Empty {
+                context: format!("{context}.audience"),
+            });
+        }
+        if token_file(&token.path).is_none() {
+            problems.push(Problem::InvalidTokenPath {
+                context,
+                path: token.path.clone(),
+            });
+        }
+    }
+}
+
+/// A token's `path`, split into the directory mounted and the file in it.
+/// The directory must not be `/` or `~`, which the mount would hide.
+pub fn token_file(path: &str) -> Option<(&str, &str)> {
+    if !(path.starts_with('/') || path.starts_with("~/")) {
+        return None;
+    }
+    let (dir, file) = path.rsplit_once('/')?;
+    let valid = !matches!(file, "" | "." | "..")
+        && !matches!(dir, "" | "~")
+        && !dir.split('/').any(|part| matches!(part, "." | ".."));
+    valid.then_some((dir, file))
 }
 
 #[cfg(test)]

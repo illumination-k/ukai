@@ -17,13 +17,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::{KubernetesAgent, parse_duration, parse_secret_ref};
+use crate::config::{KubernetesAgent, parse_duration, parse_secret_ref, token_file};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource, ExecAction,
     HTTPGetAction, ObjectFieldSelector, PersistentVolumeClaimVolumeSource, PodSecurityContext,
-    PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile, SecretKeySelector,
-    SecurityContext, Volume, VolumeMount,
+    PodSpec, PodTemplateSpec, Probe, ProjectedVolumeSource, ResourceRequirements, SeccompProfile,
+    SecretKeySelector, SecurityContext, ServiceAccountTokenProjection, Volume, VolumeMount,
+    VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -251,6 +252,38 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         ..VolumeMount::default()
     }));
 
+    // One projected volume per directory, holding every token put there.
+    let mut token_dirs: Vec<(String, Vec<VolumeProjection>)> = Vec::new();
+    for token in &agent.tokens {
+        let Some((dir, file)) = token_file(&token.path) else {
+            continue;
+        };
+        let dir = expand_home(dir, &agent.home);
+        let source = VolumeProjection {
+            service_account_token: Some(ServiceAccountTokenProjection {
+                audience: Some(token.audience.clone()),
+                path: file.to_owned(),
+                expiration_seconds: None,
+            }),
+            ..VolumeProjection::default()
+        };
+        match token_dirs.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, sources)) => sources.push(source),
+            None => token_dirs.push((dir, vec![source])),
+        }
+    }
+    agent_mounts.extend(
+        token_dirs
+            .iter()
+            .enumerate()
+            .map(|(index, (dir, _))| VolumeMount {
+                name: format!("token-{index}"),
+                mount_path: dir.clone(),
+                read_only: Some(true),
+                ..VolumeMount::default()
+            }),
+    );
+
     let mut volumes = vec![
         empty_dir("workspace"),
         empty_dir("pristine"),
@@ -265,6 +298,19 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         }),
         ..Volume::default()
     }));
+    volumes.extend(
+        token_dirs
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, sources))| Volume {
+                name: format!("token-{index}"),
+                projected: Some(ProjectedVolumeSource {
+                    sources: Some(sources),
+                    default_mode: None,
+                }),
+                ..Volume::default()
+            }),
+    );
 
     let install = Container {
         name: "relay-install".to_owned(),

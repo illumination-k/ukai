@@ -271,7 +271,11 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
 ### `ukai-gateway`
 
 - namespace に 1 つ（`Recreate` の Deployment）。`gateway.toml` の `[agents.<id>]`（イメージ、コマンド、リポジトリ、
-  Secret 参照、既存 PVC の mount、リソース、Pod のラベル、`idle_timeout`）を `GET /agents/<id>/acp` の WebSocket で出す。
+  Secret 参照、既存 PVC の mount、ServiceAccount トークン、リソース、Pod のラベル、`idle_timeout`）を
+  `GET /agents/<id>/acp` の WebSocket で出す。
+- `tokens` は Pod の ServiceAccount の、`audience` 宛てのトークンを projected volume で `path` に置く（workload
+  identity federation の subject token 向け。PFCP の managed inference など）。kubelet が更新したトークンが
+  見えるよう、`subPath` ではなく `path` のディレクトリごとエージェントのコンテナにだけ mount する。
 - エージェントのコンテナの環境変数は downward API の `POD_NAMESPACE` から始め、`env` の値が `$(POD_NAMESPACE)` を
   参照できるようにする。`labels` は Pod と Job に付く（ラベルを見て認証情報を注入する admission webhook 向け）。
   `app.kubernetes.io/managed-by` と `ukai.dev/` は gateway が Pod を探すのに使うので書けない。

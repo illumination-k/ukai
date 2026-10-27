@@ -20,5 +20,8 @@ workspace = { git = "https://github.com/org/repo.git" }
 # env = { CACHE_URL = "http://cache.example.svc/$(POD_NAMESPACE)" }
 # Labels of the pod, on top of the gateway's, e.g. one a webhook acts on.
 # labels = { "example.com/inject" = "" }
+# Tokens of the pod's ServiceAccount for an audience, kept fresh as a file,
+# e.g. the subject token of a workload identity federation.
+# tokens = [{ audience = "https://idp.example/wif/123", path = "/var/run/secrets/idp/token" }]
 # The memory limit is the request unless `memory_limit` is set.
 # resources = { cpu = "4", memory = "8Gi", memory_limit = "16Gi" }
