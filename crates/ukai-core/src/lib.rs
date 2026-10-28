@@ -4,6 +4,7 @@
 pub mod annotation;
 pub mod attachment;
 pub mod browser;
+pub mod composer;
 pub mod config;
 pub mod diff;
 pub mod keymap;
