@@ -37,10 +37,9 @@ const PANE_EVERY: Duration = Duration::from_secs(5);
 /// Where `agent`'s notes are kept.
 fn endpoint(config: &Config, agent: &str) -> Result<KnowledgeEndpoint, String> {
     let spec = config
-        .agents
-        .get(agent)
+        .agent(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    KnowledgeEndpoint::resolve(spec, ukai_acp::system_lookup)
+    KnowledgeEndpoint::resolve(&spec, ukai_acp::system_lookup)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("agent `{agent}` is not a gateway agent, so it keeps no knowledge"))
 }

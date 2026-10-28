@@ -65,7 +65,16 @@ impl gw::agents_server::Agents for Api {
     ) -> Result<Response<gw::ListAgentsResponse>, Status> {
         self.authorize(&request)?;
         Ok(Response::new(gw::ListAgentsResponse {
-            agents: self.gateway.agents.keys().cloned().collect(),
+            agents: self
+                .gateway
+                .agents
+                .iter()
+                .map(|(id, agent)| gw::Agent {
+                    id: id.clone(),
+                    command: agent.command.clone(),
+                    args: agent.args.clone(),
+                })
+                .collect(),
         }))
     }
 

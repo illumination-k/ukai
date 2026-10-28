@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 use ukai_acp::WorkspaceScope;
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
+use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::sidebar::{self, Fold, Node, OpenAgent, Workspace};
 use ukai_core::{ProjectId, ReportSource};
 
@@ -18,7 +19,7 @@ use crate::alert::is_unread;
 use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
 use crate::knowledge::KnowledgeNode;
-use crate::layout::{Choice, choices, launch_agent, launch_target, open_agent_in};
+use crate::layout::{launch_agent, launch_target, open_agent_in};
 use crate::ports::PortGroup;
 use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, remove_project};
 use crate::report_pane::ReportGroup;
@@ -176,9 +177,9 @@ fn ProjectNode(id: ProjectId, name: String, root: String) -> Element {
             config.and_then(|config| config.as_ref().ok()),
         );
         let problem = config.and_then(|config| config.as_ref().err()).cloned();
-        let launch: Vec<Choice> = config
+        let launch: Vec<Group> = config
             .and_then(|config| config.as_ref().ok())
-            .map(|config| config.agents.iter().flat_map(choices).collect())
+            .map(|config| launch::groups(config, app.gateways.read().get(&id)))
             .unwrap_or_default();
         (tree, problem, launch)
     };
@@ -248,27 +249,52 @@ fn ProjectNode(id: ProjectId, name: String, root: String) -> Element {
                         p {
                             class: "muted hint tree-hint",
                             style: "--depth: 1",
-                            "No agents declared in ukai.toml."
+                            "No agents or gateways declared in ukai.toml."
                         }
                     }
-                    for Choice { agent, badge, scope, line } in launch {
-                        div {
-                            key: "launch-{agent}-{badge}",
-                            class: "row launch-row",
-                            style: "--depth: 1",
-                            title: "{line}",
-                            onclick: {
-                                let id = id.clone();
-                                move |_| {
-                                    launching.set(false);
-                                    launch_agent(app, &id, &agent, scope);
+                    for Group { gateway, status, choices } in launch {
+                        // A gateway's agents sit one level under it.
+                        if let Some(gateway) = &gateway {
+                            div {
+                                key: "launch-gateway-{gateway}",
+                                class: "row launch-row launch-gateway",
+                                style: "--depth: 1",
+                                span { class: "row-icon",
+                                    Svg { icon: Icon::Globe, size: 12 }
                                 }
-                            },
-                            span { class: "row-icon",
-                                Svg { icon: Icon::Plus, size: 12 }
+                                span { class: "name", "{gateway}" }
+                                if status == Status::Loading {
+                                    span { class: "meta", "listing…" }
+                                }
                             }
-                            span { class: "name", "{agent}" }
-                            span { class: "meta", "{badge}" }
+                            if let Status::Failed(why) = &status {
+                                p {
+                                    class: "muted hint tree-hint",
+                                    style: "--depth: 2",
+                                    title: "{why}",
+                                    "Cannot list its agents."
+                                }
+                            }
+                        }
+                        for Choice { agent, name, badge, scope, line } in choices {
+                            div {
+                                key: "launch-{agent}-{badge}",
+                                class: "row launch-row",
+                                style: if gateway.is_some() { "--depth: 2" } else { "--depth: 1" },
+                                title: "{line}",
+                                onclick: {
+                                    let id = id.clone();
+                                    move |_| {
+                                        launching.set(false);
+                                        launch_agent(app, &id, &agent, scope);
+                                    }
+                                },
+                                span { class: "row-icon",
+                                    Svg { icon: Icon::Plus, size: 12 }
+                                }
+                                span { class: "name", "{name}" }
+                                span { class: "meta", "{badge}" }
+                            }
                         }
                     }
                 }

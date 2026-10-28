@@ -51,10 +51,9 @@ pub(crate) fn gateway_agents(config: &Config) -> Vec<String> {
 /// Where `agent`'s schedules are kept.
 fn endpoint(config: &Config, agent: &str) -> Result<SchedulesEndpoint, String> {
     let spec = config
-        .agents
-        .get(agent)
+        .agent(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    SchedulesEndpoint::resolve(spec, ukai_acp::system_lookup)
+    SchedulesEndpoint::resolve(&spec, ukai_acp::system_lookup)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("agent `{agent}` is not a gateway agent, so it keeps no schedules"))
 }

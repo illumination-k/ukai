@@ -337,8 +337,8 @@ fn checkout_of(
     agent: &str,
     workspace: Option<&PaneWorkspace>,
 ) -> Option<Checkout> {
-    let spec = context.config.agents.get(agent)?;
-    Checkout::resolve(spec, ukai_acp::system_lookup, workspace, &context.root)
+    let spec = context.config.agent(agent)?;
+    Checkout::resolve(&spec, ukai_acp::system_lookup, workspace, &context.root)
         .inspect_err(|error| tracing::warn!(%error, "cannot reach the agent's checkout"))
         .ok()
         .flatten()
@@ -399,11 +399,10 @@ fn start_session(
 ) -> Result<(SessionHandle, SessionEvents), String> {
     let spec = context
         .config
-        .agents
-        .get(agent)
+        .agent(agent)
         .ok_or_else(|| format!("agent `{agent}` is not declared for this project"))?;
     let transport =
-        ukai_acp::resolve(spec, ukai_acp::system_lookup, workspace).map_err(|e| e.to_string())?;
+        ukai_acp::resolve(&spec, ukai_acp::system_lookup, workspace).map_err(|e| e.to_string())?;
     let fs_root = FsRoot::new(&context.root).map_err(|e| e.to_string())?;
     Ok(ukai_acp::spawn_session(
         transport,
@@ -436,10 +435,9 @@ fn restart_to_update(app: AppSignals, pane: PaneId, latest: String) {
         project_context(&app.projects.peek(), &app.configs.peek(), &project).and_then(|context| {
             let spec = context
                 .config
-                .agents
-                .get(&agent)
+                .agent(&agent)
                 .ok_or_else(|| format!("agent `{agent}` is not declared for this project"))?;
-            RestartEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.as_ref())
+            RestartEndpoint::resolve(&spec, ukai_acp::system_lookup, workspace.as_ref())
                 .map_err(|e| e.to_string())
         });
     let transcript = app.sessions.peek().get(&pane).map(|s| s.transcript);

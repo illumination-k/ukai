@@ -16,6 +16,11 @@ pub struct Config {
     pub project: Project,
     #[serde(default)]
     pub agents: BTreeMap<String, AgentSpec>,
+    /// `ukai-gateway`s, each serving the agents its `gateway.toml` declares.
+    /// The pane names one of them as `<gateway>/<agent>`, which the app adds
+    /// to `agents` once the gateway lists it (see [`Config::list_gateway`]).
+    #[serde(default)]
+    pub gateways: BTreeMap<String, Gateway>,
     #[serde(default)]
     pub permissions: Vec<PermissionRule>,
     #[serde(default)]
@@ -55,7 +60,10 @@ pub enum AgentSpec {
         headers: BTreeMap<String, String>,
     },
     /// An agent served by `ukai-gateway` at `/agents/<id>/acp`: the WebSocket
-    /// profile, plus where each pane's work runs.
+    /// profile, plus where each pane's work runs. Never written in
+    /// `[agents]`: it is what a `[gateways]` entry gives for one of its
+    /// agents ([`Gateway::agent`]).
+    #[serde(skip_deserializing)]
     Gateway {
         url: String,
         #[serde(default)]
@@ -72,6 +80,87 @@ pub enum AgentSpec {
         #[serde(default)]
         env: BTreeMap<String, String>,
     },
+}
+
+/// A `ukai-gateway`, reached at its root URL. Its agents are not declared
+/// here: the gateway lists them (`Agents.List`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gateway {
+    /// The root, e.g. `https://gw.example.com`; `wss://` names the same.
+    pub url: String,
+    /// Sent with every request to it, e.g. its token.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Where a new pane of one of its agents works by default; a pane can
+    /// choose the other.
+    #[serde(default)]
+    pub workspace: WorkspaceScope,
+}
+
+impl Gateway {
+    /// The agent `id` of this gateway, at `<root>/agents/<id>/acp`.
+    pub fn agent(&self, id: &str) -> AgentSpec {
+        let root = self.url.trim_end_matches('/');
+        let root = match root.split_once("://") {
+            Some(("https", rest)) => format!("wss://{rest}"),
+            Some(("http", rest)) => format!("ws://{rest}"),
+            _ => root.to_owned(),
+        };
+        AgentSpec::Gateway {
+            url: format!("{root}/agents/{id}/acp"),
+            headers: self.headers.clone(),
+            workspace: self.workspace,
+        }
+    }
+}
+
+/// The id a pane gives agent `agent` of gateway `gateway`.
+pub fn gateway_agent_id(gateway: &str, agent: &str) -> String {
+    format!("{gateway}/{agent}")
+}
+
+impl Config {
+    /// The agent a pane names `id`: one of `[agents]`, or `<gateway>/<agent>`
+    /// of a declared gateway, whether or not it has been listed yet, so a
+    /// pane restored before the listing arrives still connects.
+    pub fn agent(&self, id: &str) -> Option<AgentSpec> {
+        if let Some(spec) = self.agents.get(id) {
+            return Some(spec.clone());
+        }
+        let (gateway, agent) = id.split_once('/')?;
+        let valid = !agent.is_empty() && !agent.contains('/');
+        valid
+            .then(|| self.gateways.get(gateway))
+            .flatten()
+            .map(|gateway| gateway.agent(agent))
+    }
+
+    /// Put the agents `gateway` lists in `agents`, as `<gateway>/<agent>`,
+    /// in place of those it listed before.
+    pub fn list_gateway<I, S>(&mut self, gateway: &str, agents: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let Some(declared) = self.gateways.get(gateway) else {
+            return;
+        };
+        let prefix = gateway_agent_id(gateway, "");
+        let mut listed: BTreeMap<String, AgentSpec> = agents
+            .into_iter()
+            .filter(|agent| {
+                let agent = agent.as_ref();
+                !agent.is_empty() && !agent.contains('/')
+            })
+            .map(|agent| {
+                let agent = agent.as_ref();
+                (gateway_agent_id(gateway, agent), declared.agent(agent))
+            })
+            .collect();
+        self.agents.retain(|id, _| !id.starts_with(&prefix));
+        self.agents.append(&mut listed);
+    }
 }
 
 /// Where a gateway agent's pane works.

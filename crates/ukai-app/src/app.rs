@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::Startup;
 use crate::alert::mark_read;
+use crate::gateways::list_gateways;
 use crate::knowledge::FollowKnowledge;
 use crate::layout::Workbench;
 use crate::palette::Palette;
@@ -39,6 +40,7 @@ pub fn App() -> Element {
         AppSignals {
             projects: Signal::new(state.projects),
             configs: Signal::new(configs),
+            gateways: Signal::new(HashMap::new()),
             layout: Signal::new(state.layout),
             sessions: Signal::new(HashMap::new()),
             reports: Signal::new(HashMap::new()),
@@ -55,6 +57,10 @@ pub fn App() -> Element {
         }
     });
     use_hook(|| {
+        let restored: Vec<_> = app.configs.peek().keys().cloned().collect();
+        for project in restored {
+            list_gateways(app, &project);
+        }
         if let Some(root) = &startup.open {
             add_project(&paths, app, root);
         }

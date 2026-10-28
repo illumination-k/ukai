@@ -47,16 +47,64 @@ fn agent_transports_are_tagged() {
 #[case::default_scope("", WorkspaceScope::Shared)]
 #[case::pod("workspace = \"pod\"", WorkspaceScope::Pod)]
 fn gateway_agents_have_a_workspace_scope(#[case] line: &str, #[case] expected: WorkspaceScope) {
-    let src = format!(
-        "[agents.g]\ntransport = \"gateway\"\nurl = \"ws://localhost:8080/agents/g/acp\"\n{line}"
-    );
+    let src = format!("[gateways.g]\nurl = \"https://gw.example\"\n{line}");
     let config = parse(&src);
     assert!(
         matches!(
-            config.as_ref().ok().and_then(|c| c.agents.get("g")),
-            Some(AgentSpec::Gateway { workspace, .. }) if *workspace == expected
+            config.as_ref().ok().and_then(|c| c.agent("g/claude")),
+            Some(AgentSpec::Gateway { workspace, .. }) if workspace == expected
         ),
         "{config:?}"
+    );
+}
+
+#[rstest]
+#[case::https("https://gw.example", "wss://gw.example/agents/claude/acp")]
+#[case::http_with_slash("http://localhost:8080/", "ws://localhost:8080/agents/claude/acp")]
+#[case::wss("wss://gw.example/base", "wss://gw.example/base/agents/claude/acp")]
+fn a_gateway_agent_is_its_acp_under_the_root(#[case] root: &str, #[case] expected: &str) {
+    let gateway = Gateway {
+        url: root.into(),
+        headers: [("Authorization".to_owned(), "Bearer t".to_owned())].into(),
+        workspace: WorkspaceScope::Pod,
+    };
+    assert_eq!(
+        gateway.agent("claude"),
+        AgentSpec::Gateway {
+            url: expected.into(),
+            headers: gateway.headers.clone(),
+            workspace: WorkspaceScope::Pod,
+        }
+    );
+}
+
+#[test]
+fn a_gateways_agent_is_found_before_and_after_it_is_listed() {
+    let mut config = parse(
+        "[gateways.team]\nurl = \"https://gw.example\"\n\n[agents.local]\ntransport = \"stdio\"\ncommand = \"a\"",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(config.agent("team/claude").is_some());
+    assert!(config.agent("team/").is_none());
+    assert!(config.agent("team/a/b").is_none());
+    assert!(config.agent("other/claude").is_none());
+
+    config.list_gateway("team", ["claude", "codex", "bad/id"]);
+    config.list_gateway("unknown", ["x"]);
+    assert_eq!(
+        config.agents.keys().collect::<Vec<_>>(),
+        ["local", "team/claude", "team/codex"]
+    );
+    assert_eq!(
+        config.agents.get("team/codex"),
+        config.agent("team/codex").as_ref()
+    );
+
+    // A listing replaces the one before it.
+    config.list_gateway("team", ["opencode"]);
+    assert_eq!(
+        config.agents.keys().collect::<Vec<_>>(),
+        ["local", "team/opencode"]
     );
 }
 
@@ -64,7 +112,9 @@ fn gateway_agents_have_a_workspace_scope(#[case] line: &str, #[case] expected: W
 #[case::unknown_field("[project]\nnmae = \"x\"")]
 #[case::unknown_transport("[agents.a]\ntransport = \"grpc\"\nurl = \"x\"")]
 #[case::http_without_url("[agents.a]\ntransport = \"http\"")]
-#[case::unknown_scope("[agents.a]\ntransport = \"gateway\"\nurl = \"ws://x\"\nworkspace = \"tab\"")]
+#[case::gateway_in_agents("[agents.a]\ntransport = \"gateway\"\nurl = \"ws://x/agents/a/acp\"")]
+#[case::unknown_scope("[gateways.g]\nurl = \"https://x\"\nworkspace = \"tab\"")]
+#[case::gateway_without_url("[gateways.g]\nheaders = {}")]
 fn rejects_malformed_toml(#[case] src: &str) {
     assert!(matches!(parse(src), Err(ConfigError::Toml(_))));
 }
@@ -84,6 +134,30 @@ fn problems(src: &str) -> Vec<Problem> {
     decision = "allow"
     "#,
     Problem::UnknownAgent { context: "permissions[0]".into(), agent: "ghost".into() }
+)]
+#[case::agent_of_unknown_gateway_in_permission(
+    "[[permissions]]\nagent = \"team/claude\"\ndecision = \"allow\"",
+    Problem::UnknownAgent { context: "permissions[0]".into(), agent: "team/claude".into() }
+)]
+#[case::agent_id_with_slash(
+    "[agents.\"team/claude\"]\ntransport = \"stdio\"\ncommand = \"a\"",
+    Problem::AgentIdWithSlash("team/claude".into())
+)]
+#[case::gateway_id_with_slash(
+    "[gateways.\"a/b\"]\nurl = \"https://gw.example\"",
+    Problem::InvalidGatewayId("a/b".into())
+)]
+#[case::empty_gateway_id(
+    "[gateways.\"\"]\nurl = \"https://gw.example\"",
+    Problem::InvalidGatewayId(String::new())
+)]
+#[case::gateway_url_without_scheme(
+    "[gateways.g]\nurl = \"gw.example\"",
+    Problem::InvalidGatewayUrl { id: "g".into(), url: "gw.example".into() }
+)]
+#[case::gateway_url_without_host(
+    "[gateways.g]\nurl = \"https:///\"",
+    Problem::InvalidGatewayUrl { id: "g".into(), url: "https:///".into() }
 )]
 #[case::absolute_report_dir(
     "[reports]\ndirs = [\"/tmp/reports\"]",
@@ -160,17 +234,26 @@ fn tells_a_tag(#[case] tag: &str, #[case] valid: bool) {
 }
 
 #[test]
+fn a_permission_names_a_declared_gateways_agent() {
+    let src = "[gateways.team]\nurl = \"https://gw.example\"\n\n[[permissions]]\nagent = \"team/claude\"\ndecision = \"allow\"";
+    assert!(parse(src).is_ok());
+}
+
+#[test]
 fn every_problem_is_reported() {
     let src = r#"
         [[permissions]]
         agent = "ghost"
         decision = "deny"
 
+        [gateways."a/b"]
+        url = "gw"
+
         [reports]
         dirs = ["ok", "../out"]
         globs = ["[", "**/*.html"]
     "#;
-    assert_eq!(problems(src).len(), 3);
+    assert_eq!(problems(src).len(), 5);
 }
 
 #[test]

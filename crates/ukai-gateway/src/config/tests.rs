@@ -83,6 +83,31 @@ fn agents_on_different_repositories_share_a_named_project() {
     "mounts = [{ claim = \"home\", path = \".claude\" }]",
     Problem::InvalidMountPath { context: "agents.k.mounts[0]".into(), path: ".claude".into() }
 )]
+#[case::empty_token_audience(
+    IMAGE,
+    "tokens = [{ audience = \" \", path = \"/var/run/secrets/x/token\" }]",
+    Problem::Empty { context: "agents.k.tokens[0].audience".into() }
+)]
+#[case::relative_token_path(
+    IMAGE,
+    "tokens = [{ audience = \"https://a\", path = \"secrets/token\" }]",
+    Problem::InvalidTokenPath { context: "agents.k.tokens[0]".into(), path: "secrets/token".into() }
+)]
+#[case::token_in_root(
+    IMAGE,
+    "tokens = [{ audience = \"https://a\", path = \"/token\" }]",
+    Problem::InvalidTokenPath { context: "agents.k.tokens[0]".into(), path: "/token".into() }
+)]
+#[case::token_in_home(
+    IMAGE,
+    "tokens = [{ audience = \"https://a\", path = \"~/token\" }]",
+    Problem::InvalidTokenPath { context: "agents.k.tokens[0]".into(), path: "~/token".into() }
+)]
+#[case::token_without_file(
+    IMAGE,
+    "tokens = [{ audience = \"https://a\", path = \"/var/run/secrets/x/\" }]",
+    Problem::InvalidTokenPath { context: "agents.k.tokens[0]".into(), path: "/var/run/secrets/x/".into() }
+)]
 #[case::bad_knowledge_scope(
     IMAGE,
     "knowledge = \"My Project\"",

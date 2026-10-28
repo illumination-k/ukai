@@ -8,6 +8,7 @@ mod child_view;
 mod clipboard;
 mod diff_pane;
 mod diff_view;
+mod gateways;
 mod icons;
 mod knowledge;
 mod layout;

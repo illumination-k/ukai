@@ -101,6 +101,13 @@ expect_used = "deny"
 [profile.dev.package."*"]
 opt-level = 1
 
+# On macOS, cargo leaves a test binary's debug info in an object file per
+# codegen unit beside it (`unpacked`), and never removes those of a build it
+# has replaced, so the target directory grows by tens of gigabytes. Packed,
+# each binary has one .dSYM and no objects, and backtraces keep their lines.
+[profile.test]
+split-debuginfo = "packed"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

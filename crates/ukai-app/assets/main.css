@@ -513,6 +513,16 @@ button:focus-visible,
   color: var(--fg);
 }
 
+/* A gateway heads its agents; it is not something to open. */
+.launch-row.launch-gateway {
+  color: var(--muted-fg);
+  cursor: default;
+}
+
+.launch-row.launch-gateway:hover {
+  background: none;
+}
+
 .report-row {
   color: color-mix(in srgb, var(--fg) 80%, transparent);
   font-size: 12.5px;
@@ -1124,6 +1134,26 @@ button.new-tab {
   background: var(--card);
   color: var(--fg);
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+.choice-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.choice-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  color: var(--muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.choice-group p {
+  margin: 0;
 }
 
 .choices {

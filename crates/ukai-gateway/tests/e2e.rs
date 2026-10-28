@@ -445,7 +445,8 @@ async fn the_gateway_answers_plain_grpc_too() {
         .await
         .unwrap_or_else(|status| panic!("{status:?}"))
         .into_inner();
-    assert_eq!(listed.agents, [AGENT]);
+    let ids: Vec<&str> = listed.agents.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, [AGENT]);
     let anonymous = agents
         .list(ukai_proto::gateway::v1::ListAgentsRequest {})
         .await
