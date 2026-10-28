@@ -32,9 +32,10 @@ use ukai_config::{AgentSpec, Source};
 use ukai_proto::gateway::v1 as gw;
 use ukai_proto::gateway::v1::ports_client::PortsClient;
 
+use crate::gateway::GatewayAgent;
 use crate::grpc::{self, Channel};
 use crate::reports::endpoint_base;
-use crate::{PaneWorkspace, ResolveError, header_map, workspace_headers};
+use crate::{PaneWorkspace, ResolveError};
 
 /// Where a relay lists what listens in its pod (JSON, for the gateway).
 pub const PORTS_PATH: &str = "/ports";
@@ -217,37 +218,22 @@ impl PortsEndpoint {
         lookup: impl Fn(Source, &str) -> Option<String> + Copy,
         workspace: Option<&PaneWorkspace>,
     ) -> Result<Option<Self>, ResolveError> {
-        let AgentSpec::Gateway {
-            url,
-            headers,
-            workspace: default_scope,
-        } = spec
-        else {
+        let Some(agent) = GatewayAgent::resolve(spec, lookup)? else {
             return Ok(None);
         };
-        let url = ukai_config::interpolate(url, lookup)?;
-        let (Some((root, agent)), Some(forward_base)) =
-            (grpc::agent_root(&url), endpoint_base(&url, FORWARD_PATH))
-        else {
+        let Some(forward_base) = endpoint_base(&agent.gateway.url, FORWARD_PATH) else {
             return Ok(None);
         };
-        let client = reqwest::Client::builder()
-            .default_headers(header_map(headers, &[], lookup)?)
-            .timeout(TIMEOUT)
-            .build()
-            .map_err(|error| ResolveError::Client(error.to_string()))?;
+        let channel = agent.channel(TIMEOUT)?;
         // The upgrade is not RPC: it names the workspace as `/acp` does.
-        let extra = workspace_headers(workspace, *default_scope);
-        let forward = reqwest::Client::builder()
-            .default_headers(header_map(headers, &extra, lookup)?)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(|error| ResolveError::Client(error.to_string()))?;
+        let forward = agent.gateway.workspace_client(workspace, |builder| {
+            builder.connect_timeout(CONNECT_TIMEOUT)
+        })?;
         Ok(Some(Self {
-            channel: grpc::channel(client, root.clone()),
-            root,
-            agent,
-            workspace: grpc::workspace(workspace, *default_scope),
+            channel,
+            workspace: agent.gateway.workspace(workspace),
+            root: agent.root,
+            agent: agent.id,
             forward,
             forward_base,
         }))

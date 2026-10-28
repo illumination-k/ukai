@@ -51,6 +51,16 @@ depends = ["aqua:cargo-bins/cargo-binstall"]
 "apt:clang" = "latest"
 "apt:libclang-dev" = "latest"
 
+# whisper.cpp (voice input) builds ggml with cmake. Its native CPU probe can
+# hang for minutes on Apple silicon, and it would compile through whatever
+# `sccache` shim is on PATH; a portable build without either is enough here.
+[env]
+GGML_NATIVE = "OFF"
+GGML_CCACHE = "OFF"
+# The pinned `dx`, by path: the rust tool puts `~/.cargo/bin` on PATH, and a
+# `cargo install`ed `dx` there would shadow this one.
+DX = { value = "{{ tools['cargo:dioxus-cli'].path }}/bin/dx", tools = true }
+
 [hooks]
 postinstall = "if [ -z \"${CI:-}\" ]; then prek install -f; fi"
 
@@ -114,7 +124,7 @@ run = "prek run --all-files"
 description = "Format Rust code with cargo fmt and dx fmt (rsx! blocks)"
 run = [
   "cargo fmt --all",
-  "dx fmt --package ukai-app",
+  "\"$DX\" fmt --package ukai-app",
 ]
 
 [tasks."lint:rust"]
@@ -122,7 +132,7 @@ description = "Lint Rust with clippy, fmt check, cargo-deny, cargo-audit"
 run = [
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   "cargo fmt --all --check",
-  "dx fmt --check --package ukai-app",
+  "\"$DX\" fmt --check --package ukai-app",
   "cargo deny check",
   "cargo audit",
 ]
@@ -140,8 +150,8 @@ run = "cargo test --doc --locked --all-features --workspace"
 
 [tasks.dev]
 description = "Run the desktop app with hot reload (dx serve)"
-run = "dx serve --package ukai-app --platform desktop"
+run = '"$DX" serve --package ukai-app --platform desktop'
 
 [tasks.bundle]
 description = "Build a release bundle of the desktop app (dx bundle)"
-run = "dx bundle --package ukai-app --platform desktop --release"
+run = '"$DX" bundle --package ukai-app --platform desktop --release'

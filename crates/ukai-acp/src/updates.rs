@@ -22,8 +22,9 @@ use ukai_config::{AgentSpec, Source};
 use ukai_proto::gateway::v1 as gw;
 use ukai_proto::gateway::v1::agents_client::AgentsClient;
 
+use crate::gateway::GatewayAgent;
 use crate::grpc::{self, Channel};
-use crate::{PaneWorkspace, ResolveError, header_map};
+use crate::{PaneWorkspace, ResolveError};
 
 /// An agent running an older release than its latest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,26 +199,13 @@ impl RestartEndpoint {
         lookup: impl Fn(Source, &str) -> Option<String> + Copy,
         workspace: Option<&PaneWorkspace>,
     ) -> Result<Option<Self>, ResolveError> {
-        let AgentSpec::Gateway {
-            url,
-            headers,
-            workspace: default_scope,
-        } = spec
-        else {
+        let Some(agent) = GatewayAgent::resolve(spec, lookup)? else {
             return Ok(None);
         };
-        let Some((root, agent)) = grpc::agent_root(&ukai_config::interpolate(url, lookup)?) else {
-            return Ok(None);
-        };
-        let client = reqwest::Client::builder()
-            .default_headers(header_map(headers, &[], lookup)?)
-            .timeout(RESTART_TIMEOUT)
-            .build()
-            .map_err(|error| ResolveError::Client(error.to_string()))?;
         Ok(Some(Self {
-            channel: grpc::channel(client, root),
-            agent,
-            workspace: grpc::workspace(workspace, *default_scope),
+            channel: agent.channel(RESTART_TIMEOUT)?,
+            workspace: agent.gateway.workspace(workspace),
+            agent: agent.id,
         }))
     }
 

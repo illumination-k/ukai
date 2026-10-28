@@ -19,7 +19,8 @@ use reqwest::header::{CONTENT_TYPE, ETAG};
 use serde::{Deserialize, Serialize};
 use ukai_config::{AgentSpec, Source};
 
-use crate::{PaneWorkspace, ResolveError, header_map, workspace_headers};
+use crate::gateway::Gateway;
+use crate::{PaneWorkspace, ResolveError};
 
 /// Suffix of an agent's ACP endpoint that lists its workspace's reports. One
 /// file is `<it>/files<project-relative URL path>`.
@@ -120,23 +121,13 @@ impl ReportsEndpoint {
         lookup: impl Fn(Source, &str) -> Option<String> + Copy,
         workspace: Option<&PaneWorkspace>,
     ) -> Result<Option<Self>, ResolveError> {
-        let AgentSpec::Gateway {
-            url,
-            headers,
-            workspace: default_scope,
-        } = spec
-        else {
+        let Some(gateway) = Gateway::of(spec, lookup)? else {
             return Ok(None);
         };
-        let Some(base) = reports_base(&ukai_config::interpolate(url, lookup)?) else {
+        let Some(base) = reports_base(&gateway.url) else {
             return Ok(None);
         };
-        let extra = workspace_headers(workspace, *default_scope);
-        let client = reqwest::Client::builder()
-            .default_headers(header_map(headers, &extra, lookup)?)
-            .timeout(TIMEOUT)
-            .build()
-            .map_err(|error| ResolveError::Client(error.to_string()))?;
+        let client = gateway.workspace_client(workspace, |builder| builder.timeout(TIMEOUT))?;
         Ok(Some(Self { client, base }))
     }
 

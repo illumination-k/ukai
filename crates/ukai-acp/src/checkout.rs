@@ -23,9 +23,10 @@ use ukai_proto::gateway::v1 as gw;
 use ukai_proto::gateway::v1::commands_client::CommandsClient;
 use ukai_proto::gateway::v1::files_client::FilesClient;
 
+use crate::gateway::GatewayAgent;
 use crate::grpc::{self, Channel};
 use crate::review::{AnnotateRequest, Review};
-use crate::{PaneWorkspace, ResolveError, header_map};
+use crate::{PaneWorkspace, ResolveError};
 
 /// Where a relay lists its checkout's files (JSON, for the gateway).
 pub const FILES_PATH: &str = "/files";
@@ -513,30 +514,17 @@ impl Checkout {
         workspace: Option<&PaneWorkspace>,
         root: &Path,
     ) -> Result<Option<Self>, ResolveError> {
-        let AgentSpec::Gateway {
-            url,
-            headers,
-            workspace: default_scope,
-        } = spec
-        else {
+        if !matches!(spec, AgentSpec::Gateway { .. }) {
             return Ok(Some(Self::Local(root.to_owned())));
-        };
-        let url = ukai_config::interpolate(url, lookup)?;
-        let Some((root, agent)) = grpc::agent_root(&url) else {
+        }
+        let Some(agent) = GatewayAgent::resolve(spec, lookup)? else {
             return Ok(None);
         };
-        let client = |timeout| {
-            reqwest::Client::builder()
-                .default_headers(header_map(headers, &[], lookup)?)
-                .timeout(timeout)
-                .build()
-                .map_err(|error| ResolveError::Client(error.to_string()))
-        };
         Ok(Some(Self::Gateway(GatewayCheckout {
-            list: grpc::channel(client(LIST_TIMEOUT)?, root.clone()),
-            run: grpc::channel(client(RUN_TIMEOUT + LIST_TIMEOUT)?, root),
-            agent,
-            workspace: grpc::workspace(workspace, *default_scope),
+            list: agent.channel(LIST_TIMEOUT)?,
+            run: agent.channel(RUN_TIMEOUT + LIST_TIMEOUT)?,
+            workspace: agent.gateway.workspace(workspace),
+            agent: agent.id,
         })))
     }
 

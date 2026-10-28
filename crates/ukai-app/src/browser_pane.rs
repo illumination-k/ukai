@@ -24,10 +24,10 @@ use ukai_acp::{PaneWorkspace, Tunnel};
 use ukai_core::{PaneId, ProjectId, ReportSource};
 
 use crate::child_view::{ChildView, View, use_child_view};
+use crate::follow::{self, Workspace};
 use crate::icons::{Icon, Svg};
 use crate::ports;
 use crate::projects::AppSignals;
-use crate::remote_reports::Workspace;
 use crate::report_pane::open_external;
 
 /// How often the bar follows the page's address.
@@ -83,7 +83,7 @@ fn TunnelledBrowser(
             workspace: workspace.clone(),
         };
         async move {
-            let endpoint = ports::endpoint(&app.configs.peek(), &workspace)?;
+            let endpoint = follow::endpoint(&app.configs.peek(), &workspace, ports::resolve)?;
             Tunnel::open(endpoint, port)
                 .await
                 .map(Rc::new)

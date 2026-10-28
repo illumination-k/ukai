@@ -15,56 +15,25 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use time::{OffsetDateTime, UtcOffset};
-use tokio::time::Instant;
 use ukai_acp::schedules::{SchedulesEndpoint, SchedulesError};
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
-use ukai_config::{AgentSpec, Config};
+use ukai_config::AgentSpec;
 use ukai_core::schedule::{self, Outcome, Run, ScheduleInfo, ScheduleSpec, Task, Trigger};
 use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId};
 
 use crate::agent_pane::connect;
 use crate::alert;
+use crate::follow::{self, Endpoints, Workspace, list_gateway_agents, poll};
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::projects::AppSignals;
-use crate::remote_reports::{Endpoints, Workspace};
 use crate::sidebar::Head;
 
 /// How often the app asks the gateways for their schedules.
 const LIST_EVERY: Duration = Duration::from_secs(15);
 /// How often an open schedule pane asks for its schedule and runs.
 const PANE_EVERY: Duration = Duration::from_secs(4);
-/// How soon a poller notices that an edit asked for a fresh read.
-const NOTICE: Duration = Duration::from_millis(300);
-
-/// The gateway agents of `config`, by name.
-pub(crate) fn gateway_agents(config: &Config) -> Vec<String> {
-    config
-        .agents
-        .iter()
-        .filter(|(_, spec)| matches!(spec, AgentSpec::Gateway { .. }))
-        .map(|(name, _)| name.clone())
-        .collect()
-}
-
-/// Where `agent`'s schedules are kept.
-fn endpoint(config: &Config, agent: &str) -> Result<SchedulesEndpoint, String> {
-    let spec = config
-        .agent(agent)
-        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    SchedulesEndpoint::resolve(&spec, ukai_acp::system_lookup)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent `{agent}` is not a gateway agent, so it keeps no schedules"))
-}
-
-pub(crate) fn config_of(app: AppSignals, project: &ProjectId) -> Result<Config, String> {
-    app.configs
-        .read()
-        .get(project)
-        .cloned()
-        .unwrap_or_else(|| Err("this project's configuration is not loaded".to_owned()))
-}
 
 /// `error` as the user reads it, one problem per line.
 fn explain(error: &SchedulesError) -> Vec<String> {
@@ -81,26 +50,6 @@ fn explain(error: &SchedulesError) -> Vec<String> {
 fn refresh(app: AppSignals) {
     let mut revision = app.schedule_revision;
     *revision.write() += 1;
-}
-
-/// Calls `read` now, every `every`, and soon after `revision` is bumped
-/// (for schedules, by [`refresh`]).
-pub(crate) async fn poll<F: Future<Output = ()>>(
-    revision: Signal<u64>,
-    every: Duration,
-    mut read: impl FnMut() -> F,
-) {
-    let mut last = None;
-    let mut next = Instant::now();
-    loop {
-        let current = *revision.peek();
-        if last != Some(current) || Instant::now() >= next {
-            last = Some(current);
-            next = Instant::now() + every;
-            read().await;
-        }
-        tokio::time::sleep(NOTICE).await;
-    }
 }
 
 /// Show a schedule (or a new one, with `schedule` `None`) where
@@ -219,6 +168,8 @@ pub type Listing = (String, Result<Vec<ScheduleInfo>, String>);
 /// [`FollowSchedules`].
 pub type ScheduleListings = Signal<HashMap<ProjectId, Vec<Listing>>>;
 
+/// Where `workspace`'s agent keeps its schedules. They are the agent's, so
+/// the workspace is always the shared one.
 fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<SchedulesEndpoint, String> {
     SchedulesEndpoint::resolve(spec, ukai_acp::system_lookup)
         .map_err(|error| error.to_string())?
@@ -239,8 +190,6 @@ pub fn FollowSchedules() -> Element {
     let app = use_context::<AppSignals>();
     let mut listings = app.schedules;
     use_future(move || {
-        // A workspace is how `Endpoints` names an agent; schedules are the
-        // agent's, so it is always the shared one.
         let endpoints = Rc::new(RefCell::new(Endpoints::new(resolve)));
         // The run each schedule last showed, so a failure is announced once.
         let seen = Rc::new(RefCell::new(HashMap::<String, i64>::new()));
@@ -248,27 +197,15 @@ pub fn FollowSchedules() -> Element {
             let endpoints = endpoints.clone();
             let seen = seen.clone();
             async move {
-                let wanted = gateways(app);
+                let found = list_gateway_agents(app, &endpoints, async |endpoint| {
+                    endpoint.list().await.map_err(|error| error.to_string())
+                })
+                .await;
                 let mut fetched = HashMap::new();
-                let mut asked = Vec::new();
-                for (project, name, agents) in wanted {
-                    let mut listed = Vec::new();
-                    for agent in agents {
-                        let workspace = Workspace::of(&project, &agent, None);
-                        let endpoint = endpoints.borrow_mut().get(&app.configs.peek(), &workspace);
-                        let list = match endpoint {
-                            Ok(endpoint) => {
-                                endpoint.list().await.map_err(|error| error.to_string())
-                            }
-                            Err(error) => Err(error),
-                        };
-                        listed.push((agent, list));
-                        asked.push(workspace);
-                    }
+                for (project, name, listed) in found {
                     remember(app, &listed, &mut seen.borrow_mut(), &name);
                     fetched.insert(project, listed);
                 }
-                endpoints.borrow_mut().keep(&asked);
                 if *listings.peek() != fetched {
                     listings.set(fetched);
                 }
@@ -276,20 +213,6 @@ pub fn FollowSchedules() -> Element {
         })
     });
     rsx! {}
-}
-
-/// Every project with a gateway agent: its id, name, and gateway agents.
-pub(crate) fn gateways(app: AppSignals) -> Vec<(ProjectId, String, Vec<String>)> {
-    let projects = app.projects.peek();
-    let configs = app.configs.peek();
-    projects
-        .iter()
-        .filter_map(|project| {
-            let config = configs.get(&project.id)?.as_ref().ok()?;
-            let agents = gateway_agents(config);
-            (!agents.is_empty()).then(|| (project.id.clone(), project.name(), agents))
-        })
-        .collect()
 }
 
 /// What the folded node says of a project's schedules: the dot, and how
@@ -588,7 +511,10 @@ pub fn ScheduleView(
     let endpoint = use_memo({
         let agent = agent.clone();
         let project = project.clone();
-        move || config_of(app, &project).and_then(|config| endpoint(&config, &agent))
+        move || {
+            let workspace = Workspace::of(&project, &agent, None);
+            follow::endpoint(&app.configs.read(), &workspace, resolve)
+        }
     });
     let mut loaded = use_signal(|| {
         if schedule.is_some() {
