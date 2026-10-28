@@ -18,7 +18,11 @@ service Agents {
 message ListAgentsRequest {}
 
 message ListAgentsResponse {
-  repeated Agent agents = 1;
+  // The ids alone, which is all a gateway answered before `details`.
+  repeated string agents = 1;
+  // Each agent of `agents`, in the same order. A client falls back to
+  // `agents` when this is empty, so it can list an older gateway.
+  repeated Agent details = 2;
 }
 
 // One agent of `gateway.toml`, as a client shows it.

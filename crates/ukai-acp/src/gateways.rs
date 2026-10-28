@@ -75,8 +75,20 @@ impl GatewayEndpoint {
             .list(gw::ListAgentsRequest {})
             .await?
             .into_inner();
+        if listing.details.is_empty() {
+            // A gateway from before `details` answers the ids alone.
+            return Ok(listing
+                .agents
+                .into_iter()
+                .map(|id| GatewayAgent {
+                    id,
+                    command: String::new(),
+                    args: Vec::new(),
+                })
+                .collect());
+        }
         Ok(listing
-            .agents
+            .details
             .into_iter()
             .map(|agent| GatewayAgent {
                 id: agent.id,
@@ -111,11 +123,19 @@ mod tests {
                 .metadata()
                 .get("authorization")
                 .and_then(|value| value.to_str().ok());
+            if token == Some("Bearer old") {
+                // A gateway from before `details`.
+                return Ok(Response::new(gw::ListAgentsResponse {
+                    agents: vec!["claude".into()],
+                    details: Vec::new(),
+                }));
+            }
             if token != Some("Bearer t") {
                 return Err(Status::unauthenticated("no token"));
             }
             Ok(Response::new(gw::ListAgentsResponse {
-                agents: vec![gw::Agent {
+                agents: vec!["opencode".into()],
+                details: vec![gw::Agent {
                     id: "opencode".into(),
                     command: "opencode".into(),
                     args: vec!["acp".into()],
@@ -173,6 +193,19 @@ mod tests {
         assert!(
             matches!(&refused, Err(ListError::Failed(why)) if why.contains("refused")),
             "{refused:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lists_an_older_gateways_agents_by_id() {
+        let agents = gateway(serve().await, "old").agents().await;
+        assert_eq!(
+            agents.ok(),
+            Some(vec![GatewayAgent {
+                id: "claude".into(),
+                command: String::new(),
+                args: Vec::new(),
+            }])
         );
     }
 }
