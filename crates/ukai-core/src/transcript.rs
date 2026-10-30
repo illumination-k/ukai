@@ -39,6 +39,9 @@ pub enum Entry {
         kind: String,
         status: ToolStatus,
         diffs: Vec<FileDiff>,
+        /// What the subagent the call started said and did, folded like the
+        /// transcript's own entries; empty for other calls.
+        children: Vec<Entry>,
     },
     Plan {
         items: Vec<PlanItem>,
@@ -418,72 +421,17 @@ impl Transcript {
                     attachments: Vec::new(),
                 }),
             },
-            SessionEvent::AgentMessage { text } => match self.entries.last_mut() {
-                Some(Entry::Agent { text: last }) => last.push_str(&text),
-                _ => self.entries.push(Entry::Agent { text }),
-            },
-            SessionEvent::AgentThought { text } => match self.entries.last_mut() {
-                Some(Entry::Thought { text: last }) => last.push_str(&text),
-                _ => self.entries.push(Entry::Thought { text }),
-            },
-            SessionEvent::ToolCall {
-                id,
-                title,
-                kind,
-                status,
-                diffs,
-            } => match self.tool_mut(&id) {
-                Some(Entry::Tool {
-                    title: t,
-                    kind: k,
-                    status: s,
-                    diffs: d,
-                    ..
-                }) => {
-                    *t = title;
-                    *k = kind;
-                    *s = status;
-                    *d = diffs;
+            event @ (SessionEvent::AgentMessage { .. }
+            | SessionEvent::AgentThought { .. }
+            | SessionEvent::ToolCall { .. }
+            | SessionEvent::ToolCallUpdate { .. }) => fold(&mut self.entries, event),
+            SessionEvent::Subagent { parent, event } => {
+                match tool_mut(&mut self.entries, &parent) {
+                    Some(Entry::Tool { children, .. }) => fold(children, *event),
+                    // A subagent of a call we never saw: show it as the agent's own.
+                    _ => self.apply(*event),
                 }
-                _ => self.entries.push(Entry::Tool {
-                    id,
-                    title,
-                    kind,
-                    status,
-                    diffs,
-                }),
-            },
-            SessionEvent::ToolCallUpdate {
-                id,
-                title,
-                status,
-                diffs,
-            } => match self.tool_mut(&id) {
-                Some(Entry::Tool {
-                    title: t,
-                    status: s,
-                    diffs: d,
-                    ..
-                }) => {
-                    if let Some(title) = title {
-                        *t = title;
-                    }
-                    if let Some(status) = status {
-                        *s = status;
-                    }
-                    if let Some(diffs) = diffs {
-                        *d = diffs;
-                    }
-                }
-                // An update for a call we never saw: show it rather than drop it.
-                _ => self.entries.push(Entry::Tool {
-                    title: title.unwrap_or_else(|| id.clone()),
-                    id,
-                    kind: "other".to_owned(),
-                    status: status.unwrap_or(ToolStatus::Pending),
-                    diffs: diffs.unwrap_or_default(),
-                }),
-            },
+            }
             SessionEvent::Plan { entries: items } => {
                 // One plan per turn: later plans replace the earlier one in place.
                 let turn_start = self
@@ -542,13 +490,97 @@ impl Transcript {
             }
         }
     }
+}
 
-    fn tool_mut(&mut self, id: &str) -> Option<&mut Entry> {
-        self.entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(entry, Entry::Tool { id: tid, .. } if tid == id))
+/// Folds a message, thought, or tool call into `entries`, the transcript's
+/// own or those of a subagent: consecutive chunks join, and a tool call
+/// updates its entry wherever it is. Other events are left out.
+fn fold(entries: &mut Vec<Entry>, event: SessionEvent) {
+    match event {
+        SessionEvent::AgentMessage { text } => match entries.last_mut() {
+            Some(Entry::Agent { text: last }) => last.push_str(&text),
+            _ => entries.push(Entry::Agent { text }),
+        },
+        SessionEvent::AgentThought { text } => match entries.last_mut() {
+            Some(Entry::Thought { text: last }) => last.push_str(&text),
+            _ => entries.push(Entry::Thought { text }),
+        },
+        SessionEvent::ToolCall {
+            id,
+            title,
+            kind,
+            status,
+            diffs,
+        } => match tool_mut(entries, &id) {
+            Some(Entry::Tool {
+                title: t,
+                kind: k,
+                status: s,
+                diffs: d,
+                ..
+            }) => {
+                *t = title;
+                *k = kind;
+                *s = status;
+                *d = diffs;
+            }
+            _ => entries.push(Entry::Tool {
+                id,
+                title,
+                kind,
+                status,
+                diffs,
+                children: Vec::new(),
+            }),
+        },
+        SessionEvent::ToolCallUpdate {
+            id,
+            title,
+            status,
+            diffs,
+        } => match tool_mut(entries, &id) {
+            Some(Entry::Tool {
+                title: t,
+                status: s,
+                diffs: d,
+                ..
+            }) => {
+                if let Some(title) = title {
+                    *t = title;
+                }
+                if let Some(status) = status {
+                    *s = status;
+                }
+                if let Some(diffs) = diffs {
+                    *d = diffs;
+                }
+            }
+            // An update for a call we never saw: show it rather than drop it.
+            _ => entries.push(Entry::Tool {
+                title: title.unwrap_or_else(|| id.clone()),
+                id,
+                kind: "other".to_owned(),
+                status: status.unwrap_or(ToolStatus::Pending),
+                diffs: diffs.unwrap_or_default(),
+                children: Vec::new(),
+            }),
+        },
+        _ => {}
     }
+}
+
+/// The latest entry of tool call `id`, among `entries` or the entries of
+/// their subagents.
+fn tool_mut<'a>(entries: &'a mut [Entry], id: &str) -> Option<&'a mut Entry> {
+    entries.iter_mut().rev().find_map(|entry| {
+        if matches!(entry, Entry::Tool { id: tid, .. } if tid == id) {
+            return Some(entry);
+        }
+        match entry {
+            Entry::Tool { children, .. } => tool_mut(children, id),
+            _ => None,
+        }
+    })
 }
 
 /// A past session's title, unless it has none worth showing.
@@ -851,14 +883,69 @@ mod tests {
             transcript.entries,
             vec![
                 Entry::Agent { text: "ab".into() },
-                Entry::Tool {
-                    id: "1".into(),
-                    title: "tool 1".into(),
-                    kind: "read".into(),
-                    status: ToolStatus::Pending,
-                    diffs: Vec::new(),
-                },
+                tool_entry("1", ToolStatus::Pending, vec![]),
                 Entry::Agent { text: "c".into() },
+            ]
+        );
+    }
+
+    fn tool_entry(id: &str, status: ToolStatus, children: Vec<Entry>) -> Entry {
+        Entry::Tool {
+            id: id.into(),
+            title: format!("tool {id}"),
+            kind: "read".into(),
+            status,
+            diffs: Vec::new(),
+            children,
+        }
+    }
+
+    fn subagent(parent: &str, event: SessionEvent) -> SessionEvent {
+        SessionEvent::Subagent {
+            parent: parent.into(),
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn subagents_fold_under_the_call_that_started_them() {
+        let transcript = folded([
+            msg("looking"),
+            tool("a", ToolStatus::InProgress),
+            tool("b", ToolStatus::InProgress),
+            subagent("a", msg("found ")),
+            subagent("b", tool("grep", ToolStatus::InProgress)),
+            subagent("a", msg("it")),
+            // An update that does not name its subagent still finds its call.
+            SessionEvent::ToolCallUpdate {
+                id: "grep".into(),
+                title: None,
+                status: Some(ToolStatus::Completed),
+                diffs: None,
+            },
+            subagent("gone", msg("orphan")),
+        ]);
+        assert_eq!(
+            transcript.entries,
+            vec![
+                Entry::Agent {
+                    text: "looking".into()
+                },
+                tool_entry(
+                    "a",
+                    ToolStatus::InProgress,
+                    vec![Entry::Agent {
+                        text: "found it".into()
+                    }],
+                ),
+                tool_entry(
+                    "b",
+                    ToolStatus::InProgress,
+                    vec![tool_entry("grep", ToolStatus::Completed, vec![])],
+                ),
+                Entry::Agent {
+                    text: "orphan".into()
+                },
             ]
         );
     }
@@ -866,11 +953,11 @@ mod tests {
     #[rstest]
     #[case::known_call(
         vec![tool("1", ToolStatus::Pending)],
-        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "read".into(), status: ToolStatus::Completed, diffs: vec![diff()] },
+        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "read".into(), status: ToolStatus::Completed, diffs: vec![diff()], children: vec![] },
     )]
     #[case::unknown_call(
         vec![],
-        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "other".into(), status: ToolStatus::Completed, diffs: vec![diff()] },
+        Entry::Tool { id: "1".into(), title: "renamed".into(), kind: "other".into(), status: ToolStatus::Completed, diffs: vec![diff()], children: vec![] },
     )]
     fn tool_updates_patch_in_place(#[case] before: Vec<SessionEvent>, #[case] expected: Entry) {
         let mut transcript = folded(before);

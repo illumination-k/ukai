@@ -100,6 +100,13 @@ pub enum SessionEvent {
         /// Replaces the call's diffs when the update carries content.
         diffs: Option<Vec<FileDiff>>,
     },
+    /// A message, thought, or tool call of a subagent the agent runs, which
+    /// streams alongside the agent's own and those of its other subagents.
+    /// `parent` is the id of the tool call that started the subagent.
+    Subagent {
+        parent: String,
+        event: Box<SessionEvent>,
+    },
     /// The agent's current plan, replacing any earlier one.
     Plan { entries: Vec<PlanItem> },
     /// Context window use and session cost, replacing any earlier report.
@@ -954,6 +961,33 @@ fn translate_extension(message: &UntypedMessage) -> Option<SessionEvent> {
 /// `replaying`: a `session/load` is in progress, so user turns are history
 /// to show rather than echoes of a prompt the UI already displays.
 fn translate_update(update: SessionUpdate, replaying: bool) -> Option<SessionEvent> {
+    let parent = subagent_parent(&update);
+    let event = translate_own_update(update, replaying)?;
+    Some(match parent {
+        Some(parent) => SessionEvent::Subagent {
+            parent,
+            event: Box::new(event),
+        },
+        None => event,
+    })
+}
+
+/// The tool call that started the subagent `update` comes from, which
+/// claude-agent-acp names in `_meta.claudeCode.parentToolUseId`.
+fn subagent_parent(update: &SessionUpdate) -> Option<String> {
+    let meta = match update {
+        SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => {
+            chunk.meta.as_ref()
+        }
+        SessionUpdate::ToolCall(call) => call.meta.as_ref(),
+        SessionUpdate::ToolCallUpdate(update) => update.meta.as_ref(),
+        _ => None,
+    }?;
+    let parent = meta.get("claudeCode")?.get("parentToolUseId")?.as_str()?;
+    Some(parent.to_owned())
+}
+
+fn translate_own_update(update: SessionUpdate, replaying: bool) -> Option<SessionEvent> {
     Some(match update {
         SessionUpdate::UserMessageChunk(ContentChunk { content, .. }) if replaying => {
             SessionEvent::UserMessage {

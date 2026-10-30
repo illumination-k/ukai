@@ -38,6 +38,8 @@ struct Caps {
 /// - `ask`: requests permission, echoes the chosen option id, then `end_turn`
 /// - `fs`: says which `fs/*` methods the client offered, then `end_turn`
 /// - `edit`: reports a tool call with a diff, then updates it with another
+/// - `subagent`: starts a subagent's tool call, which reports a message and a
+///   tool call of its own
 /// - `blocks`: describes every block of the prompt, then `end_turn`
 /// - `usage`: reports context use and cost, then `end_turn`
 /// - `commands`: lists two slash commands, then `end_turn`
@@ -247,6 +249,26 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                     ToolCallUpdateFields::new()
                                         .content(vec![Diff::new("/p/b.txt", "created").into()]),
                                 )))?;
+                            } else if text == "subagent" {
+                                let mut meta = agent_client_protocol::schema::v1::Meta::new();
+                                meta.insert(
+                                    "claudeCode".into(),
+                                    serde_json::json!({ "parentToolUseId": "task-1" }),
+                                );
+                                for update in [
+                                    SessionUpdate::ToolCall(ToolCall::new("task-1", "Explore")),
+                                    SessionUpdate::AgentMessageChunk(
+                                        ContentChunk::new("found it".into()).meta(meta.clone()),
+                                    ),
+                                    SessionUpdate::ToolCall(
+                                        ToolCall::new("grep-1", "grep").meta(meta),
+                                    ),
+                                ] {
+                                    cx.send_notification(SessionNotification::new(
+                                        session.clone(),
+                                        update,
+                                    ))?;
+                                }
                             } else if let Some(path) = text.strip_prefix("write ") {
                                 cx.send_request(WriteTextFileRequest::new(
                                     session.clone(),
@@ -761,6 +783,39 @@ async fn tool_calls_carry_their_diffs() {
                     new_text: "created".into(),
                 }]),
             },
+            end_turn(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn subagent_updates_name_their_parent() {
+    let mut harness = Harness::start().await;
+    let events = harness.turn("subagent").await;
+    let subagent = |event| SessionEvent::Subagent {
+        parent: "task-1".into(),
+        event: Box::new(event),
+    };
+    assert_eq!(
+        events,
+        vec![
+            SessionEvent::ToolCall {
+                id: "task-1".into(),
+                title: "Explore".into(),
+                kind: "other".into(),
+                status: ToolStatus::Pending,
+                diffs: vec![],
+            },
+            subagent(SessionEvent::AgentMessage {
+                text: "found it".into(),
+            }),
+            subagent(SessionEvent::ToolCall {
+                id: "grep-1".into(),
+                title: "grep".into(),
+                kind: "other".into(),
+                status: ToolStatus::Pending,
+                diffs: vec![],
+            }),
             end_turn(),
         ]
     );
