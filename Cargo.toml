@@ -57,7 +57,7 @@ reqwest = { version = "0.13", default-features = false }
 # No backend feature: dioxus-desktop already depends on rfd with `xdg-portal`
 # on Linux, and rfd refuses to build with both `xdg-portal` and `gtk3`.
 rfd = { version = "0.17", default-features = false }
-rstest = "0.27"
+rstest = "0.28"
 security-framework = "3.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
