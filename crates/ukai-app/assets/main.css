@@ -1526,6 +1526,41 @@ button.new-tab {
   height: 20px;
 }
 
+/* A subagent's call, with what it said and did folded under it. */
+.subagent {
+  margin: -8px 0;
+}
+
+.subagent > summary {
+  margin: 0;
+  list-style: none;
+  cursor: pointer;
+}
+
+.subagent > summary::-webkit-details-marker {
+  display: none;
+}
+
+.subagent > summary:hover .name {
+  color: var(--chat-strong);
+}
+
+.subagent .count {
+  flex: none;
+  font-size: 12px;
+}
+
+.subagent > .body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 480px;
+  margin: 4px 0 4px 7px;
+  padding: 12px 0 4px 16px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+}
+
 .plan {
   padding: 10px 12px;
   border: 1px solid var(--border);

@@ -94,6 +94,7 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
             kind,
             status,
             diffs,
+            children,
             ..
         } => {
             let state = match status {
@@ -102,6 +103,17 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
                 ToolStatus::Completed => "done",
                 ToolStatus::Failed => "failed",
             };
+            if !children.is_empty() {
+                return rsx! {
+                    Subagent {
+                        pane,
+                        title,
+                        kind,
+                        state,
+                        entries: children,
+                    }
+                };
+            }
             if diffs.is_empty() {
                 return rsx! {
                     div { class: "tool {state}", title: "{kind} · {state}",
@@ -230,6 +242,44 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
         } => rsx! {
             ShellRun { command, result, sent }
         },
+    }
+}
+
+/// A tool call that started a subagent, with what the subagent said and did
+/// folded under it: subagents run side by side, and their output would
+/// otherwise interleave with the agent's own.
+#[component]
+fn Subagent(
+    pane: PaneId,
+    title: String,
+    kind: String,
+    state: &'static str,
+    entries: Vec<Entry>,
+) -> Element {
+    let calls = entries
+        .iter()
+        .filter(|child| matches!(child, Entry::Tool { .. }))
+        .count();
+    rsx! {
+        details { class: "subagent",
+            summary { class: "tool {state}", title: "{kind} · {state}",
+                span { class: "tool-icon" }
+                span { class: "verb", "{kind}" }
+                span { class: "name", "{title}" }
+                span { class: "count",
+                    if calls == 1 {
+                        "1 tool call"
+                    } else {
+                        "{calls} tool calls"
+                    }
+                }
+            }
+            div { class: "body",
+                for (index, entry) in entries.into_iter().enumerate() {
+                    EntryView { key: "{index}", pane, entry }
+                }
+            }
+        }
     }
 }
 

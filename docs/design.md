@@ -161,6 +161,10 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
   飛ばし、エージェントが拒んだら残りは送らない。`session/load` / `resume` で続けるセッションの設定には触らない。
 - `ToolCall` / `ToolCallUpdate` はツール呼び出しの `content` のうち `diff`（パス・変更前・変更後）を `FileDiff` として運ぶ。
   更新に `content` があれば差分を置き換え、なければ残す。
+- サブエージェント（claude-agent-acp の Agent/Task ツール）の発言・思考・ツール呼び出しは、エージェント自身のものと
+  同じ feed に `_meta.claudeCode.parentToolUseId` 付きで流れ、並列に走るサブエージェント同士で混ざる。これは
+  `Subagent { parent, event }` で包んで運び、`Transcript` は起動したツール呼び出しの `Entry::Tool::children` に
+  畳み込む（親が見つからなければエージェント自身のものとして扱う）。pane ではそのツール呼び出しの行を開くと見える。
 - `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、
   届くたびに前の一覧を置き換える。ACP にコマンド実行の専用メソッドはなく、`/name 入力` で始まる prompt がそれになる。
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
@@ -880,7 +884,7 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
   （`pod` スコープ、鍵は `workspace_key`）の agent pane に開き、`session/load` で読んで続けたり、
   待っているパーミッション要求に答えたりできる。
 - 会話は最大幅 46rem で中央寄せ。ユーザー発言は右寄せの淡いバブル、エージェント発言は地のまま、ツール呼び出しは
-  1 行ずつ、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。入力欄は 3 行から下書きに
+  1 行ずつ（サブエージェントを起動したものは、その発言とツール呼び出しを畳んで持つ）、思考は折りたたみ。入力欄は角丸カードで、送信/停止は右下の丸ボタン。入力欄は 3 行から下書きに
   合わせてウィンドウの高さの 40% まで伸びる（同じグリッドのセルに下書きの見えない写しを置いて高さを決める）。
 - **steer。** ターン中の送信はそのターンへの割り込みになる。ACP 本体には走っているターンに発言を足す手段がない。
   - `initialize` 応答の `_meta.steering.supported` を広告するエージェント（`claude-agent-acp`。Zed もこれを使う）には
