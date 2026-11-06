@@ -56,6 +56,9 @@ ignore = [
   { id = "RUSTSEC-2026-0195", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2023-0071", reason = "rsa via jsonwebtoken (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via jsonwebtoken (surrealdb-core, tests only)" },
+  # wasm32 only: surrealdb's timers there. Keep `cargo tree --workspace -i pin-utils`
+  # empty, which it is for every target we build.
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils via wasmtimer (surrealdb, wasm32 only)" },
 ]
 
 [sources]

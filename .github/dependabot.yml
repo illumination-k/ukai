@@ -28,6 +28,11 @@ updates:
       acp:
         patterns:
           - "agent-client-protocol*"
+      # Each kube release pins one k8s-openapi; bumped apart, they do not build.
+      kube:
+        patterns:
+          - "kube"
+          - "k8s-openapi"
       cargo:
         patterns:
           - "*"

@@ -263,7 +263,7 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
             service_account_token: Some(ServiceAccountTokenProjection {
                 audience: Some(token.audience.clone()),
                 path: file.to_owned(),
-                expiration_seconds: None,
+                ..ServiceAccountTokenProjection::default()
             }),
             ..VolumeProjection::default()
         };
@@ -306,7 +306,7 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
                 name: format!("token-{index}"),
                 projected: Some(ProjectedVolumeSource {
                     sources: Some(sources),
-                    default_mode: None,
+                    ..ProjectedVolumeSource::default()
                 }),
                 ..Volume::default()
             }),
