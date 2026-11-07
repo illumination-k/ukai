@@ -42,11 +42,13 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-    #[error("invalid configuration:\n{}", list(.0))]
+    #[error("invalid configuration:\n{}", bullet_list(.0))]
     Invalid(Vec<Problem>),
 }
 
-fn list(problems: &[Problem]) -> String {
+/// `problems` as an indented bullet list, one per line, for an error that
+/// reports them all.
+pub fn bullet_list(problems: &[impl std::fmt::Display]) -> String {
     problems
         .iter()
         .map(|problem| format!("  - {problem}"))

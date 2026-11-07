@@ -227,16 +227,8 @@ pub enum Problem {
 pub enum ConfigError {
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
-    #[error("invalid configuration:\n{}", list(.0))]
+    #[error("invalid configuration:\n{}", ukai_config::bullet_list(.0))]
     Invalid(Vec<Problem>),
-}
-
-fn list(problems: &[Problem]) -> String {
-    problems
-        .iter()
-        .map(|problem| format!("  - {problem}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Parse and validate a `gateway.toml` document.

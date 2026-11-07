@@ -88,6 +88,15 @@ pub fn declaration(
         .ok_or_else(|| format!("agent `{}` is not declared anymore", workspace.agent))
 }
 
+/// The endpoint an agent's resolution `found`, with `absent` saying why
+/// there is none when the agent has nothing of the kind.
+pub fn found<E>(
+    found: Result<Option<E>, ukai_acp::ResolveError>,
+    absent: impl FnOnce() -> String,
+) -> Result<E, String> {
+    found.map_err(|error| error.to_string())?.ok_or_else(absent)
+}
+
 /// The endpoint of `workspace`'s agent as it is declared right now, through
 /// `resolve`.
 pub fn endpoint<E>(

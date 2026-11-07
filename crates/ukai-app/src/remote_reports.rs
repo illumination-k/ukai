@@ -47,9 +47,10 @@ pub type Listings = Signal<HashMap<Workspace, Listing>>;
 
 /// Where a workspace's reports are read from, for [`crate::follow::endpoint`].
 pub fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<ReportsEndpoint, String> {
-    ReportsEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.workspace.as_ref())
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent `{}` serves no reports", workspace.agent))
+    crate::follow::found(
+        ReportsEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.workspace.as_ref()),
+        || format!("agent `{}` serves no reports", workspace.agent),
+    )
 }
 
 /// Reads the listings of the [`followed`] workspaces, over and over.

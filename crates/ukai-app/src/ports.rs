@@ -42,9 +42,10 @@ pub type PortListings = Signal<HashMap<Workspace, Ports>>;
 /// Where a workspace's ports are listed and reached, for
 /// [`crate::follow::endpoint`].
 pub fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<PortsEndpoint, String> {
-    PortsEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.workspace.as_ref())
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent `{}` runs on this machine", workspace.agent))
+    crate::follow::found(
+        PortsEndpoint::resolve(spec, ukai_acp::system_lookup, workspace.workspace.as_ref()),
+        || format!("agent `{}` runs on this machine", workspace.agent),
+    )
 }
 
 /// Reads the port listings of the [`followed`] workspaces, over and over,
