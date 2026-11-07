@@ -9,49 +9,27 @@ use ukai_core::report::ReportKind;
 use ukai_core::{Entry, PaneContent, PaneId, ProjectId, ReportSource, review, shell};
 
 use super::review_of;
-use crate::clipboard;
 use crate::diff_view::DiffLines;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
-use crate::markdown::Markdown;
+use crate::markdown::{CopyButton, Markdown};
 use crate::projects::AppSignals;
 use crate::report_pane::project_relative;
 
 /// An agent message, with a button that copies its text whole.
 #[component]
 fn AgentMessage(text: String) -> Element {
-    let mut copied = use_signal(|| false);
-    let copy = {
-        let text = text.clone();
-        move |_| {
-            if clipboard::copy(&text) {
-                copied.set(true);
-                spawn(async move {
-                    tokio::time::sleep(COPIED_FOR).await;
-                    copied.set(false);
-                });
-            }
-        }
-    };
     rsx! {
         div { class: "agent-msg",
             div { class: "msg agent",
                 Markdown { source: text.clone() }
             }
             div { class: "msg-actions",
-                button {
-                    class: if copied() { "icon copied" } else { "icon" },
-                    title: if copied() { "Copied" } else { "Copy" },
-                    onclick: copy,
-                    Svg { icon: if copied() { Icon::Check } else { Icon::Copy } }
-                }
+                CopyButton { text }
             }
         }
     }
 }
-
-/// How long the copy button shows that it copied.
-const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[component]
 pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {

@@ -524,15 +524,23 @@ fn AgentRow(agent: OpenAgent, depth: u8) -> Element {
     let app = use_context::<AppSignals>();
     let mut layout = app.layout;
     let OpenAgent { pane, agent, tab } = agent;
-    let (focused, many_tabs) = {
+    let (focused, current, many_tabs) = {
         let layout = layout.read();
-        (layout.focused() == pane, layout.tabs().len() > 1)
+        (
+            layout.focused() == pane,
+            layout.active() == tab,
+            layout.tabs().len() > 1,
+        )
     };
     let (state, label, _) = agent_status(app.sessions, pane);
-    let class = match (focused, is_unread(app.sessions, pane)) {
-        (true, _) => "row agent-row focused",
-        (false, true) => "row agent-row unread",
-        (false, false) => "row agent-row",
+    // Rows in the active tab are marked as the tab bar marks it, so the two
+    // read as one; the focused pane's row is also filled.
+    let class = match (focused, current, is_unread(app.sessions, pane)) {
+        (true, _, _) => "row agent-row current focused",
+        (false, true, true) => "row agent-row current unread",
+        (false, true, false) => "row agent-row current",
+        (false, false, true) => "row agent-row unread",
+        (false, false, false) => "row agent-row",
     };
     rsx! {
         div {

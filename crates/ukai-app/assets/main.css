@@ -29,6 +29,7 @@
   --destructive: #e40014;
   --attention: #ea580c;
   --unread: #3b82f6;
+  --accent: #3b82f6;
   --diff-added: color-mix(in srgb, #10b981 14%, transparent);
   --diff-removed: color-mix(in srgb, #ef4444 13%, transparent);
   --idle: color-mix(in srgb, #737373 40%, transparent);
@@ -487,6 +488,17 @@ button:focus-visible,
   font-size: 12.5px;
 }
 
+/* An agent in the active tab: the same accent line as the tab itself. */
+.agent-row.current {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.agent-row.current.focused {
+  box-shadow:
+    inset 2px 0 0 var(--accent),
+    0 1px 2px color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
 .agent-row .dot {
   margin: 0 4px;
 }
@@ -598,13 +610,16 @@ button:focus-visible,
   padding-top: 4px;
   overflow-x: auto;
   border-bottom: 1px solid var(--border);
-  background: var(--card);
+  background: var(--sidebar);
 }
 
 .tabbar::-webkit-scrollbar {
   display: none;
 }
 
+/* Inactive tabs sit back on the bar's gray; the active one takes the panes'
+   background and carries the accent line the sidebar's
+   rows of the same tab carry. */
 .tab {
   position: relative;
   display: flex;
@@ -613,7 +628,7 @@ button:focus-visible,
   gap: 6px;
   min-width: 72px;
   padding: 0 6px 0 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid transparent;
   border-right: 1px solid var(--border);
   color: var(--muted-fg);
   font-size: 12px;
@@ -625,21 +640,23 @@ button:focus-visible,
 }
 
 .tab:hover {
+  background: var(--hover);
   color: var(--fg);
 }
 
 .tab.active {
-  background: color-mix(in srgb, var(--fg) 6%, var(--card));
+  background: var(--bg);
   color: var(--fg);
+  font-weight: 600;
 }
 
 .tab.active::after {
   position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
+  top: -1px;
+  right: -1px;
+  left: -1px;
   height: 2px;
-  background: var(--fg);
+  background: var(--accent);
   content: "";
 }
 
@@ -1326,7 +1343,7 @@ button.new-tab {
   margin-bottom: 0;
 }
 
-.md :is(p, ul, ol, blockquote, pre, .table-wrap, hr) {
+.md :is(p, ul, ol, blockquote, pre, .code-block, .table-wrap, hr) {
   margin: 0 0 10px;
 }
 
@@ -1399,6 +1416,37 @@ button.new-tab {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--muted);
+}
+
+.md .code-block {
+  position: relative;
+}
+
+.md .code-block > pre {
+  margin: 0;
+}
+
+.md .code-block button.copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted-fg);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.md .code-block:hover button.copy,
+.md .code-block button.copy.copied {
+  opacity: 1;
+}
+
+.md .code-block button.copy:hover,
+.md .code-block button.copy.copied {
+  color: var(--fg);
 }
 
 .md pre code {

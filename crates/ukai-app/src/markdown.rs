@@ -5,7 +5,36 @@
 use dioxus::prelude::*;
 use ukai_core::markdown::{self, Align, Kind, Node};
 
+use crate::clipboard;
+use crate::icons::{Icon, Svg};
 use crate::report_pane::open_external;
+
+/// A button that copies `text` and shows for a moment that it did.
+#[component]
+pub fn CopyButton(text: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let copy = move |event: MouseEvent| {
+        event.stop_propagation();
+        if clipboard::copy(&text) {
+            copied.set(true);
+            spawn(async move {
+                tokio::time::sleep(COPIED_FOR).await;
+                copied.set(false);
+            });
+        }
+    };
+    rsx! {
+        button {
+            class: if copied() { "icon copy copied" } else { "icon copy" },
+            title: if copied() { "Copied" } else { "Copy" },
+            onclick: copy,
+            Svg { icon: if copied() { Icon::Check } else { Icon::Copy } }
+        }
+    }
+}
+
+/// How long a copy button shows that it copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[component]
 pub fn Markdown(source: String) -> Element {
@@ -26,8 +55,11 @@ fn render(node: &Node) -> Element {
             code { "{code}" }
         },
         Node::CodeBlock { lang, text } => rsx! {
-            pre { "data-lang": lang.clone(),
-                code { "{text}" }
+            div { class: "code-block",
+                pre { "data-lang": lang.clone(),
+                    code { "{text}" }
+                }
+                CopyButton { text: text.clone() }
             }
         },
         Node::HardBreak => rsx! {
