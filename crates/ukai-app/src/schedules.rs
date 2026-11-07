@@ -171,14 +171,15 @@ pub type ScheduleListings = Signal<HashMap<ProjectId, Vec<Listing>>>;
 /// Where `workspace`'s agent keeps its schedules. They are the agent's, so
 /// the workspace is always the shared one.
 fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<SchedulesEndpoint, String> {
-    SchedulesEndpoint::resolve(spec, ukai_acp::system_lookup)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| {
+    crate::follow::found(
+        SchedulesEndpoint::resolve(spec, ukai_acp::system_lookup),
+        || {
             format!(
                 "agent `{}` is not a gateway agent, so it keeps no schedules",
                 workspace.agent
             )
-        })
+        },
+    )
 }
 
 /// Reads the schedules of every project's gateway agents, over and over,

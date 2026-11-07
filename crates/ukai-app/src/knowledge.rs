@@ -166,14 +166,15 @@ pub type KnowledgeListings = Signal<HashMap<ProjectId, Vec<Fetched>>>;
 
 /// Where `workspace`'s agent keeps its notes.
 fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<KnowledgeEndpoint, String> {
-    KnowledgeEndpoint::resolve(spec, ukai_acp::system_lookup)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| {
+    crate::follow::found(
+        KnowledgeEndpoint::resolve(spec, ukai_acp::system_lookup),
+        || {
             format!(
                 "agent `{}` is not a gateway agent, so it keeps no knowledge",
                 workspace.agent
             )
-        })
+        },
+    )
 }
 
 /// Reads the notes of every project's gateway agents, over and over, so the

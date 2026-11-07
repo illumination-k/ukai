@@ -108,38 +108,55 @@ pub fn problems(
     }
     let known = rules.tags.keys().cloned().collect::<Vec<_>>().join(", ");
     for (index, draft) in drafts.iter().enumerate() {
-        if !inside(&draft.path) {
-            problems.push(Problem::Path(index, draft.path.clone()));
-        }
-        let range_ok = match (draft.line, draft.end_line) {
-            (Some(0), _) | (None, Some(_)) => false,
-            (Some(line), Some(end)) => end >= line,
-            _ => true,
-        };
-        if !range_ok {
-            problems.push(Problem::Range(index));
-        }
-        if draft.body.trim().is_empty() {
-            problems.push(Problem::EmptyBody(index));
-        }
-        if draft.body.len() > BODY_MAX {
-            problems.push(Problem::LongBody(index));
-        }
-        if let Some(c) = invisible(&draft.body) {
-            problems.push(Problem::Invisible(index, u32::from(c)));
-        }
-        if draft.tags.len() > TAGS_MAX {
-            problems.push(Problem::TooManyTags(index));
-        }
-        for tag in &draft.tags {
-            if !is_tag(tag) {
-                problems.push(Problem::InvalidTag(index, tag.clone()));
-            } else if !rules.tags.is_empty() && !rules.tags.contains_key(tag) {
-                problems.push(Problem::UnknownTag(index, tag.clone(), known.clone()));
-            }
-        }
+        draft_problems(index, draft, rules, &known, &mut problems);
     }
     problems
+}
+
+/// What keeps the draft at `index` from being written, given the tags
+/// `rules` knows (`known`, already listed for the message).
+fn draft_problems(
+    index: usize,
+    draft: &Draft,
+    rules: &ukai_config::Review,
+    known: &str,
+    problems: &mut Vec<Problem>,
+) {
+    if !inside(&draft.path) {
+        problems.push(Problem::Path(index, draft.path.clone()));
+    }
+    if !range_ok(draft.line, draft.end_line) {
+        problems.push(Problem::Range(index));
+    }
+    if draft.body.trim().is_empty() {
+        problems.push(Problem::EmptyBody(index));
+    }
+    if draft.body.len() > BODY_MAX {
+        problems.push(Problem::LongBody(index));
+    }
+    if let Some(c) = invisible(&draft.body) {
+        problems.push(Problem::Invisible(index, u32::from(c)));
+    }
+    if draft.tags.len() > TAGS_MAX {
+        problems.push(Problem::TooManyTags(index));
+    }
+    for tag in &draft.tags {
+        if !is_tag(tag) {
+            problems.push(Problem::InvalidTag(index, tag.clone()));
+        } else if !rules.tags.is_empty() && !rules.tags.contains_key(tag) {
+            problems.push(Problem::UnknownTag(index, tag.clone(), known.to_owned()));
+        }
+    }
+}
+
+/// Whether `line`..=`end_line` names lines: they count from 1, an end needs
+/// a start, and it does not come before it.
+fn range_ok(line: Option<u32>, end_line: Option<u32>) -> bool {
+    match (line, end_line) {
+        (Some(0), _) | (None, Some(_)) => false,
+        (Some(line), Some(end)) => end >= line,
+        _ => true,
+    }
 }
 
 /// Whether `path` is relative and stays inside the checkout.
