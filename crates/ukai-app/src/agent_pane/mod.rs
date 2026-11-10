@@ -20,7 +20,7 @@ use ukai_acp::{Attachment, Checkout, SessionHandle};
 use ukai_core::composer::{self as suggest, Files};
 use ukai_core::mention::Mention;
 use ukai_core::review::ReviewComment;
-use ukai_core::{PaneId, Queued, Status, Transcript};
+use ukai_core::{Connection, PaneId, Queued, Status, Transcript};
 
 pub use self::history::HistoryMenu;
 pub use self::session::connect;
@@ -129,6 +129,13 @@ pub fn agent_status(
     let transcript = session.transcript.read();
     let (class, label) = match transcript.status {
         _ if transcript.awaiting_permission() => ("attention", "needs input"),
+        // A dropped connection is reached again quietly; while idle there is
+        // nothing to tell (`Connection::Detached` reads as ready).
+        Status::Busy | Status::Idle
+            if matches!(transcript.connection, Connection::Reconnecting { .. }) =>
+        {
+            ("busy", "reconnecting")
+        }
         Status::Connecting => ("busy", "connecting"),
         Status::Idle => ("ready", "ready"),
         Status::Busy => ("busy", "working"),

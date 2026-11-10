@@ -24,6 +24,7 @@ pub mod gateways;
 mod grpc;
 pub mod knowledge;
 pub mod ports;
+pub mod reconnect;
 pub mod reports;
 pub mod review;
 pub mod schedules;
@@ -35,13 +36,14 @@ pub use checkout::Checkout;
 pub use fs::{FsError, FsRoot};
 pub use gateways::{GatewayAgent, GatewayEndpoint};
 pub use ports::{PortsEndpoint, Tunnel};
+pub use reconnect::ReconnectPolicy;
 pub use reports::ReportsEndpoint;
 pub use secrets::system_lookup;
 pub use session::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, Cost, FileDiff,
     PROGRESS_METHOD, PastSession, PermissionChoice, PermissionId, PlanItem, Prompt, PromptCaps,
     RestoreOutcome, STEER_METHOD, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
-    SlashCommand, TURN_STATE_METHOD, ToolStatus, Usage, spawn_session,
+    SlashCommand, TURN_STATE_METHOD, ToolStatus, Usage, spawn_session, spawn_session_with,
 };
 pub use updates::{RestartEndpoint, Update, UpdateCheck};
 

@@ -445,7 +445,9 @@ async fn run_prompt(
         Ok(transport) => transport,
         Err(error) => return failed(error.to_string()),
     };
-    let (session, mut events) = ukai_acp::spawn_session(
+    // A run reconnected would see `Ready` again and send its prompt twice;
+    // the relay is in the cluster, so a dropped connection fails the run.
+    let (session, mut events) = ukai_acp::spawn_session_with(
         transport,
         SessionOptions {
             cwd: REPO_DIR.into(),
@@ -453,6 +455,7 @@ async fn run_prompt(
             restore: None,
             update_check: None,
         },
+        ukai_acp::ReconnectPolicy::NEVER,
     );
     loop {
         let event = tokio::select! {
