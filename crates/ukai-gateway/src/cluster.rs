@@ -16,7 +16,7 @@ use kube::api::{
 use kube::config::InferConfigError;
 use kube::{Client, Config};
 
-use ukai_acp::checkout::{DIFF_PATH, DiffBase, FILES_PATH, RUN_PATH};
+use ukai_acp::checkout::{DIFF_PATH, DiffBase, FILES_PATH, RUN_PATH, UPLOAD_PATH};
 use ukai_acp::ports::{FORWARD_PATH, PORTS_PATH};
 use ukai_acp::review::REVIEW_PATH;
 
@@ -400,6 +400,12 @@ impl RelayEndpoint {
     /// Where a command is run in the pod's checkout.
     pub fn run_url(&self) -> String {
         format!("http://{}{RUN_PATH}", self.address)
+    }
+
+    /// Where a file the user attached as `name` is put in the pod.
+    pub fn upload_url(&self, name: &str) -> String {
+        let name = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
+        format!("http://{}{UPLOAD_PATH}?name={name}", self.address)
     }
 
     /// Where the user's replies to the agent's review are taken.

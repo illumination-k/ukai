@@ -228,6 +228,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// same port as everything else: the app speaks gRPC-Web, which passes
 /// HTTP/1.1 proxies such as IAP.
 fn grpc(gateway: Arc<Gateway>) -> Router {
+    /// Room for the rest of an upload's message around the file.
+    const UPLOAD_OVERHEAD: usize = 64 * 1024;
+
     use tonic_web::GrpcWebLayer;
     use tower::Layer;
     use ukai_proto::gateway::v1::agents_server::AgentsServer;
@@ -252,7 +255,13 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     )
     .add_service(web.layer(AgentsServer::new(api.clone())))
     .add_service(web.layer(PortsServer::new(api.clone())))
-    .add_service(web.layer(FilesServer::new(api.clone())))
+    .add_service(
+        web.layer(
+            // An upload carries a file, past tonic's 4 MiB of a message.
+            FilesServer::new(api.clone())
+                .max_decoding_message_size(ukai_acp::checkout::MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD),
+        ),
+    )
     .add_service(web.layer(CommandsServer::new(api.clone())))
     .add_service(web.layer(SchedulesServer::new(api)))
     .prepare()

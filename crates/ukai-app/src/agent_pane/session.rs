@@ -232,8 +232,8 @@ fn follow_queued(
         .and_then(|session| session.handle.clone());
     let idle = transcript.peek().status == Status::Idle;
     if idle && handle.is_some_and(|handle| handle.prompt(steer.prompt())) {
-        let names = steer.names();
-        transcript.write().push_prompt(steer.text, names);
+        let sent = steer.shown();
+        transcript.write().push_prompt(steer.text, sent);
     } else {
         composer.restore(steer);
     }

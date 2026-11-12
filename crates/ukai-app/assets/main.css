@@ -2212,6 +2212,26 @@ button.config-trigger:disabled {
   padding-right: 8px;
 }
 
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.msg-images img {
+  max-width: min(100%, 320px);
+  max-height: 240px;
+  border: 1px solid var(--user-border);
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.chip.uploading {
+  padding-right: 8px;
+  opacity: 0.6;
+}
+
 /* ---- agent pane: diffs ------------------------------------------------ */
 
 .tool-diffs {
