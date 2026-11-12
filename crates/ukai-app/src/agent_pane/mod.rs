@@ -147,9 +147,10 @@ pub fn agent_status(
 
 /// What agent `pane`'s session is about, once there is something to say.
 pub fn session_title(sessions: Sessions, pane: PaneId) -> Option<String> {
-    let session = sessions.read().get(&pane).cloned()?;
-    let title = session.transcript.read().title().map(str::to_owned);
-    title
+    sessions
+        .read()
+        .get(&pane)
+        .and_then(|session| session.transcript.read().title().map(str::to_owned))
 }
 
 /// The comments on diff lines waiting in agent `pane`'s composer for its

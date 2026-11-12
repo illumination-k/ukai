@@ -884,11 +884,11 @@ mod tests {
 
     #[rstest]
     #[case::unnamed(vec![], None)]
-    #[case::first_prompt(vec![user("\n fix the build \nplease"), user("and the docs")], Some("fix the build"))]
-    #[case::named(vec![user("fix the build"), named(Some(" Build fix "))], Some("Build fix"))]
+    #[case::first_prompt(vec![user_said("\n fix the build \nplease"), user_said("and the docs")], Some("fix the build"))]
+    #[case::named(vec![user_said("fix the build"), named(Some(" Build fix "))], Some("Build fix"))]
     #[case::renamed(vec![named(Some("a")), named(Some("b"))], Some("b"))]
-    #[case::blank_name(vec![user("fix the build"), named(Some("  "))], Some("fix the build"))]
-    #[case::name_taken_back(vec![user("fix the build"), named(Some("a")), named(None)], Some("fix the build"))]
+    #[case::blank_name(vec![user_said("fix the build"), named(Some("  "))], Some("fix the build"))]
+    #[case::name_taken_back(vec![user_said("fix the build"), named(Some("a")), named(None)], Some("fix the build"))]
     fn title_is_the_agents_or_the_first_prompt(
         #[case] events: Vec<SessionEvent>,
         #[case] expected: Option<&str>,
@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(transcript.title(), Some("fix the build"));
     }
 
-    fn user(text: &str) -> SessionEvent {
+    fn user_said(text: &str) -> SessionEvent {
         SessionEvent::UserMessage { text: text.into() }
     }
 

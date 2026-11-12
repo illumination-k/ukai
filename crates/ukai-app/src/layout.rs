@@ -371,7 +371,7 @@ fn TabBar() -> Element {
         let current = layout.read();
         let projects = app.projects.read();
         let schedules = app.schedule_names.read();
-        let tabs: Vec<(usize, String, String, usize, Option<&'static str>, bool)> = current
+        let tabs: Vec<_> = current
             .tabs()
             .iter()
             .enumerate()
