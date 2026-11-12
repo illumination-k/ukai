@@ -120,7 +120,7 @@ Pod の中で書かれたレポートは relay の読み取り専用 HTTP から
 1. `connect(agent_id)` → `initialize`（capability 交換、認証が必要なら `authenticate`）
 2. `session/new { cwd, mcpServers }` → `SessionHandle`
 3. `session/prompt` を投げ、`session/update` 通知を `SessionEvent` に変換して UI へ流す
-4. `session/cancel`、切断時は `session/load`（agent が `loadSession` を広告している場合）で復帰
+4. `session/cancel`、切断時は `session/load`（agent が `loadSession` を広告している場合）で自動で復帰（後述「再接続」）
 
 新しいセッション（復元ではないもの）は、1 と 2 の間でエージェントの版を確かめる（`ukai_acp::updates`）。
 `initialize` 応答の `agentInfo.name` が npm のパッケージ名として読めれば registry.npmjs.org の `latest` を引き
@@ -192,9 +192,40 @@ Streamable HTTP の RFD v1 では、セッションは接続とは独立にサ�
 いるので、取りこぼしは `session/load` の履歴再生で埋める。SDK の HTTP クライアントは SSE が切れると
 トランスポートの失敗として扱い、自動ではつなぎ直さない。
 
-今は「切断を UI に出す → Resume で `session/load`」まで。自動再接続（指数バックオフ）は今後。
+gateway（IAP などの proxy の向こう）への接続はよく切れるので、切断はセッションの終わりとして扱わない。
+リモート（HTTP / WebSocket / gateway）のエージェントが `loadSession` を広告していれば、`ukai_acp` の
+セッションのタスクが同じ `HttpClient` から新しい接続を作り、`initialize` → 同じセッションの `session/load`
+で黙ってつなぎ直す。いつ試し、いつ諦めるかは I/O を持たない `ukai_acp::reconnect`（`Reconnect` /
+`ReconnectPolicy`）が決め、待つことと接続することはセッションのループがする。
+
+- **ターンの最中に切れたとき**: すぐに 1 回目を試し、失敗するたびに 0.5 秒から倍にして待つ（上限 30 秒、
+  ±20% のジッタ。多くの pane が同時に切れても一斉に戻らないように）。pane は作業中のまま、ヘッダが
+  「reconnecting」になるだけ。切断で失敗した `session/prompt` の応答（SDK の `incoming_transport_closed`）は
+  `PromptFailed` にしない。ターンが続いているかは新しい接続で relay が `_ukai/turn_state` で伝え、切断中に
+  終わっていれば何も来ないので待機に戻る。
+- **待機中に切れたとき**: 何も出さない（`SessionEvent::Detached`。pane は「ready」のまま）。エージェントが
+  要るコマンド（prompt・steer・設定の変更・セッション一覧）が来たら、それを預かってつなぎ直し、load の後で
+  送る。cancel やパーミッションの回答のように、待機中には意味のないコマンドではつながない。裏で試し続ける
+  ことはしない（つないでも次の操作まで要らない）。
+- **諦めるとき**: 8 回続けて失敗するか、切れてから 3 分たったら、そこで初めて `Closed` にして
+  （「Disconnected」と手動の Reconnect）、預かっていた prompt は「not sent」として `PromptFailed` にする。
+  つながって `Ready` まで行けば回数は数え直す。
+
+つなぎ直すたびに `SessionEvent::Reconnecting { attempt }` が出る。load の再生は、表示中の履歴に足すのでは
+なく、`Transcript` が別の履歴に畳んでおき（その間は今の表示のまま）、`Ready`（`RestoreOutcome::Replayed`）で
+差し替える。再生はエージェントの記録の全部（切断中に起きたことも含む）なので、重複も取りこぼしもない。
+クライアントしか知らないもの（注記・`!` コマンド・書いたファイル・回答済みのパーミッション要求）は、その前に
+あったエージェントの項目の数で位置を覚えて差し戻し、prompt の添付の名前は順番で引き継ぐ。未回答の
+パーミッション要求は古い接続のものなので捨てる（relay が新しい接続に出し直す）。再生にない prompt は末尾に
+残し、切断中に預けたもの以外は「届かなかった、送り直して」と注記する。load ではなく resume や新規に
+なったとき（エージェントがセッションを失ったなど）は差し替えず、今の表示に注記を足す。gateway の
+`_ukai/progress` も、つなぎ直している間は注記にしない。
+
 セッションを接続より長く保つのはサーバー側の責務で、stdio エージェントについては「クラウド実行」の
-`ukai-relay` が引き受ける。素の stdio エージェントにローカルでつないでいる場合、途中のターンは失われうる。
+`ukai-relay` が引き受ける。ローカルの stdio エージェントのプロセスが終わったときはつなぎ直さない。プロセスと
+一緒にターンも失われていて、`loadSession` を広告していても、起動し直して load してもターンが続いているふりに
+しかならないため。そのときは今までどおり `Closed`（ターン中ならエラー）にし、Reconnect（`session/load`）は
+ユーザーが選ぶ。`loadSession` を持たないリモートのエージェントも同じ。
 
 ## クラウド実行（`ukai-gateway` / `ukai-relay`）
 

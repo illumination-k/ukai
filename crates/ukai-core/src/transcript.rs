@@ -20,6 +20,20 @@ pub enum Status {
     },
 }
 
+/// How the session reaches its agent, apart from [`Status`]: a dropped
+/// connection to an agent that keeps sessions is reconnected quietly, and only
+/// becomes [`Status::Closed`] once that fails.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Connection {
+    #[default]
+    Connected,
+    /// The connection dropped while idle; the next prompt reaches the
+    /// session again first. Nothing for the user to act on.
+    Detached,
+    /// Reaching the session again, for a running turn or a prompt.
+    Reconnecting { attempt: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     User {
@@ -95,6 +109,13 @@ pub struct Transcript {
     /// A newer release of the agent, offered before the session is created:
     /// restart to update, or [`Self::skip_update`] and start as it is.
     pub update: Option<Update>,
+    pub connection: Connection,
+    /// While reconnecting, the history the agent replays, which replaces
+    /// [`Self::entries`] once the session is back (see [`reconcile`]).
+    replay: Option<Vec<Entry>>,
+    /// Prompts recorded while not connected: they go out once the session is
+    /// back, after its replay, so the replay does not have them.
+    unsent: usize,
 }
 
 /// The agent's earlier sessions, as far as the pane has asked for them.
@@ -150,6 +171,9 @@ impl Default for Transcript {
             commands: Vec::new(),
             queued: None,
             update: None,
+            connection: Connection::Connected,
+            replay: None,
+            unsent: 0,
         }
     }
 }
@@ -232,6 +256,9 @@ impl Transcript {
             text: text.into(),
             attachments,
         });
+        if self.connection != Connection::Connected {
+            self.unsent += 1;
+        }
         self.status = Status::Busy;
     }
 
@@ -359,10 +386,18 @@ impl Transcript {
                 ),
                 error: true,
             }),
+            // Reaching a session again is quiet, however long it takes.
+            SessionEvent::Preparing { .. } if self.connection != Connection::Connected => {}
             SessionEvent::Preparing { message } => self.entries.push(Entry::Notice {
                 text: message,
                 error: false,
             }),
+            SessionEvent::Detached => self.connection = Connection::Detached,
+            SessionEvent::Reconnecting { attempt } => {
+                self.connection = Connection::Reconnecting { attempt };
+                // A failed attempt may have replayed part of the history.
+                self.replay = Some(Vec::new());
+            }
             SessionEvent::TurnRunning => self.status = Status::Busy,
             SessionEvent::Ready {
                 agent,
@@ -382,7 +417,29 @@ impl Transcript {
                 };
                 self.prompt_caps = prompt;
                 self.config = config;
-                self.status = Status::Idle;
+                if let Some(replay) = self.replay.take() {
+                    self.entries = match restore {
+                        RestoreOutcome::Replayed => {
+                            reconcile(std::mem::take(&mut self.entries), replay, self.unsent)
+                        }
+                        // Nothing was replayed: what is shown stays, but
+                        // requests of the old connection cannot be answered.
+                        _ => std::mem::take(&mut self.entries)
+                            .into_iter()
+                            .filter(|entry| {
+                                !matches!(entry, Entry::Permission { answer: None, .. })
+                            })
+                            .collect(),
+                    };
+                }
+                self.connection = Connection::Connected;
+                // Prompts sent while away go out now, so their turn is on.
+                self.status = if self.unsent > 0 {
+                    Status::Busy
+                } else {
+                    Status::Idle
+                };
+                self.unsent = 0;
                 let notice = match restore {
                     RestoreOutcome::Fresh | RestoreOutcome::Replayed => None,
                     RestoreOutcome::Resumed => {
@@ -414,9 +471,9 @@ impl Transcript {
                 text: format!("could not change the setting: {message}"),
                 error: true,
             }),
-            SessionEvent::UserMessage { text } => match self.entries.last_mut() {
+            SessionEvent::UserMessage { text } => match self.history_mut().last_mut() {
                 Some(Entry::User { text: last, .. }) => last.push_str(&text),
-                _ => self.entries.push(Entry::User {
+                _ => self.history_mut().push(Entry::User {
                     text,
                     attachments: Vec::new(),
                 }),
@@ -424,9 +481,9 @@ impl Transcript {
             event @ (SessionEvent::AgentMessage { .. }
             | SessionEvent::AgentThought { .. }
             | SessionEvent::ToolCall { .. }
-            | SessionEvent::ToolCallUpdate { .. }) => fold(&mut self.entries, event),
+            | SessionEvent::ToolCallUpdate { .. }) => fold(self.history_mut(), event),
             SessionEvent::Subagent { parent, event } => {
-                match tool_mut(&mut self.entries, &parent) {
+                match tool_mut(self.history_mut(), &parent) {
                     Some(Entry::Tool { children, .. }) => fold(children, *event),
                     // A subagent of a call we never saw: show it as the agent's own.
                     _ => self.apply(*event),
@@ -434,29 +491,32 @@ impl Transcript {
             }
             SessionEvent::Plan { entries: items } => {
                 // One plan per turn: later plans replace the earlier one in place.
-                let turn_start = self
-                    .entries
+                let entries = self.history_mut();
+                let turn_start = entries
                     .iter()
                     .rposition(|entry| matches!(entry, Entry::User { .. }))
                     .map_or(0, |index| index + 1);
-                match self.entries[turn_start..]
+                match entries[turn_start..]
                     .iter_mut()
                     .find(|entry| matches!(entry, Entry::Plan { .. }))
                 {
                     Some(Entry::Plan { items: current }) => *current = items,
-                    _ => self.entries.push(Entry::Plan { items }),
+                    _ => entries.push(Entry::Plan { items }),
                 }
             }
             SessionEvent::Commands { commands } => self.commands = commands,
+            // A request asked again on reconnecting follows the replay.
             SessionEvent::PermissionRequested { id, title, options } => {
-                self.entries.push(Entry::Permission {
+                self.history_mut().push(Entry::Permission {
                     id,
                     title,
                     options,
                     answer: None,
                 });
             }
-            SessionEvent::FileWritten { path } => self.entries.push(Entry::FileWritten { path }),
+            SessionEvent::FileWritten { path } => {
+                self.history_mut().push(Entry::FileWritten { path });
+            }
             SessionEvent::Usage(usage) => self.usage = Some(usage),
             SessionEvent::TurnEnded { stop_reason } => {
                 if stop_reason != "end_turn" {
@@ -486,10 +546,105 @@ impl Transcript {
                     });
                 }
                 self.update = None;
+                self.replay = None;
+                self.unsent = 0;
+                self.connection = Connection::Connected;
                 self.status = Status::Closed { error };
             }
         }
     }
+
+    /// Where the agent's history goes: the replay while reconnecting, else
+    /// what is shown.
+    fn history_mut(&mut self) -> &mut Vec<Entry> {
+        self.replay.as_mut().unwrap_or(&mut self.entries)
+    }
+}
+
+/// What a reconnect shows: the history as the agent `replay`ed it, which has
+/// everything the agent did (also while the connection was down), with what
+/// only this client knew put back where it was (`shown`).
+///
+/// - Notices, `!` commands, written files, and answered permission requests
+///   keep their place after the agent's entries that came before them.
+/// - Prompts keep the names of their attachments, which a replay leaves out.
+/// - Unanswered permission requests go: they were the old connection's, and
+///   the agent asks again over the new one.
+/// - Prompts the replay does not have stay at the end: the last `unsent` go
+///   out now; any before them were lost with the connection, which a notice
+///   says.
+fn reconcile(shown: Vec<Entry>, replay: Vec<Entry>, unsent: usize) -> Vec<Entry> {
+    // Each entry only this client knows, with how many of the agent's
+    // entries came before it.
+    let mut local = Vec::new();
+    let mut agent = Vec::new();
+    for entry in shown {
+        match entry {
+            Entry::Permission { answer: None, .. } => {}
+            Entry::Notice { .. }
+            | Entry::Shell { .. }
+            | Entry::FileWritten { .. }
+            | Entry::Permission { .. } => local.push((agent.len(), entry)),
+            Entry::User { .. }
+            | Entry::Agent { .. }
+            | Entry::Thought { .. }
+            | Entry::Tool { .. }
+            | Entry::Plan { .. } => agent.push(entry),
+        }
+    }
+    let is_user = |entry: &Entry| matches!(entry, Entry::User { .. });
+    let replayed_prompts = replay.iter().filter(|entry| is_user(entry)).count();
+    // Where the prompts the replay lacks begin among the agent's entries.
+    let cut = agent
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| is_user(entry))
+        .nth(replayed_prompts)
+        .map_or(agent.len(), |(index, _)| index);
+    let beyond = agent.split_off(cut);
+    let mut attachments = agent.into_iter().filter_map(|entry| match entry {
+        Entry::User { attachments, .. } => Some(attachments),
+        _ => None,
+    });
+    let mut local = local.into_iter().peekable();
+    let mut merged = Vec::new();
+    for (index, mut entry) in replay.into_iter().enumerate() {
+        while let Some((_, kept)) = local.next_if(|(at, _)| *at <= index && *at < cut) {
+            merged.push(kept);
+        }
+        if let Entry::User {
+            attachments: names, ..
+        } = &mut entry
+            && let Some(shown) = attachments.next()
+            && names.is_empty()
+        {
+            *names = shown;
+        }
+        merged.push(entry);
+    }
+    while let Some((_, kept)) = local.next_if(|(at, _)| *at <= cut) {
+        merged.push(kept);
+    }
+    let lost = beyond
+        .iter()
+        .filter(|entry| is_user(entry))
+        .count()
+        .saturating_sub(unsent);
+    for (index, entry) in beyond.into_iter().enumerate() {
+        while let Some((_, kept)) = local.next_if(|(at, _)| *at <= cut + index) {
+            merged.push(kept);
+        }
+        merged.push(entry);
+    }
+    merged.extend(local.map(|(_, kept)| kept));
+    if lost > 0 {
+        merged.push(Entry::Notice {
+            text: "the connection dropped before the agent got the last message; send it again"
+                .to_owned(),
+            error: true,
+        });
+    }
+    merged
 }
 
 /// Folds a message, thought, or tool call into `entries`, the transcript's
@@ -1285,5 +1440,220 @@ mod tests {
             .map(|(c, _)| c)
             .collect();
         assert_eq!(unsent, ["sleep 9"]);
+    }
+
+    fn prompted(text: &str, attachments: &[&str]) -> Entry {
+        Entry::User {
+            text: text.into(),
+            attachments: attachments.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    fn agent(text: &str) -> Entry {
+        Entry::Agent { text: text.into() }
+    }
+
+    fn said(text: &str) -> SessionEvent {
+        SessionEvent::AgentMessage { text: text.into() }
+    }
+
+    fn asked(id: PermissionId) -> SessionEvent {
+        SessionEvent::PermissionRequested {
+            id,
+            title: "write".into(),
+            options: Vec::new(),
+        }
+    }
+
+    /// A session that ran `!ls`, then a prompt with an attachment that the
+    /// agent began answering.
+    fn mid_turn() -> Transcript {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        let shell = transcript.start_shell("ls");
+        transcript.finish_shell(shell, Err("no such command".into()));
+        transcript.push_prompt("slow", vec!["a.png".into()]);
+        transcript.apply(said("part 1"));
+        transcript
+    }
+
+    #[test]
+    fn a_reconnect_shows_the_replay_once_without_losing_what_only_the_client_knew() {
+        let mut transcript = mid_turn();
+        let shown = transcript.entries.clone();
+        transcript.apply(SessionEvent::Reconnecting { attempt: 1 });
+        for event in [
+            SessionEvent::UserMessage {
+                text: "slow".into(),
+            },
+            said("part 1"),
+            said(", part 2"),
+        ] {
+            transcript.apply(event);
+        }
+        // The replay waits for the session to be back; the old history stays up.
+        assert_eq!(transcript.entries, shown);
+        assert_eq!(transcript.status, Status::Busy);
+        assert_eq!(
+            transcript.connection,
+            Connection::Reconnecting { attempt: 1 }
+        );
+
+        transcript.apply(ready(None, RestoreOutcome::Replayed));
+        transcript.apply(SessionEvent::TurnRunning);
+        assert_eq!(
+            transcript.entries,
+            vec![
+                shown[0].clone(),
+                prompted("slow", &["a.png"]),
+                agent("part 1, part 2"),
+            ]
+        );
+        assert_eq!(transcript.status, Status::Busy);
+        assert_eq!(transcript.connection, Connection::Connected);
+        transcript.apply(SessionEvent::TurnEnded {
+            stop_reason: "end_turn".into(),
+        });
+        assert_eq!(transcript.status, Status::Idle);
+    }
+
+    #[test]
+    fn a_turn_that_ended_while_away_is_idle_after_the_reconnect() {
+        let mut transcript = mid_turn();
+        for event in [
+            SessionEvent::Reconnecting { attempt: 1 },
+            SessionEvent::UserMessage {
+                text: "slow".into(),
+            },
+            said("part 1, done"),
+            ready(None, RestoreOutcome::Replayed),
+        ] {
+            transcript.apply(event);
+        }
+        assert_eq!(transcript.status, Status::Idle);
+        assert_eq!(transcript.entries.last(), Some(&agent("part 1, done")));
+    }
+
+    #[test]
+    fn a_prompt_while_detached_goes_after_the_replay() {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        transcript.push_prompt("hello", Vec::new());
+        transcript.apply(said("hi"));
+        transcript.apply(SessionEvent::TurnEnded {
+            stop_reason: "end_turn".into(),
+        });
+        transcript.apply(SessionEvent::Detached);
+        // Detached is no state for the user to act on.
+        assert_eq!(transcript.status, Status::Idle);
+        assert_eq!(transcript.connection, Connection::Detached);
+
+        transcript.push_prompt("again", Vec::new());
+        for event in [
+            SessionEvent::Reconnecting { attempt: 1 },
+            SessionEvent::UserMessage {
+                text: "hello".into(),
+            },
+            said("hi"),
+            ready(None, RestoreOutcome::Replayed),
+        ] {
+            transcript.apply(event);
+        }
+        assert_eq!(
+            transcript.entries,
+            vec![prompted("hello", &[]), agent("hi"), prompted("again", &[])]
+        );
+        // The prompt goes out now, so its turn is on.
+        assert_eq!(transcript.status, Status::Busy);
+        transcript.apply(said("ok"));
+        assert_eq!(transcript.entries.last(), Some(&agent("ok")));
+    }
+
+    #[test]
+    fn a_prompt_the_replay_lacks_was_lost() {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        transcript.push_prompt("hello", Vec::new());
+        transcript.apply(SessionEvent::Reconnecting { attempt: 1 });
+        transcript.apply(ready(None, RestoreOutcome::Replayed));
+        assert!(matches!(
+            transcript.entries.as_slice(),
+            [Entry::User { .. }, Entry::Notice { error: true, .. }]
+        ));
+        assert_eq!(transcript.status, Status::Idle);
+    }
+
+    #[test]
+    fn a_permission_request_is_asked_again_over_the_new_connection() {
+        let mut transcript = mid_turn();
+        transcript.apply(asked(0));
+        transcript.apply(asked(1));
+        transcript.answer_permission(0, "Allow");
+        for event in [
+            SessionEvent::Reconnecting { attempt: 1 },
+            SessionEvent::UserMessage {
+                text: "slow".into(),
+            },
+            said("part 1"),
+            asked(2),
+            ready(None, RestoreOutcome::Replayed),
+        ] {
+            transcript.apply(event);
+        }
+        let permissions: Vec<(PermissionId, Option<&str>)> = transcript
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Permission { id, answer, .. } => Some((*id, answer.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(permissions, [(2, None), (0, Some("Allow"))]);
+        assert!(transcript.awaiting_permission());
+    }
+
+    #[rstest]
+    #[case::resumed(RestoreOutcome::Resumed)]
+    #[case::missing(RestoreOutcome::Missing)]
+    fn a_reconnect_without_a_replay_keeps_what_is_shown(#[case] restore: RestoreOutcome) {
+        let mut transcript = mid_turn();
+        transcript.apply(asked(0));
+        let mut shown = transcript.entries.clone();
+        shown.pop();
+        transcript.apply(SessionEvent::Reconnecting { attempt: 2 });
+        transcript.apply(ready(None, restore));
+        assert_eq!(transcript.entries[..shown.len()], shown[..]);
+        assert!(matches!(
+            transcript.entries[shown.len()..],
+            [Entry::Notice { error: false, .. }]
+        ));
+    }
+
+    #[test]
+    fn reconnecting_is_quiet_until_it_gives_up() {
+        let mut transcript = mid_turn();
+        let shown = transcript.entries.clone();
+        for event in [
+            SessionEvent::Reconnecting { attempt: 1 },
+            SessionEvent::Preparing {
+                message: "Starting the workspace".into(),
+            },
+            SessionEvent::UserMessage {
+                text: "slow".into(),
+            },
+            SessionEvent::Reconnecting { attempt: 2 },
+        ] {
+            assert_eq!(Alert::of(&event), None);
+            transcript.apply(event);
+        }
+        assert_eq!(transcript.entries, shown);
+        transcript.apply(SessionEvent::Closed {
+            error: Some("could not reconnect".into()),
+        });
+        assert_eq!(
+            transcript.status,
+            Status::Closed {
+                error: Some("could not reconnect".into())
+            }
+        );
+        assert_eq!(transcript.connection, Connection::Connected);
+        assert_eq!(transcript.entries.len(), shown.len() + 1);
     }
 }
