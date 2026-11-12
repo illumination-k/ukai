@@ -25,7 +25,7 @@ use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
 use crate::ports::{PortPrompt, open_browser};
 use crate::projects::AppSignals;
-use crate::report_pane::{ReportView, pick_report};
+use crate::report_pane::{ReportView, download_report, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
 
@@ -635,6 +635,17 @@ fn PaneView(pane: PaneId) -> Element {
                 span { class: "pane-tools",
                     if is_agent {
                         HistoryMenu { pane }
+                    }
+                    if let PaneContent::Report { project, path, source } = &content {
+                        button {
+                            class: "icon",
+                            title: "Save a copy of this report…",
+                            onclick: {
+                                let (project, path, source) = (project.clone(), path.clone(), source.clone());
+                                move |_| download_report(app, &project, &path, &source)
+                            },
+                            Svg { icon: Icon::Download }
+                        }
                     }
                     button {
                         class: "icon",

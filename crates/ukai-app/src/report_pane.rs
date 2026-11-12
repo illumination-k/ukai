@@ -198,6 +198,66 @@ fn open_source(
     }
 }
 
+/// Save a copy of a report where the user chooses. For a gateway agent's
+/// workspace this is the way to get the file onto this machine at all: it is
+/// in a pod, or in the copy the gateway kept of one. Only the file itself is
+/// saved, not what it loads.
+pub fn download_report(app: AppSignals, project: &ProjectId, path: &Path, source: &ReportSource) {
+    let opened = open_source(app, project, path, source);
+    let name = path.file_name().map_or_else(
+        || "report".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    spawn(async move {
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Save report")
+            .set_file_name(&name);
+        let saved = match opened {
+            Ok(source) => {
+                let Some(target) = dialog.save_file().await else {
+                    return;
+                };
+                save(&source, target.path()).await
+            }
+            Err(problem) => Err(problem),
+        };
+        if let Err(problem) = saved {
+            tracing::warn!(%problem, "cannot save a report");
+            rfd::AsyncMessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Cannot save this report")
+                .set_description(problem)
+                .show()
+                .await;
+        }
+    });
+}
+
+/// Write the report `source` names to `target`.
+async fn save(source: &Source, target: &Path) -> Result<(), String> {
+    let body = match source {
+        Source::Local(report) => std::fs::read(report.file())
+            .map_err(|error| format!("{}: {error}", report.file().display()))?,
+        Source::Remote(remote) => {
+            let file = remote
+                .endpoint
+                .fetch(&report::url_path(&remote.path))
+                .await
+                .map_err(|error| match error {
+                    ReportsError::Gone => "the agent's workspace is not running anymore, so \
+                                           its reports cannot be read"
+                        .to_owned(),
+                    error => error.to_string(),
+                })?;
+            if file.status != 200 {
+                return Err(format!("the gateway answered {}", file.status));
+            }
+            file.body
+        }
+    };
+    std::fs::write(target, body).map_err(|error| format!("{}: {error}", target.display()))
+}
+
 /// The element the child web view covers. While `covered` is set something
 /// in the DOM is drawn over the pane, so the view hides.
 #[component]
@@ -605,6 +665,7 @@ fn ReportRow(
         .parent()
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
+    let saved = (project.clone(), path.clone(), source.clone());
 
     rsx! {
         div {
@@ -624,6 +685,17 @@ fn ReportRow(
             }
             span { class: "name", "{name}" }
             span { class: "meta", "{dir}" }
+            span { class: "row-actions",
+                button {
+                    class: "icon",
+                    title: "Save a copy…",
+                    onclick: move |event: MouseEvent| {
+                        event.stop_propagation();
+                        download_report(app, &saved.0, &saved.1, &saved.2);
+                    },
+                    Svg { icon: Icon::Download }
+                }
+            }
         }
     }
 }

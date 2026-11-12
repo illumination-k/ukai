@@ -627,6 +627,15 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
 開いている pane はレポートの変化を監視し、変わったら再読込する（`notify` ではなくポーリング。手元のファイルは
 150 ms ごとに `stat`、Pod のレポートは 2 秒ごとに `ETag` を見るだけ）。
 
+### 保存（ダウンロード）
+
+pane のヘッダーとサイドバーの行（hover）の「Save a copy…」で、レポートのファイルを選んだ場所に保存する
+（`ukai-app/src/report_pane.rs` の `download_report`）。gateway のワークスペースのレポートは Pod の中（か
+gateway のコピー）にしかないので、手元に持ってくる手段はこれになる。読み出しは pane の表示と同じ経路
+（手元はファイル、gateway は `/reports/files/<path>`）で、配信範囲の判定もそのまま。保存するのはその
+ファイルだけで、相対参照している画像や CSS は付かない。失敗はネイティブのダイアログで出す（子 WebView は
+DOM より手前に出るため）。
+
 ### gateway エージェントのレポート
 
 gateway のエージェントは Pod の中に書くので、手元を走査しても見つからない。代わりに gateway に聞く
