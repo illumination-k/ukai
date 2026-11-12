@@ -145,6 +145,13 @@ pub fn agent_status(
     (class, label, transcript.agent.clone())
 }
 
+/// What agent `pane`'s session is about, once there is something to say.
+pub fn session_title(sessions: Sessions, pane: PaneId) -> Option<String> {
+    let session = sessions.read().get(&pane).cloned()?;
+    let title = session.transcript.read().title().map(str::to_owned);
+    title
+}
+
 /// The comments on diff lines waiting in agent `pane`'s composer for its
 /// next prompt.
 pub fn review_of(app: AppSignals, pane: PaneId) -> Option<Signal<Vec<ReviewComment>>> {

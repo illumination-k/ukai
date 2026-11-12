@@ -16,7 +16,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AvailableCommandInput, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
@@ -29,6 +28,7 @@ use agent_client_protocol::schema::v1::{
     SessionUpdate, SetSessionConfigOptionRequest, TextResourceContents, ToolCallContent,
     ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
+use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -115,6 +115,9 @@ pub enum SessionEvent {
     /// The slash commands the agent offers, replacing any earlier list. Run
     /// one by sending a prompt that starts with `/name`.
     Commands { commands: Vec<SlashCommand> },
+    /// What the agent calls the session, replacing any earlier title; `None`
+    /// when it takes the title back.
+    Title { title: Option<String> },
     /// Answer with [`SessionHandle::resolve_permission`].
     PermissionRequested {
         id: PermissionId,
@@ -1330,6 +1333,11 @@ fn translate_own_update(update: SessionUpdate, replaying: bool) -> Option<Sessio
                     description: command.description,
                 })
                 .collect(),
+        },
+        SessionUpdate::SessionInfoUpdate(info) => match info.title {
+            MaybeUndefined::Undefined => return None,
+            MaybeUndefined::Null => SessionEvent::Title { title: None },
+            MaybeUndefined::Value(title) => SessionEvent::Title { title: Some(title) },
         },
         // Echoes of our own prompt, modes, and the rest are not shown yet.
         _ => return None,

@@ -104,6 +104,8 @@ pub struct Transcript {
     pub queued: Option<Queued>,
     /// The ACP session this transcript is of, known once it is ready.
     pub session_id: Option<String>,
+    /// What the agent calls the session, if it names it (see [`Self::title`]).
+    pub session_title: Option<String>,
     /// The agent's other sessions the pane could switch to.
     pub history: History,
     /// A newer release of the agent, offered before the session is created:
@@ -165,6 +167,7 @@ impl Default for Transcript {
             entries: Vec::new(),
             prompt_caps: PromptCaps::default(),
             session_id: None,
+            session_title: None,
             history: History::Unsupported,
             usage: None,
             config: Vec::new(),
@@ -230,6 +233,25 @@ impl Alert {
 }
 
 impl Transcript {
+    /// What the session is about, for where its pane is listed: the title
+    /// the agent gave it, else the first line of the first prompt.
+    pub fn title(&self) -> Option<&str> {
+        let named = self.session_title.as_deref().map(str::trim);
+        named.filter(|title| !title.is_empty()).or_else(|| {
+            // While reconnecting, the replay is the session's history.
+            let entries = match &self.replay {
+                Some(replay) if !replay.is_empty() => replay,
+                _ => &self.entries,
+            };
+            entries.iter().find_map(|entry| match entry {
+                Entry::User { text, .. } => {
+                    text.lines().map(str::trim).find(|line| !line.is_empty())
+                }
+                _ => None,
+            })
+        })
+    }
+
     /// Note that the session list was asked for; `false` if the agent cannot list.
     pub fn history_requested(&mut self) -> bool {
         if self.history == History::Unsupported {
@@ -505,6 +527,7 @@ impl Transcript {
                 }
             }
             SessionEvent::Commands { commands } => self.commands = commands,
+            SessionEvent::Title { title } => self.session_title = title,
             // A request asked again on reconnecting follows the replay.
             SessionEvent::PermissionRequested { id, title, options } => {
                 self.history_mut().push(Entry::Permission {
@@ -857,6 +880,37 @@ mod tests {
             message: "boom".into(),
         });
         assert_eq!(transcript.history, History::Failed("boom".into()));
+    }
+
+    #[rstest]
+    #[case::unnamed(vec![], None)]
+    #[case::first_prompt(vec![user("\n fix the build \nplease"), user("and the docs")], Some("fix the build"))]
+    #[case::named(vec![user("fix the build"), named(Some(" Build fix "))], Some("Build fix"))]
+    #[case::renamed(vec![named(Some("a")), named(Some("b"))], Some("b"))]
+    #[case::blank_name(vec![user("fix the build"), named(Some("  "))], Some("fix the build"))]
+    #[case::name_taken_back(vec![user("fix the build"), named(Some("a")), named(None)], Some("fix the build"))]
+    fn title_is_the_agents_or_the_first_prompt(
+        #[case] events: Vec<SessionEvent>,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(folded(events).title(), expected);
+    }
+
+    #[test]
+    fn title_follows_the_prompt_the_user_sent() {
+        let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
+        transcript.push_prompt("fix the build", Vec::new());
+        assert_eq!(transcript.title(), Some("fix the build"));
+    }
+
+    fn user(text: &str) -> SessionEvent {
+        SessionEvent::UserMessage { text: text.into() }
+    }
+
+    fn named(title: Option<&str>) -> SessionEvent {
+        SessionEvent::Title {
+            title: title.map(str::to_owned),
+        }
     }
 
     #[test]
