@@ -479,7 +479,7 @@ impl Harness {
             restore: restore.map(str::to_owned),
             update_check,
         };
-        let (handle, events) = spawn_on(client_end, options);
+        let (handle, events) = spawn_on(client_end, None, ReconnectPolicy::NEVER, options);
         Self {
             _dir: dir,
             root,
@@ -521,7 +521,9 @@ impl Harness {
             let event = self.next().await;
             let last = matches!(
                 event,
-                SessionEvent::TurnEnded { .. } | SessionEvent::PromptFailed { .. }
+                SessionEvent::TurnEnded { .. }
+                    | SessionEvent::PromptFailed { .. }
+                    | SessionEvent::Closed { .. }
             );
             seen.push(event);
             if last {
@@ -1089,4 +1091,382 @@ async fn starts_without_asking(#[case] restore: Option<&str>, #[case] latest: &'
             .any(|event| matches!(event, SessionEvent::UpdateAvailable(_))),
         "{events:?}"
     );
+}
+
+/// What [`Server`] keeps from one connection to the next, as `ukai-relay` does.
+#[derive(Default)]
+struct Kept {
+    /// Every update of [`SESSION`], with the user's prompts, for a load to replay.
+    history: Vec<SessionUpdate>,
+    /// The connection attached now (numbered from 1) and its client.
+    attached: Option<(u32, ConnectionTo<Client>)>,
+    /// The running `slow` turn: the connection it came over, and its answer.
+    turn: Option<(u32, Responder<PromptResponse>)>,
+    connections: u32,
+    /// Connections still to turn away.
+    refuse: u32,
+    /// Say the agent cannot load sessions.
+    no_load: bool,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// An agent whose session and turns outlive the connections to it. A
+/// `slow` prompt says `part 1` and runs until [`Server::finish`]; any other
+/// says `Hel`, `lo`, and ends. A load replays the history and then, when a
+/// turn runs, says so with `_ukai/turn_state`.
+#[derive(Clone, Default)]
+struct Server(Arc<std::sync::Mutex<Kept>>);
+
+impl Server {
+    fn kept(&self) -> std::sync::MutexGuard<'_, Kept> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A new connection; a refused one closes before answering anything.
+    fn dial(&self) -> Channel {
+        let (client_end, agent_end) = Channel::duplex();
+        let mut kept = self.kept();
+        kept.connections += 1;
+        if kept.refuse > 0 {
+            kept.refuse -= 1;
+            drop(agent_end);
+            return client_end;
+        }
+        let agent = keeping_agent(self.clone(), kept.connections);
+        kept.task = Some(tokio::spawn(async move {
+            let _ = agent.connect_to(agent_end).await;
+        }));
+        client_end
+    }
+
+    /// Drop the connection, as a proxy in front of the agent might.
+    fn cut(&self) {
+        let mut kept = self.kept();
+        kept.attached = None;
+        if let Some(task) = kept.task.take() {
+            task.abort();
+        }
+    }
+
+    /// The agent says `text`, to whoever is attached.
+    fn say(&self, text: &str) {
+        let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(text.to_owned().into()));
+        let mut kept = self.kept();
+        kept.history.push(update.clone());
+        if let Some((_, cx)) = &kept.attached {
+            let _ = cx.send_notification(SessionNotification::new(SESSION, update));
+        }
+    }
+
+    /// The agent says `text` and it never reaches the client, as when the
+    /// connection drops with it on the way.
+    fn lose(&self, text: &str) {
+        self.kept()
+            .history
+            .push(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                text.to_owned().into(),
+            )));
+    }
+
+    /// End the running turn: in answer to its prompt when that came over the
+    /// connection attached now, else with `_ukai/turn_state`.
+    fn finish(&self) {
+        let mut kept = self.kept();
+        let Some((conn, responder)) = kept.turn.take() else {
+            return;
+        };
+        match &kept.attached {
+            Some((now, _)) if *now == conn => {
+                let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+            }
+            Some((_, cx)) => {
+                let _ = cx.send_notification(turn_state("idle"));
+            }
+            None => {}
+        }
+    }
+}
+
+fn turn_state(state: &str) -> UntypedMessage {
+    UntypedMessage::new(
+        TURN_STATE_METHOD,
+        serde_json::json!({ "sessionId": SESSION, "state": state, "stopReason": "end_turn" }),
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The agent end of connection `conn` to `server`.
+fn keeping_agent(server: Server, conn: u32) -> impl ConnectTo<Client> {
+    Agent
+        .builder()
+        .name("keeper")
+        .on_receive_request(
+            {
+                let server = server.clone();
+                async move |request: InitializeRequest, responder, cx: ConnectionTo<Client>| {
+                    let load = {
+                        let mut kept = server.kept();
+                        kept.attached = Some((conn, cx));
+                        !kept.no_load
+                    };
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(
+                                AgentCapabilities::new()
+                                    .load_session(load)
+                                    .prompt_capabilities(
+                                        PromptCapabilities::new()
+                                            .image(true)
+                                            .embedded_context(true),
+                                    ),
+                            )
+                            .agent_info(Implementation::new("mock", "1.0.0").title("Mock Agent")),
+                    )
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |_: NewSessionRequest, responder, _cx| {
+                responder
+                    .respond(NewSessionResponse::new(SESSION).config_options(mock_config(None)))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let server = server.clone();
+                async move |request: LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let (history, running) = {
+                        let kept = server.kept();
+                        (kept.history.clone(), kept.turn.is_some())
+                    };
+                    for update in history {
+                        cx.send_notification(SessionNotification::new(
+                            request.session_id.clone(),
+                            update,
+                        ))?;
+                    }
+                    responder
+                        .respond(LoadSessionResponse::new().config_options(mock_config(None)))?;
+                    if running {
+                        cx.send_notification(turn_state("running"))?;
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: PromptRequest, responder, _cx| {
+                let text = match request.prompt.first() {
+                    Some(ContentBlock::Text(text)) => text.text.clone(),
+                    _ => String::new(),
+                };
+                server
+                    .kept()
+                    .history
+                    .push(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                        text.clone().into(),
+                    )));
+                if text == "slow" {
+                    server.say("part 1");
+                    server.kept().turn = Some((conn, responder));
+                    return Ok(());
+                }
+                server.say("Hel");
+                server.say("lo");
+                responder.respond(PromptResponse::new(StopReason::EndTurn))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+}
+
+/// Quick to try and quick to give up, so the tests do not wait.
+fn quickly() -> ReconnectPolicy {
+    ReconnectPolicy {
+        initial: Duration::from_millis(10),
+        max_delay: Duration::from_millis(40),
+        jitter: 0.0,
+        max_attempts: 3,
+        budget: Duration::from_secs(5),
+    }
+}
+
+impl Harness {
+    /// A new session on `server`, reconnecting to it as `policy` says.
+    async fn keeping(server: &Server, policy: ReconnectPolicy) -> Self {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let root = dir.path().canonicalize().unwrap_or_else(|e| panic!("{e}"));
+        let options = SessionOptions {
+            cwd: root.clone(),
+            fs_root: None,
+            restore: None,
+            update_check: None,
+        };
+        let dialer = server.clone();
+        let (handle, events) = spawn_on(
+            server.dial(),
+            Some(Box::new(move || dialer.dial())),
+            policy,
+            options,
+        );
+        let mut harness = Self {
+            _dir: dir,
+            root,
+            handle,
+            events,
+        };
+        assert_eq!(
+            harness.until_ready().await,
+            vec![ready(SESSION, RestoreOutcome::Fresh)]
+        );
+        harness
+    }
+
+    /// Events up to and including `Closed`.
+    async fn until_closed(&mut self) -> Vec<SessionEvent> {
+        let mut seen = Vec::new();
+        loop {
+            let event = self.next().await;
+            let closed = matches!(event, SessionEvent::Closed { .. });
+            seen.push(event);
+            if closed {
+                return seen;
+            }
+        }
+    }
+}
+
+fn said(text: &str) -> SessionEvent {
+    SessionEvent::AgentMessage { text: text.into() }
+}
+
+#[tokio::test]
+async fn a_turn_goes_on_across_a_dropped_connection() {
+    let server = Server::default();
+    let mut harness = Harness::keeping(&server, quickly()).await;
+    assert!(harness.handle.prompt("slow"));
+    assert_eq!(harness.next().await, said("part 1"));
+    server.lose("part 2");
+    server.cut();
+    assert_eq!(
+        harness.next().await,
+        SessionEvent::Reconnecting { attempt: 1 }
+    );
+    // The replay brings back what the client saw and what it missed.
+    assert_eq!(
+        harness.until_ready().await,
+        vec![
+            SessionEvent::UserMessage {
+                text: "slow".into()
+            },
+            said("part 1"),
+            said("part 2"),
+            ready(SESSION, RestoreOutcome::Replayed),
+        ]
+    );
+    assert_eq!(harness.next().await, SessionEvent::TurnRunning);
+    server.say("part 3");
+    assert_eq!(harness.next().await, said("part 3"));
+    server.finish();
+    assert_eq!(harness.next().await, end_turn());
+    assert_eq!(
+        harness.turn("hello").await,
+        vec![said("Hel"), said("lo"), end_turn()]
+    );
+    assert_eq!(server.kept().connections, 2);
+}
+
+#[tokio::test]
+async fn a_connection_dropped_while_idle_comes_back_for_the_next_prompt() {
+    let server = Server::default();
+    let mut harness = Harness::keeping(&server, quickly()).await;
+    assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
+    server.cut();
+    assert_eq!(harness.next().await, SessionEvent::Detached);
+    // Nothing needs the agent yet, and commands that need no agent do not count.
+    assert!(harness.handle.cancel());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(server.kept().connections, 1);
+    assert!(harness.events.is_empty());
+
+    assert!(harness.handle.prompt("hello"));
+    assert_eq!(
+        harness.next().await,
+        SessionEvent::Reconnecting { attempt: 1 }
+    );
+    assert_eq!(
+        harness.until_ready().await,
+        vec![
+            SessionEvent::UserMessage {
+                text: "hello".into()
+            },
+            said("Hel"),
+            said("lo"),
+            ready(SESSION, RestoreOutcome::Replayed),
+        ]
+    );
+    // The prompt that needed the agent goes once the session is back.
+    assert_eq!(
+        harness.until_turn_end().await,
+        vec![said("Hel"), said("lo"), end_turn()]
+    );
+    assert_eq!(server.kept().connections, 2);
+}
+
+#[rstest::rstest]
+#[case::during_a_turn(true)]
+#[case::idle_then_prompted(false)]
+#[tokio::test]
+async fn gives_up_after_repeated_failures(#[case] running: bool) {
+    let server = Server::default();
+    let mut harness = Harness::keeping(&server, quickly()).await;
+    if running {
+        assert!(harness.handle.prompt("slow"));
+        assert_eq!(harness.next().await, said("part 1"));
+    } else {
+        assert_eq!(harness.turn("hello").await.last(), Some(&end_turn()));
+    }
+    server.kept().refuse = u32::MAX;
+    server.cut();
+    let mut expected = Vec::new();
+    if !running {
+        assert_eq!(harness.next().await, SessionEvent::Detached);
+        assert!(harness.handle.prompt("hello"));
+    }
+    expected.extend((1..=3).map(|attempt| SessionEvent::Reconnecting { attempt }));
+    if !running {
+        expected.push(SessionEvent::PromptFailed {
+            message: "not sent: the agent could not be reached".into(),
+        });
+    }
+    let mut seen = harness.until_closed().await;
+    let closed = seen.pop();
+    assert_eq!(seen, expected);
+    assert!(
+        matches!(&closed, Some(SessionEvent::Closed { error: Some(error) })
+            if error.contains("could not reconnect in 3 attempts")),
+        "{closed:?}"
+    );
+    assert_eq!(server.kept().connections, 4);
+}
+
+#[tokio::test]
+async fn an_agent_that_cannot_load_ends_with_its_connection() {
+    let server = Server::default();
+    server.kept().no_load = true;
+    let mut harness = Harness::keeping(&server, quickly()).await;
+    assert!(harness.handle.prompt("slow"));
+    assert_eq!(harness.next().await, said("part 1"));
+    server.cut();
+    let closed = harness.next().await;
+    assert!(
+        matches!(&closed, SessionEvent::Closed { error: Some(error) }
+            if error.contains("closed the connection during the turn")),
+        "{closed:?}"
+    );
+    assert_eq!(server.kept().connections, 1);
 }
