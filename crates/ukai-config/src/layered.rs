@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::schema::Config;
+use crate::schema::{Config, Reports};
 use crate::{ConfigError, FILE_NAME, parse_unchecked, validate};
 
 /// Name of the user-level file inside [`config_dir`].
@@ -67,9 +67,19 @@ pub fn merge(user: Config, project: Config) -> Config {
 /// a checkout whose `ukai.toml` declares none.
 pub const REPORT_DIRS_ENV: &str = "UKAI_REPORT_DIRS";
 
+/// The environment variable replacing `[reports] globs`, separated as in
+/// `PATH`, so whoever runs the agent decides what is listed without a file
+/// in the repository.
+pub const REPORT_GLOBS_ENV: &str = "UKAI_REPORT_GLOBS";
+
+/// The environment variable replacing `[reports] allow_network`: `true` or
+/// `false` (also `1` or `0`).
+pub const REPORT_ALLOW_NETWORK_ENV: &str = "UKAI_REPORT_ALLOW_NETWORK";
+
 /// Load the configuration for the project at `root`: the user file (if any)
 /// overlaid with the project's `ukai.toml` (if any), with the report
-/// directories of [`REPORT_DIRS_ENV`] added, validated together.
+/// settings of [`REPORT_DIRS_ENV`], [`REPORT_GLOBS_ENV`], and
+/// [`REPORT_ALLOW_NETWORK_ENV`] applied on top, validated together.
 pub fn load_layered(user_file: Option<&Path>, root: &Path) -> Result<Config, ConfigError> {
     load_layered_with(user_file, root, |name| std::env::var(name).ok())
 }
@@ -85,18 +95,7 @@ pub fn load_layered_with(
     let mut problems = validate::project_only(&project);
     let mut merged = merge(user, project);
     problems.extend(validate::validate(&merged));
-    if let Some(value) = env(REPORT_DIRS_ENV) {
-        for dir in std::env::split_paths(&value) {
-            if dir.as_os_str().is_empty() || merged.reports.dirs.contains(&dir) {
-                continue;
-            }
-            if validate::inside_project(&dir) {
-                merged.reports.dirs.push(dir);
-            } else {
-                problems.push(crate::Problem::EnvReportDirOutsideProject(dir));
-            }
-        }
-    }
+    problems.extend(apply_report_env(&mut merged.reports, &env));
     if problems.is_empty() {
         Ok(merged)
     } else {
@@ -109,6 +108,53 @@ pub fn load_layered_with(
 /// once it is layered under a project, not here.
 pub fn load_user(user_file: Option<&Path>) -> Result<Config, ConfigError> {
     read_optional(user_file)
+}
+
+/// The report settings the environment gives, applied to `reports`: its
+/// directories added, its globs and `allow_network` in place of the files'.
+/// What cannot be used is left out and named in the problems returned.
+fn apply_report_env(
+    reports: &mut Reports,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<crate::Problem> {
+    let mut problems = Vec::new();
+    if let Some(value) = env(REPORT_DIRS_ENV) {
+        for dir in std::env::split_paths(&value) {
+            if dir.as_os_str().is_empty() || reports.dirs.contains(&dir) {
+                continue;
+            }
+            if validate::inside_project(&dir) {
+                reports.dirs.push(dir);
+            } else {
+                problems.push(crate::Problem::EnvReportDirOutsideProject(dir));
+            }
+        }
+    }
+    if let Some(value) = env(REPORT_GLOBS_ENV) {
+        let mut globs = Vec::new();
+        for glob in std::env::split_paths(&value) {
+            let glob = glob.to_string_lossy().into_owned();
+            if glob.is_empty() || globs.contains(&glob) {
+                continue;
+            }
+            match globset::Glob::new(&glob) {
+                Ok(_) => globs.push(glob),
+                Err(error) => problems.push(crate::Problem::EnvInvalidGlob {
+                    glob,
+                    message: error.kind().to_string(),
+                }),
+            }
+        }
+        reports.globs = globs;
+    }
+    if let Some(value) = env(REPORT_ALLOW_NETWORK_ENV) {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => reports.allow_network = true,
+            "false" | "0" => reports.allow_network = false,
+            _ => problems.push(crate::Problem::EnvInvalidAllowNetwork(value)),
+        }
+    }
+    problems
 }
 
 fn read_optional(path: Option<&Path>) -> Result<Config, ConfigError> {
@@ -307,6 +353,100 @@ mod tests {
                 ]
             ),
             "{merged:?}"
+        );
+    }
+
+    /// A checkout with no `ukai.toml` at all, configured from the
+    /// environment alone.
+    #[test]
+    fn reports_can_be_set_from_the_environment_alone() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let merged = load_layered_with(
+            None,
+            dir.path(),
+            env(&[
+                (REPORT_DIRS_ENV, "reports:out"),
+                (REPORT_GLOBS_ENV, "**/*.html:**/*.png:**/*.html"),
+                (REPORT_ALLOW_NETWORK_ENV, "true"),
+            ]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            merged.reports,
+            crate::Reports {
+                dirs: vec![PathBuf::from("reports"), PathBuf::from("out")],
+                globs: vec!["**/*.html".to_owned(), "**/*.png".to_owned()],
+                allow_network: true,
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::replaces("**/*.svg", &["**/*.svg"])]
+    #[case::unset_keeps_the_file(None, &["**/*.html"])]
+    fn report_globs_from_the_environment_replace_the_files(
+        #[case] value: impl Into<Option<&'static str>>,
+        #[case] expected: &[&str],
+    ) {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            "[reports]\ndirs = [\"reports\"]\nglobs = [\"**/*.html\"]\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let value = value.into();
+        let vars: Vec<(&str, &str)> = value.map(|v| (REPORT_GLOBS_ENV, v)).into_iter().collect();
+        let merged =
+            load_layered_with(None, dir.path(), env(&vars)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(merged.reports.globs, expected);
+    }
+
+    #[rstest]
+    #[case::on_by_word("true", true)]
+    #[case::on_by_digit("1", true)]
+    #[case::off_by_word("False", false)]
+    #[case::off_by_digit("0", false)]
+    fn report_network_from_the_environment_overrides_the_file(
+        #[case] value: &str,
+        #[case] expected: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let file_says = (!expected).to_string();
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            format!("[reports]\nallow_network = {file_says}\n"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let merged = load_layered_with(None, dir.path(), env(&[(REPORT_ALLOW_NETWORK_ENV, value)]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(merged.reports.allow_network, expected);
+    }
+
+    #[test]
+    fn every_bad_report_setting_from_the_environment_is_named() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let merged = load_layered_with(
+            None,
+            dir.path(),
+            env(&[
+                (REPORT_DIRS_ENV, "../elsewhere"),
+                (REPORT_GLOBS_ENV, "**/*.html:*.{html"),
+                (REPORT_ALLOW_NETWORK_ENV, "yes"),
+            ]),
+        );
+        let Err(ConfigError::Invalid(problems)) = &merged else {
+            panic!("{merged:?}");
+        };
+        assert!(
+            matches!(
+                problems.as_slice(),
+                [
+                    Problem::EnvReportDirOutsideProject(dir),
+                    Problem::EnvInvalidGlob { glob, .. },
+                    Problem::EnvInvalidAllowNetwork(value),
+                ] if dir == &PathBuf::from("../elsewhere") && glob == "*.{html" && value == "yes"
+            ),
+            "{problems:?}"
         );
     }
 

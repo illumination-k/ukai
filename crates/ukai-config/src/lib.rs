@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 pub use interpolate::{InterpolateError, Source, interpolate};
 pub use layered::{
-    REPORT_DIRS_ENV, USER_FILE_NAME, config_dir, load_layered, load_layered_with, load_user, merge,
-    state_dir,
+    REPORT_ALLOW_NETWORK_ENV, REPORT_DIRS_ENV, REPORT_GLOBS_ENV, USER_FILE_NAME, config_dir,
+    load_layered, load_layered_with, load_user, merge, state_dir,
 };
 pub use schema::{
     AgentSpec, Config, Decision, Gateway, Keys, PRIORITIES, PermissionRule, Project,

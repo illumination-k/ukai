@@ -4,7 +4,7 @@
 
 use std::path::{Component, PathBuf};
 
-use crate::layered::REPORT_DIRS_ENV;
+use crate::layered::{REPORT_ALLOW_NETWORK_ENV, REPORT_DIRS_ENV, REPORT_GLOBS_ENV};
 use crate::schema::{Config, PRIORITIES, REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, Review};
 
 /// One problem with a configuration. Validation collects all of them rather
@@ -25,6 +25,10 @@ pub enum Problem {
     EnvReportDirOutsideProject(PathBuf),
     #[error("reports.globs: `{glob}`: {message}")]
     InvalidGlob { glob: String, message: String },
+    #[error("{REPORT_GLOBS_ENV}: `{glob}`: {message}")]
+    EnvInvalidGlob { glob: String, message: String },
+    #[error("{REPORT_ALLOW_NETWORK_ENV}: `{0}` is not `true` or `false`")]
+    EnvInvalidAllowNetwork(String),
     #[error("keybindings: set them in the user config.toml, not in a project's ukai.toml")]
     KeybindingsInProject,
     #[error("voice: set it in the user config.toml, not in a project's ukai.toml")]
