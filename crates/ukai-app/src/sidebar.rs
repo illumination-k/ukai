@@ -14,7 +14,7 @@ use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::sidebar::{self, Fold, Node, OpenAgent, Workspace};
 use ukai_core::{ProjectId, ReportSource};
 
-use crate::agent_pane::agent_status;
+use crate::agent_pane::{agent_status, session_title};
 use crate::alert::is_unread;
 use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
@@ -533,6 +533,11 @@ fn AgentRow(agent: OpenAgent, depth: u8) -> Element {
         )
     };
     let (state, label, _) = agent_status(app.sessions, pane);
+    let session = session_title(app.sessions, pane);
+    let hint = match &session {
+        Some(session) => format!("{agent} · {session} · {label}"),
+        None => format!("{agent} · {label}"),
+    };
     // Rows in the active tab are marked as the tab bar marks it, so the two
     // read as one; the focused pane's row is also filled.
     let class = match (focused, current, is_unread(app.sessions, pane)) {
@@ -546,10 +551,13 @@ fn AgentRow(agent: OpenAgent, depth: u8) -> Element {
         div {
             class,
             style: "--depth: {depth}",
-            title: "{agent} · {label}",
+            title: "{hint}",
             onclick: move |_| layout.write().focus(pane),
             span { class: "dot {state}" }
             span { class: "name", "{agent}" }
+            if let Some(session) = session {
+                span { class: "session-title", "{session}" }
+            }
             span { class: "meta", "{label}" }
             span { class: "unread-mark", title: "Unread" }
             if many_tabs {

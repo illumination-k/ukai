@@ -8,9 +8,9 @@ use agent_client_protocol::schema::v1::{
     ListSessionsResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PromptCapabilities, PromptResponse, RequestPermissionOutcome,
     ResumeSessionResponse, SessionCapabilities, SessionConfigOptionCategory,
-    SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo, SessionListCapabilities,
-    SessionResumeCapabilities, SetSessionConfigOptionResponse, StopReason, ToolCall,
-    ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput, UsageUpdate,
+    SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo, SessionInfoUpdate,
+    SessionListCapabilities, SessionResumeCapabilities, SetSessionConfigOptionResponse, StopReason,
+    ToolCall, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput, UsageUpdate,
     WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
@@ -219,6 +219,17 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                         ),
                                     ),
                                 ))?;
+                            } else if text == "title" {
+                                for info in [
+                                    SessionInfoUpdate::new().title("Fix the build"),
+                                    SessionInfoUpdate::new().updated_at("2026-10-14T12:00:00Z"),
+                                    SessionInfoUpdate::new().title(None::<String>),
+                                ] {
+                                    cx.send_notification(SessionNotification::new(
+                                        session.clone(),
+                                        SessionUpdate::SessionInfoUpdate(info),
+                                    ))?;
+                                }
                             } else if text == "commands" {
                                 cx.send_notification(SessionNotification::new(
                                     session.clone(),
@@ -544,6 +555,22 @@ async fn streams_message_chunks_before_turn_end() {
         vec![
             SessionEvent::AgentMessage { text: "Hel".into() },
             SessionEvent::AgentMessage { text: "lo".into() },
+            end_turn(),
+        ]
+    );
+}
+
+/// An update that leaves the title out says nothing about it.
+#[tokio::test]
+async fn translates_session_titles() {
+    let mut harness = Harness::start().await;
+    assert_eq!(
+        harness.turn("title").await,
+        vec![
+            SessionEvent::Title {
+                title: Some("Fix the build".into()),
+            },
+            SessionEvent::Title { title: None },
             end_turn(),
         ]
     );

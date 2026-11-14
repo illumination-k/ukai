@@ -17,7 +17,7 @@ use ukai_core::{
     boundary_span,
 };
 
-use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect};
+use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect, session_title};
 use crate::alert::{is_unread, mark_read};
 use crate::browser_pane::BrowserView;
 use crate::diff_pane::DiffPane;
@@ -371,7 +371,7 @@ fn TabBar() -> Element {
         let current = layout.read();
         let projects = app.projects.read();
         let schedules = app.schedule_names.read();
-        let tabs: Vec<(usize, String, usize, Option<&'static str>, bool)> = current
+        let tabs: Vec<_> = current
             .tabs()
             .iter()
             .enumerate()
@@ -381,10 +381,19 @@ fn TabBar() -> Element {
                     || "New tab".to_owned(),
                     |pane| pane_label(&current, &projects, &schedules, *pane).1,
                 );
+                // An agent's tab reads as what its session is about.
+                let (label, hint) = match panes
+                    .first()
+                    .and_then(|pane| session_title(app.sessions, *pane))
+                {
+                    Some(title) => (title.clone(), format!("{label} · {title}")),
+                    None => (label.clone(), label),
+                };
                 let unread = panes.iter().any(|pane| is_unread(app.sessions, *pane));
                 (
                     index,
                     label,
+                    hint,
                     panes.len(),
                     tab_state(app.sessions, &panes),
                     unread,
@@ -396,9 +405,10 @@ fn TabBar() -> Element {
 
     rsx! {
         nav { class: "tabbar",
-            for (index, label, count, state, unread) in tabs {
+            for (index, label, hint, count, state, unread) in tabs {
                 div {
                     key: "{index}",
+                    title: "{hint}",
                     class: match (index == active, unread) {
                         (true, _) => "tab active",
                         (false, true) => "tab unread",
@@ -578,6 +588,7 @@ fn PaneView(pane: PaneId) -> Element {
     };
     let unread = is_unread(app.sessions, pane);
     let is_agent = status.is_some();
+    let session = session_title(app.sessions, pane);
     let mut drag = app.drag;
     let moving = drag.read().as_ref().and_then(Drag::moving);
     let class = match (focused, moving == Some(pane)) {
@@ -622,6 +633,9 @@ fn PaneView(pane: PaneId) -> Element {
                     span { class: "crumb-sep", "/" }
                 }
                 span { class: "title", "{item}" }
+                if let Some(session) = session {
+                    span { class: "session-title", title: "{session}", "{session}" }
+                }
                 if let Some((state, label, name)) = status {
                     span { class: "status {state}", "{label}" }
                     if let Some(name) = name {
