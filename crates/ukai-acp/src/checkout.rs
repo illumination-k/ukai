@@ -10,6 +10,10 @@
 //! answers [`FILES_PATH`], [`RUN_PATH`], and [`DIFF_PATH`] with the same
 //! [`list_files`], [`run`], and [`diff`], and the gateway passes them on as
 //! `ukai.gateway.v1.Files` and `Commands` (gRPC-Web; see `crate::grpc`).
+//!
+//! A file the user attaches is on the user's machine, which a pod cannot
+//! read, so it is uploaded there first ([`Checkout::upload`], the relay's
+//! [`UPLOAD_PATH`] and [`store_upload`]) and the prompt links the copy.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -38,6 +42,14 @@ pub const RUN_PATH: &str = "/run";
 /// Where a relay diffs its checkout: `GET`, with `?base=` a [`DiffBase`],
 /// answered with a [`CheckoutDiff`].
 pub const DIFF_PATH: &str = "/diff";
+
+/// Path a relay takes a file the user attached to a prompt at: `POST` with
+/// the file as the body and its name as `?name=`, answered with
+/// [`Uploaded`].
+pub const UPLOAD_PATH: &str = "/upload";
+
+/// Largest file uploaded to a workspace.
+pub const MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Files a listing carries at most.
 pub const MAX_FILES: usize = 20_000;
@@ -102,6 +114,44 @@ pub struct CommandOutput {
     pub truncated: bool,
     #[serde(default)]
     pub timed_out: bool,
+}
+
+/// `?name=` of [`UPLOAD_PATH`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadQuery {
+    pub name: String,
+}
+
+/// Where an uploaded file was put.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Uploaded {
+    /// Its absolute path, where the agent reads it.
+    pub path: String,
+}
+
+/// Keep `bytes` as a file named as `name`'s last component, in a directory
+/// of its own under `dir` so that files of one name do not replace each
+/// other. Answers the file's path.
+pub fn store_upload(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let name = Path::new(name).file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the upload has no file name",
+        )
+    })?;
+    std::fs::create_dir_all(dir)?;
+    let mut number = 0u64;
+    let own = loop {
+        let own = dir.join(number.to_string());
+        match std::fs::create_dir(&own) {
+            Ok(()) => break own,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => number += 1,
+            Err(error) => return Err(error),
+        }
+    };
+    let path = own.join(name);
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 /// What a diff is taken from.
@@ -601,6 +651,41 @@ impl Checkout {
         Ok(review.into())
     }
 
+    /// Whether the agent works on another machine, where it cannot read
+    /// this one's files.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Gateway(_))
+    }
+
+    /// Put a file the user attached where the agent can read it, and answer
+    /// its path there. Only a gateway workspace needs it: a local agent
+    /// reads the file where it is.
+    pub async fn upload(&self, name: &str, bytes: Vec<u8>) -> Result<String, CheckoutError> {
+        let Self::Gateway(gateway) = self else {
+            return Err(CheckoutError::Failed(
+                "a local agent reads the file where it is".to_owned(),
+            ));
+        };
+        let request = gw::UploadRequest {
+            agent: gateway.agent.clone(),
+            workspace: Some(gateway.workspace.clone()),
+            name: name.to_owned(),
+            content: bytes,
+        };
+        let uploaded = FilesClient::new(gateway.run.clone())
+            .upload(request)
+            .await
+            .map_err(|status| match status.code() {
+                // Why it was refused, word for word.
+                tonic::Code::Aborted | tonic::Code::InvalidArgument => {
+                    CheckoutError::Failed(status.message().to_owned())
+                }
+                _ => status.into(),
+            })?
+            .into_inner();
+        Ok(uploaded.path)
+    }
+
     pub async fn run(&self, command: &str) -> Result<CommandOutput, CheckoutError> {
         match self {
             Self::Local(root) => run(root, command)
@@ -728,6 +813,35 @@ mod tests {
             std::fs::write(path, text).unwrap_or_else(|e| panic!("write: {e}"));
         }
         dir
+    }
+
+    #[test]
+    fn stores_uploads_of_one_name_apart() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let uploads = dir.path().join("attachments");
+        let first = store_upload(&uploads, "a.pdf", b"one").unwrap_or_else(|e| panic!("{e}"));
+        // Only the last component names the file: nothing leaves `uploads`.
+        let second =
+            store_upload(&uploads, "../../a.pdf", b"two").unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(first, second);
+        for (path, contents) in [(&first, "one"), (&second, "two")] {
+            assert!(path.starts_with(&uploads), "{}", path.display());
+            assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("a.pdf")));
+            assert_eq!(
+                std::fs::read_to_string(path).ok().as_deref(),
+                Some(contents)
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::empty("")]
+    #[case::parent("..")]
+    #[case::root("/")]
+    fn refuses_an_upload_without_a_name(#[case] name: &str) {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let error = store_upload(dir.path(), name, b"x").err().map(|e| e.kind());
+        assert_eq!(error, Some(std::io::ErrorKind::InvalidInput));
     }
 
     #[test]

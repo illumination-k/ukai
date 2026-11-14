@@ -6,12 +6,14 @@ use std::time::Instant;
 use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
+use ukai_acp::checkout::CheckoutError;
 use ukai_acp::{Attachment, Checkout, Prompt};
+use ukai_core::attachment::Attach;
 use ukai_core::composer::{self as suggest, Files, Suggestions};
 use ukai_core::keymap::{Action, Scope};
 use ukai_core::mention::{self, Mention};
 use ukai_core::recall::{self, Recall};
-use ukai_core::{PaneId, Queued, Status, Transcript, review, shell, slash, usage_label};
+use ukai_core::{PaneId, Queued, Sent, Status, Transcript, review, shell, slash, usage_label};
 
 use super::config::ConfigControls;
 use super::{Composer, Pending, stop_turn};
@@ -62,6 +64,9 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
         }
     };
     let send_on_click = send.clone();
+    let attach_checkout = checkout.clone();
+    let paste_checkout = checkout.clone();
+    let pick_checkout = checkout.clone();
     let status = transcript.read().status.clone();
     let busy = status == Status::Busy;
     // A message sent while a turn runs steers it: it joins the turn, or for
@@ -132,10 +137,15 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                     event.prevent_default();
                     dropping.set(false);
                     for file in event.files() {
-                        spawn(async move {
+                        let checkout = attach_checkout.clone();
+                        // An upload goes on when the pane is closed meanwhile.
+                        spawn_forever(async move {
                             let path = file.path();
                             match file.read_bytes().await {
-                                Ok(bytes) => attach(composer, transcript, &path, bytes.to_vec()),
+                                Ok(bytes) => {
+                                    attach(composer, transcript, checkout, &path, bytes.to_vec())
+                                        .await;
+                                }
                                 Err(e) => error.set(Some(format!("{}: {e}", path.display()))),
                             }
                         });
@@ -172,7 +182,7 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                                 return;
                             };
                             event.prevent_default();
-                            paste(composer, transcript, pasted);
+                            paste(composer, transcript, paste_checkout.clone(), pasted);
                         },
                         onkeydown: {
                             let shortcuts = shortcuts.clone();
@@ -227,7 +237,7 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                     button {
                         class: "icon",
                         title: "Attach files…",
-                        onclick: move |_| pick_attachments(composer, transcript),
+                        onclick: move |_| pick_attachments(composer, transcript, pick_checkout.clone()),
                         Svg { icon: Icon::Paperclip }
                     }
                     button {
@@ -298,6 +308,7 @@ fn PendingItems(composer: Composer) -> Element {
     let Composer {
         mut review,
         mut attachments,
+        uploading,
         error,
         ..
     } = composer;
@@ -320,7 +331,7 @@ fn PendingItems(composer: Composer) -> Element {
                 }
             }
         }
-        if !attachments.read().is_empty() {
+        if !attachments.read().is_empty() || !uploading.read().is_empty() {
             div { class: "composer-attachments",
                 for (index, pending) in attachments.read().iter().enumerate() {
                     span {
@@ -337,6 +348,15 @@ fn PendingItems(composer: Composer) -> Element {
                             },
                             Svg { icon: Icon::Close, size: 11 }
                         }
+                    }
+                }
+                for (index, name) in uploading.read().iter().enumerate() {
+                    span {
+                        key: "uploading-{index}",
+                        class: "chip uploading",
+                        title: "Uploading {name}",
+                        Svg { icon: Icon::Paperclip, size: 12 }
+                        span { class: "name", "Uploading {name}…" }
                     }
                 }
             }
@@ -448,12 +468,18 @@ fn send_draft(
         mut review,
         mut error,
         mut mentions,
+        uploading,
         ..
     } = composer;
     let text = draft.read().trim().to_owned();
     if let Some(command) = shell::command(&text) {
         run_shell(checkout, transcript, command.to_owned());
         draft.set(String::new());
+        return;
+    }
+    // A file on its way to the agent's workspace goes with the prompt.
+    if !uploading.read().is_empty() {
+        error.set(Some("still uploading the attached files".to_owned()));
         return;
     }
     let comments = review.read().clone();
@@ -499,7 +525,10 @@ fn send_draft(
         clear();
         return;
     }
-    let names = pending.iter().map(|p| p.name.clone()).collect();
+    let sent = pending
+        .iter()
+        .map(|p| Sent::new(p.name.clone(), &p.attachment))
+        .collect();
     let prompt = Prompt {
         text,
         attachments: pending
@@ -508,15 +537,15 @@ fn send_draft(
             .chain(linked.into_iter().map(|(_, link)| link))
             .collect(),
     };
-    let sent = handle.is_some_and(|h| {
+    let delivered = handle.is_some_and(|h| {
         if busy {
             h.steer(prompt)
         } else {
             h.prompt(prompt)
         }
     });
-    if sent {
-        transcript.write().push_prompt(shown, names);
+    if delivered {
+        transcript.write().push_prompt(shown, sent);
         clear();
     }
 }
@@ -562,21 +591,30 @@ fn run_shell(checkout: Option<Checkout>, mut transcript: Signal<Transcript>, com
 }
 
 /// Attach what was pasted: an image, or the files copied in a file manager.
-fn paste(composer: Composer, transcript: Signal<Transcript>, pasted: Pasted) {
+fn paste(
+    composer: Composer,
+    transcript: Signal<Transcript>,
+    checkout: Option<Checkout>,
+    pasted: Pasted,
+) {
     let mut error = composer.error;
     match pasted {
         Pasted::Image(bytes) => {
-            attach(composer, transcript, Path::new("pasted-image.png"), bytes);
+            spawn_forever(async move {
+                let path = Path::new("pasted-image.png");
+                attach(composer, transcript, checkout, path, bytes).await;
+            });
         }
         Pasted::Files(paths) => {
             for path in paths {
-                spawn(async move {
+                let checkout = checkout.clone();
+                spawn_forever(async move {
                     let read = {
                         let path = path.clone();
                         tokio::task::spawn_blocking(move || std::fs::read(path)).await
                     };
                     match read {
-                        Ok(Ok(bytes)) => attach(composer, transcript, &path, bytes),
+                        Ok(Ok(bytes)) => attach(composer, transcript, checkout, &path, bytes).await,
                         Ok(Err(e)) => error.set(Some(format!("{}: {e}", path.display()))),
                         Err(e) => error.set(Some(e.to_string())),
                     }
@@ -587,14 +625,45 @@ fn paste(composer: Composer, transcript: Signal<Transcript>, pasted: Pasted) {
 }
 
 /// Add the file at `path` to the next prompt, in the form the agent accepts.
-fn attach(composer: Composer, transcript: Signal<Transcript>, path: &Path, bytes: Vec<u8>) {
+/// An agent working elsewhere cannot read it here: it is uploaded to the
+/// agent's workspace first, and the prompt links that copy.
+async fn attach(
+    composer: Composer,
+    transcript: Signal<Transcript>,
+    checkout: Option<Checkout>,
+    path: &Path,
+    bytes: Vec<u8>,
+) {
     let Composer {
         mut attachments,
+        mut uploading,
         mut error,
         ..
     } = composer;
     let caps = transcript.peek().prompt_caps;
-    match ukai_core::attachment::attachment(path, bytes, caps) {
+    let remote = checkout.as_ref().is_some_and(Checkout::is_remote);
+    let attachment = match ukai_core::attachment::attachment(path, bytes, caps, remote) {
+        Ok(Attach::Send(attachment)) => Ok(attachment),
+        Ok(Attach::Upload { name, bytes }) => {
+            uploading.write().push(name.clone());
+            let result = match &checkout {
+                Some(checkout) => checkout.upload(&name, bytes).await,
+                None => Err(CheckoutError::Failed(
+                    "this agent has nowhere to put files".to_owned(),
+                )),
+            };
+            let position = uploading.peek().iter().position(|n| *n == name);
+            if let Some(position) = position {
+                uploading.write().remove(position);
+            }
+            match result {
+                Ok(stored) => Ok(ukai_core::attachment::uploaded(name, &stored)),
+                Err(e) => Err(format!("{name}: {e}")),
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    };
+    match attachment {
         Ok(attachment) => {
             attachments.write().push(Pending {
                 name: ukai_core::attachment::file_name(path),
@@ -602,13 +671,17 @@ fn attach(composer: Composer, transcript: Signal<Transcript>, path: &Path, bytes
             });
             error.set(None);
         }
-        Err(e) => error.set(Some(e.to_string())),
+        Err(message) => error.set(Some(message)),
     }
 }
 
 /// Ask for files with the native dialog and attach them.
-fn pick_attachments(composer: Composer, transcript: Signal<Transcript>) {
-    spawn(async move {
+fn pick_attachments(
+    composer: Composer,
+    transcript: Signal<Transcript>,
+    checkout: Option<Checkout>,
+) {
+    spawn_forever(async move {
         let Some(files) = rfd::AsyncFileDialog::new()
             .set_title("Attach files")
             .pick_files()
@@ -618,7 +691,7 @@ fn pick_attachments(composer: Composer, transcript: Signal<Transcript>) {
         };
         for file in files {
             let bytes = file.read().await;
-            attach(composer, transcript, file.path(), bytes);
+            attach(composer, transcript, checkout.clone(), file.path(), bytes).await;
         }
     });
 }

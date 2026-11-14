@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use ukai_acp::checkout::CommandOutput;
 use ukai_acp::{FileDiff, ToolStatus};
 use ukai_core::report::ReportKind;
-use ukai_core::{Entry, PaneContent, PaneId, ProjectId, ReportSource, review, shell};
+use ukai_core::{Entry, PaneContent, PaneId, ProjectId, ReportSource, Sent, review, shell};
 
 use super::review_of;
 use crate::diff_view::DiffLines;
@@ -31,6 +31,39 @@ fn AgentMessage(text: String) -> Element {
     }
 }
 
+/// What a user's message carried: images as they are, files by name.
+#[component]
+pub(super) fn Attachments(attachments: Vec<Sent>) -> Element {
+    let images = attachments.iter().filter(|sent| sent.image.is_some());
+    let files = attachments.iter().filter(|sent| sent.image.is_none());
+    rsx! {
+        if images.clone().next().is_some() {
+            div { class: "msg-images",
+                for (index, sent) in images.enumerate() {
+                    if let Some(url) = &sent.image {
+                        img {
+                            key: "{index}",
+                            src: "{url}",
+                            alt: "{sent.name}",
+                            title: "{sent.name}",
+                        }
+                    }
+                }
+            }
+        }
+        if files.clone().next().is_some() {
+            div { class: "msg-attachments",
+                for (index, sent) in files.enumerate() {
+                    span { key: "{index}", class: "chip",
+                        Svg { icon: Icon::Paperclip, size: 11 }
+                        span { class: "name", "{sent.name}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
     let app = use_context::<AppSignals>();
@@ -39,16 +72,7 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
         Entry::User { text, attachments } => rsx! {
             div { class: "msg user",
                 "{text}"
-                if !attachments.is_empty() {
-                    div { class: "msg-attachments",
-                        for (index, name) in attachments.iter().enumerate() {
-                            span { key: "{index}", class: "chip",
-                                Svg { icon: Icon::Paperclip, size: 11 }
-                                span { class: "name", "{name}" }
-                            }
-                        }
-                    }
-                }
+                Attachments { attachments }
             }
         },
         Entry::Agent { text } => rsx! {

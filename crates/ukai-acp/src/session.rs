@@ -82,6 +82,8 @@ pub enum SessionEvent {
     ConfigFailed { message: String },
     /// A chunk of a user message the agent replays while loading a session.
     UserMessage { text: String },
+    /// An image of a user message replayed likewise, as a `data:` URL.
+    UserImage { url: String },
     /// A chunk of the agent's reply; consecutive chunks form one message.
     AgentMessage { text: String },
     /// A chunk of the agent's visible reasoning.
@@ -270,6 +272,14 @@ pub enum Attachment {
 }
 
 impl Attachment {
+    /// The image as a `data:` URL, to show it; `None` for anything else.
+    pub fn data_url(&self) -> Option<String> {
+        match self {
+            Self::Image { mime_type, data } => Some(data_url(mime_type, &BASE64.encode(data))),
+            Self::Text { .. } | Self::Link { .. } => None,
+        }
+    }
+
     fn into_block(self) -> ContentBlock {
         match self {
             Self::Image { mime_type, data } => {
@@ -1270,11 +1280,15 @@ fn subagent_parent(update: &SessionUpdate) -> Option<String> {
 
 fn translate_own_update(update: SessionUpdate, replaying: bool) -> Option<SessionEvent> {
     Some(match update {
-        SessionUpdate::UserMessageChunk(ContentChunk { content, .. }) if replaying => {
-            SessionEvent::UserMessage {
+        SessionUpdate::UserMessageChunk(ContentChunk { content, .. }) if replaying => match content
+        {
+            ContentBlock::Image(image) => SessionEvent::UserImage {
+                url: data_url(&image.mime_type, &image.data),
+            },
+            content => SessionEvent::UserMessage {
                 text: content_text(content)?,
-            }
-        }
+            },
+        },
         SessionUpdate::AgentMessageChunk(ContentChunk { content, .. }) => {
             SessionEvent::AgentMessage {
                 text: content_text(content)?,
@@ -1390,6 +1404,11 @@ fn config_options(options: Vec<SessionConfigOption>) -> Vec<ConfigOption> {
             })
         })
         .collect()
+}
+
+/// A `data:` URL of `base64` data.
+fn data_url(mime_type: &str, base64: &str) -> String {
+    format!("data:{mime_type};base64,{base64}")
 }
 
 /// Text to show for a content block; `None` for content not rendered yet.

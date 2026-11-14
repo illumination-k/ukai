@@ -47,6 +47,8 @@ pub struct AgentSession {
 struct Composer {
     draft: Signal<String>,
     attachments: Signal<Vec<Pending>>,
+    /// Names of the files on their way to the agent's workspace.
+    uploading: Signal<Vec<String>>,
     /// Comments on diff lines, sent ahead of the draft.
     review: Signal<Vec<ReviewComment>>,
     /// Why the last file could not be attached, or dictation failed.
@@ -63,6 +65,7 @@ impl Composer {
         Self {
             draft: Signal::new_in_scope(String::new(), ScopeId::APP),
             attachments: Signal::new_in_scope(Vec::new(), ScopeId::APP),
+            uploading: Signal::new_in_scope(Vec::new(), ScopeId::APP),
             review: Signal::new_in_scope(Vec::new(), ScopeId::APP),
             error: Signal::new_in_scope(None, ScopeId::APP),
             dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::APP),

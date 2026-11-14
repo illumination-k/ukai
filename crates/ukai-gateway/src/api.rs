@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use ukai_acp::checkout::{
-    CheckoutDiff, CommandOutput, DiffBase, FileListing, RUN_TIMEOUT, RunRequest,
+    CheckoutDiff, CommandOutput, DiffBase, FileListing, MAX_UPLOAD_BYTES, RUN_TIMEOUT, RunRequest,
+    Uploaded,
 };
 use ukai_acp::ports::PortListing;
 use ukai_acp::review::{AnnotateRequest, Review};
@@ -248,6 +249,50 @@ impl gw::files_server::Files for Api {
             .await
             .map_err(unavailable)?;
         Ok(Response::new(review.into()))
+    }
+
+    async fn upload(
+        &self,
+        request: Request<gw::UploadRequest>,
+    ) -> Result<Response<gw::Uploaded>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        if request.content.len() > MAX_UPLOAD_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "files over {} MiB are not uploaded",
+                MAX_UPLOAD_BYTES / 1024 / 1024
+            )));
+        }
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let unavailable = |error: reqwest::Error| {
+            tracing::warn!(agent = %request.agent, %error, "cannot upload to the workspace");
+            Status::unavailable("cannot upload the file to the workspace")
+        };
+        let response = self
+            .gateway
+            .http
+            .post(relay.upload_url(&request.name))
+            .bearer_auth(&relay.token)
+            .body(request.content)
+            .timeout(RUN_TIMEOUT)
+            .send()
+            .await
+            .map_err(unavailable)?;
+        // What the relay says is wrong with the file goes back as it is.
+        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let problem = response.text().await.map_err(unavailable)?;
+            return Err(Status::invalid_argument(problem));
+        }
+        let uploaded = response
+            .error_for_status()
+            .map_err(unavailable)?
+            .json::<Uploaded>()
+            .await
+            .map_err(unavailable)?;
+        Ok(Response::new(gw::Uploaded {
+            path: uploaded.path,
+        }))
     }
 }
 

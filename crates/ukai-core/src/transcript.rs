@@ -1,6 +1,7 @@
 //! The visible history of one agent session, folded from [`SessionEvent`]s.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ukai_acp::checkout::CommandOutput;
 use ukai_acp::{
@@ -38,8 +39,8 @@ pub enum Connection {
 pub enum Entry {
     User {
         text: String,
-        /// Names of the files attached to the turn.
-        attachments: Vec<String>,
+        /// What was attached to the turn.
+        attachments: Vec<Sent>,
     },
     Agent {
         text: String,
@@ -134,6 +135,33 @@ pub enum History {
     Failed(String),
 }
 
+/// Something attached to a user's message, as the message shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sent {
+    pub name: String,
+    /// An image, as a `data:` URL: it is shown rather than named. Shared,
+    /// since entries are cloned to render them.
+    pub image: Option<Arc<str>>,
+}
+
+impl Sent {
+    /// `attachment`, sent under `name`.
+    pub fn new(name: impl Into<String>, attachment: &Attachment) -> Self {
+        Self {
+            name: name.into(),
+            image: attachment.data_url().map(Arc::from),
+        }
+    }
+
+    /// An image the agent replays, which comes without a name.
+    fn replayed(url: String) -> Self {
+        Self {
+            name: "image".to_owned(),
+            image: Some(Arc::from(url)),
+        }
+    }
+}
+
 /// A message sent while a turn runs to an agent without
 /// [`PromptCaps::steering`]: the turn is stopped, and this is sent as the next one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -144,10 +172,11 @@ pub struct Queued {
 }
 
 impl Queued {
-    pub fn names(&self) -> Vec<String> {
+    /// The attachments as the message shows them.
+    pub fn shown(&self) -> Vec<Sent> {
         self.attachments
             .iter()
-            .map(|(name, _)| name.clone())
+            .map(|(name, attachment)| Sent::new(name.clone(), attachment))
             .collect()
     }
 
@@ -261,9 +290,9 @@ impl Transcript {
         true
     }
 
-    /// Record a prompt the user sent, with the names of its attachments. It
+    /// Record a prompt the user sent, with what was attached to it. It
     /// carried the commands [`Self::unsent_shell`] lists.
-    pub fn push_prompt(&mut self, text: impl Into<String>, attachments: Vec<String>) {
+    pub fn push_prompt(&mut self, text: impl Into<String>, attachments: Vec<Sent>) {
         for entry in &mut self.entries {
             if let Entry::Shell {
                 result: Some(Ok(_)),
@@ -500,6 +529,13 @@ impl Transcript {
                     attachments: Vec::new(),
                 }),
             },
+            SessionEvent::UserImage { url } => match self.history_mut().last_mut() {
+                Some(Entry::User { attachments, .. }) => attachments.push(Sent::replayed(url)),
+                _ => self.history_mut().push(Entry::User {
+                    text: String::new(),
+                    attachments: vec![Sent::replayed(url)],
+                }),
+            },
             event @ (SessionEvent::AgentMessage { .. }
             | SessionEvent::AgentThought { .. }
             | SessionEvent::ToolCall { .. }
@@ -590,7 +626,8 @@ impl Transcript {
 ///
 /// - Notices, `!` commands, written files, and answered permission requests
 ///   keep their place after the agent's entries that came before them.
-/// - Prompts keep the names of their attachments, which a replay leaves out.
+/// - Prompts keep their attachments as they were shown: a replay has the
+///   images only, and without their names.
 /// - Unanswered permission requests go: they were the old connection's, and
 ///   the agent asks again over the new one.
 /// - Prompts the replay does not have stay at the end: the last `unsent` go
@@ -636,12 +673,13 @@ fn reconcile(shown: Vec<Entry>, replay: Vec<Entry>, unsent: usize) -> Vec<Entry>
             merged.push(kept);
         }
         if let Entry::User {
-            attachments: names, ..
+            attachments: replayed,
+            ..
         } = &mut entry
             && let Some(shown) = attachments.next()
-            && names.is_empty()
+            && !shown.is_empty()
         {
-            *names = shown;
+            *replayed = shown;
         }
         merged.push(entry);
     }
@@ -948,6 +986,36 @@ mod tests {
         assert_eq!(
             transcript.entries,
             vec![user("q?"), Entry::Agent { text: "a".into() }]
+        );
+    }
+
+    #[test]
+    fn replayed_images_join_the_users_message() {
+        let image = |url: &str| SessionEvent::UserImage { url: url.into() };
+        let shown = |url: &str| Sent {
+            name: "image".into(),
+            image: Some(url.into()),
+        };
+        let transcript = folded([
+            image("data:image/png;base64,YQ=="),
+            msg("a"),
+            SessionEvent::UserMessage { text: "q".into() },
+            image("data:image/png;base64,Yg=="),
+            ready(None, RestoreOutcome::Replayed),
+        ]);
+        assert_eq!(
+            transcript.entries,
+            vec![
+                Entry::User {
+                    text: String::new(),
+                    attachments: vec![shown("data:image/png;base64,YQ==")],
+                },
+                Entry::Agent { text: "a".into() },
+                Entry::User {
+                    text: "q".into(),
+                    attachments: vec![shown("data:image/png;base64,Yg==")],
+                },
+            ]
         );
     }
 
@@ -1353,8 +1421,11 @@ mod tests {
         transcript.apply(SessionEvent::Closed { error: None });
         let queued = transcript.take_queued();
         assert_eq!(
-            queued.as_ref().map(Queued::names),
-            Some(vec!["x".to_owned()])
+            queued.as_ref().map(Queued::shown),
+            Some(vec![Sent {
+                name: "x".into(),
+                image: None
+            }])
         );
         assert_eq!(queued.map(|q| q.prompt().text).as_deref(), Some("instead"));
     }
@@ -1392,7 +1463,13 @@ mod tests {
     #[test]
     fn prompt_and_turn_end_toggle_busy() {
         let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
-        transcript.push_prompt("hi", vec!["a.png".into()]);
+        let image = Attachment::Image {
+            mime_type: "image/png".into(),
+            data: b"hi".to_vec(),
+        };
+        let sent = Sent::new("a.png", &image);
+        assert_eq!(sent.image.as_deref(), Some("data:image/png;base64,aGk="));
+        transcript.push_prompt("hi", vec![sent.clone()]);
         assert_eq!(transcript.status, Status::Busy);
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
@@ -1402,7 +1479,7 @@ mod tests {
             transcript.entries,
             vec![Entry::User {
                 text: "hi".into(),
-                attachments: vec!["a.png".into()]
+                attachments: vec![sent]
             }]
         );
     }
@@ -1496,10 +1573,18 @@ mod tests {
         assert_eq!(unsent, ["sleep 9"]);
     }
 
+    /// A file attached as `name`, as a message shows it.
+    fn file(name: &str) -> Sent {
+        Sent {
+            name: name.into(),
+            image: None,
+        }
+    }
+
     fn prompted(text: &str, attachments: &[&str]) -> Entry {
         Entry::User {
             text: text.into(),
-            attachments: attachments.iter().map(|name| (*name).to_owned()).collect(),
+            attachments: attachments.iter().copied().map(file).collect(),
         }
     }
 
@@ -1525,7 +1610,7 @@ mod tests {
         let mut transcript = folded([ready(None, RestoreOutcome::Fresh)]);
         let shell = transcript.start_shell("ls");
         transcript.finish_shell(shell, Err("no such command".into()));
-        transcript.push_prompt("slow", vec!["a.png".into()]);
+        transcript.push_prompt("slow", vec![file("a.png")]);
         transcript.apply(said("part 1"));
         transcript
     }
@@ -1538,6 +1623,10 @@ mod tests {
         for event in [
             SessionEvent::UserMessage {
                 text: "slow".into(),
+            },
+            // The replay has the image, without the name it was sent under.
+            SessionEvent::UserImage {
+                url: "data:image/png;base64,aGk=".into(),
             },
             said("part 1"),
             said(", part 2"),

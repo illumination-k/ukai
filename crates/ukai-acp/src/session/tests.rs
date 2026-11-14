@@ -106,6 +106,9 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                 }
                 for update in [
                     SessionUpdate::UserMessageChunk(ContentChunk::new("earlier question".into())),
+                    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Image(
+                        ImageContent::new("aGk=", "image/png"),
+                    ))),
                     SessionUpdate::AgentMessageChunk(ContentChunk::new("earlier answer".into())),
                 ] {
                     cx.send_notification(SessionNotification::new(
@@ -916,6 +919,9 @@ async fn load_replays_history_before_ready() {
         vec![
             SessionEvent::UserMessage {
                 text: "earlier question".into()
+            },
+            SessionEvent::UserImage {
+                url: "data:image/png;base64,aGk=".into()
             },
             SessionEvent::AgentMessage {
                 text: "earlier answer".into()

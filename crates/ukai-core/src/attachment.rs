@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use ukai_acp::checkout::MAX_UPLOAD_BYTES;
 use ukai_acp::{Attachment, PromptCaps};
 
 /// Largest image sent inline.
@@ -16,16 +17,30 @@ pub enum AttachError {
     ImagesUnsupported { name: String },
     #[error("{name}: images over {} MiB are not sent", MAX_IMAGE_BYTES / 1024 / 1024)]
     TooLarge { name: String },
+    #[error("{name}: files over {} MiB are not uploaded", MAX_UPLOAD_BYTES / 1024 / 1024)]
+    UploadTooLarge { name: String },
+}
+
+/// How a file gets to the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attach {
+    /// In the prompt, as it is.
+    Send(Attachment),
+    /// The agent cannot read this machine's files: the file is uploaded to
+    /// where it works first, and the prompt links that copy ([`uploaded`]).
+    Upload { name: String, bytes: Vec<u8> },
 }
 
 /// What to send for the file at `path` with contents `bytes`: an image
 /// inline, a text file embedded when the agent takes embedded context and it
-/// is small enough, anything else as a link to the file.
+/// is small enough, anything else as a link to the file. An agent that is
+/// `remote` could not follow that link, so the file is uploaded instead.
 pub fn attachment(
     path: &Path,
     bytes: Vec<u8>,
     caps: PromptCaps,
-) -> Result<Attachment, AttachError> {
+    remote: bool,
+) -> Result<Attach, AttachError> {
     let name = file_name(path);
     if let Some(mime_type) = image_type(path) {
         if !caps.image {
@@ -34,19 +49,36 @@ pub fn attachment(
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err(AttachError::TooLarge { name });
         }
-        return Ok(Attachment::Image {
+        return Ok(Attach::Send(Attachment::Image {
             mime_type: mime_type.to_owned(),
             data: bytes,
-        });
+        }));
     }
     let uri = file_uri(path);
-    if caps.embedded_context
-        && bytes.len() <= MAX_EMBEDDED_BYTES
-        && let Ok(text) = String::from_utf8(bytes)
-    {
-        return Ok(Attachment::Text { uri, text });
+    let bytes = if caps.embedded_context && bytes.len() <= MAX_EMBEDDED_BYTES {
+        match String::from_utf8(bytes) {
+            Ok(text) => return Ok(Attach::Send(Attachment::Text { uri, text })),
+            Err(binary) => binary.into_bytes(),
+        }
+    } else {
+        bytes
+    };
+    if !remote {
+        return Ok(Attach::Send(Attachment::Link { name, uri }));
     }
-    Ok(Attachment::Link { name, uri })
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(AttachError::UploadTooLarge { name });
+    }
+    Ok(Attach::Upload { name, bytes })
+}
+
+/// The link to send for a file uploaded as `name` to `path`, where the
+/// agent works.
+pub fn uploaded(name: String, path: &str) -> Attachment {
+    Attachment::Link {
+        name,
+        uri: file_uri(Path::new(path)),
+    }
 }
 
 /// The last component of `path`, for showing an attachment.
@@ -109,42 +141,84 @@ mod tests {
         steering: false,
     };
 
+    fn link(name: &str, uri: &str) -> Attach {
+        Attach::Send(Attachment::Link {
+            name: name.into(),
+            uri: uri.into(),
+        })
+    }
+
     #[rstest]
     #[case::image(
-        "/p/shot.PNG", b"png".to_vec(), ALL,
-        Ok(Attachment::Image { mime_type: "image/png".into(), data: b"png".to_vec() }),
+        "/p/shot.PNG", b"png".to_vec(), ALL, false,
+        Ok(Attach::Send(Attachment::Image { mime_type: "image/png".into(), data: b"png".to_vec() })),
     )]
     #[case::image_unsupported(
-        "/p/a.jpg", vec![], NONE,
+        "/p/a.jpg", vec![], NONE, false,
         Err(AttachError::ImagesUnsupported { name: "a.jpg".into() }),
     )]
     #[case::image_too_large(
-        "/p/a.webp", vec![0; MAX_IMAGE_BYTES + 1], ALL,
+        "/p/a.webp", vec![0; MAX_IMAGE_BYTES + 1], ALL, false,
         Err(AttachError::TooLarge { name: "a.webp".into() }),
     )]
     #[case::text_embedded(
-        "/p/notes.md", b"# hi".to_vec(), ALL,
-        Ok(Attachment::Text { uri: "file:///p/notes.md".into(), text: "# hi".into() }),
+        "/p/notes.md", b"# hi".to_vec(), ALL, false,
+        Ok(Attach::Send(Attachment::Text { uri: "file:///p/notes.md".into(), text: "# hi".into() })),
+    )]
+    #[case::text_embedded_remote(
+        "/p/notes.md", b"# hi".to_vec(), ALL, true,
+        Ok(Attach::Send(Attachment::Text { uri: "file:///p/notes.md".into(), text: "# hi".into() })),
     )]
     #[case::text_without_embedding(
-        "/p/notes.md", b"# hi".to_vec(), NONE,
-        Ok(Attachment::Link { name: "notes.md".into(), uri: "file:///p/notes.md".into() }),
+        "/p/notes.md", b"# hi".to_vec(), NONE, false,
+        Ok(link("notes.md", "file:///p/notes.md")),
+    )]
+    #[case::text_without_embedding_remote(
+        "/p/notes.md", b"# hi".to_vec(), NONE, true,
+        Ok(Attach::Upload { name: "notes.md".into(), bytes: b"# hi".to_vec() }),
     )]
     #[case::text_too_large(
-        "/p/big.log", vec![b'a'; MAX_EMBEDDED_BYTES + 1], ALL,
-        Ok(Attachment::Link { name: "big.log".into(), uri: "file:///p/big.log".into() }),
+        "/p/big.log", vec![b'a'; MAX_EMBEDDED_BYTES + 1], ALL, false,
+        Ok(link("big.log", "file:///p/big.log")),
+    )]
+    #[case::text_too_large_remote(
+        "/p/big.log", vec![b'a'; MAX_EMBEDDED_BYTES + 1], ALL, true,
+        Ok(Attach::Upload { name: "big.log".into(), bytes: vec![b'a'; MAX_EMBEDDED_BYTES + 1] }),
     )]
     #[case::binary(
-        "/p/a.bin", vec![0xff, 0xfe], ALL,
-        Ok(Attachment::Link { name: "a.bin".into(), uri: "file:///p/a.bin".into() }),
+        "/p/a.bin", vec![0xff, 0xfe], ALL, false,
+        Ok(link("a.bin", "file:///p/a.bin")),
+    )]
+    #[case::binary_remote(
+        "/p/a.bin", vec![0xff, 0xfe], ALL, true,
+        Ok(Attach::Upload { name: "a.bin".into(), bytes: vec![0xff, 0xfe] }),
+    )]
+    #[case::upload_too_large(
+        "/p/a.bin", vec![0; MAX_UPLOAD_BYTES + 1], ALL, true,
+        Err(AttachError::UploadTooLarge { name: "a.bin".into() }),
     )]
     fn chooses_how_to_send(
         #[case] path: &str,
         #[case] bytes: Vec<u8>,
         #[case] caps: PromptCaps,
-        #[case] expected: Result<Attachment, AttachError>,
+        #[case] remote: bool,
+        #[case] expected: Result<Attach, AttachError>,
     ) {
-        assert_eq!(attachment(&PathBuf::from(path), bytes, caps), expected);
+        assert_eq!(
+            attachment(&PathBuf::from(path), bytes, caps, remote),
+            expected
+        );
+    }
+
+    #[test]
+    fn an_uploaded_file_is_linked_where_the_agent_reads_it() {
+        assert_eq!(
+            uploaded("my paper.pdf".into(), "/tmp/ukai/0/my paper.pdf"),
+            Attachment::Link {
+                name: "my paper.pdf".into(),
+                uri: "file:///tmp/ukai/0/my%20paper.pdf".into(),
+            }
+        );
     }
 
     #[rstest]
