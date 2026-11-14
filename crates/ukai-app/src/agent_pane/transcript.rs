@@ -5,9 +5,8 @@ use dioxus::prelude::*;
 use ukai_core::{PaneId, Queued, Status};
 
 use super::Composer;
-use super::entry::EntryView;
+use super::entry::{Attachments, EntryView};
 use super::session::restart_to_update;
-use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 
 #[component]
@@ -101,16 +100,7 @@ fn QueuedMessage(pane: PaneId, steer: Queued, composer: Composer) -> Element {
         div { class: "steer",
             div { class: "msg user queued",
                 "{steer.text}"
-                if !steer.attachments.is_empty() {
-                    div { class: "msg-attachments",
-                        for (index, name) in steer.names().into_iter().enumerate() {
-                            span { key: "{index}", class: "chip",
-                                Svg { icon: Icon::Paperclip, size: 11 }
-                                span { class: "name", "{name}" }
-                            }
-                        }
-                    }
-                }
+                Attachments { attachments: steer.shown() }
             }
             div { class: "steer-note",
                 span { "Sends once the turn stops" }

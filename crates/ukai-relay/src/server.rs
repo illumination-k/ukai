@@ -98,6 +98,9 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         .merge(crate::checkout::router(
             cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
             review.clone(),
+            // What the user attaches, next to the previews: this relay's,
+            // and out of the checkout.
+            previews.with_file_name("attachments"),
         ))
         .merge(crate::review::router(review.clone()))
         .merge(crate::ports::router(crate::ports::Ports {

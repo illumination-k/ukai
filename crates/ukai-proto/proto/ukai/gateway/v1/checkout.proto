@@ -18,6 +18,10 @@ service Files {
   // or reopening it; answered with the review as it is now. ABORTED with
   // what is wrong when it is refused.
   rpc Annotate(AnnotateRequest) returns (Review);
+  // A file the user attached to a prompt, put in the pod (outside the
+  // checkout) for the agent to read; answered with its path there.
+  // INVALID_ARGUMENT for a file that is too large or has no name.
+  rpc Upload(UploadRequest) returns (Uploaded);
 }
 
 // With the gateway's token, which already lets its holder have the agent
@@ -141,4 +145,17 @@ message AnnotateRequest {
   string id = 3;
   optional string reply = 4;
   optional bool resolved = 5;
+}
+
+message UploadRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  // The file's name; only its last component is kept.
+  string name = 3;
+  bytes content = 4;
+}
+
+message Uploaded {
+  // The file's absolute path in the pod.
+  string path = 1;
 }

@@ -398,6 +398,11 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         matches!(diffed, Err(CheckoutError::NotRunning)),
         "{diffed:?}"
     );
+    let uploaded = checkout.upload("a.pdf", b"%PDF".to_vec()).await;
+    assert!(
+        matches!(uploaded, Err(CheckoutError::NotRunning)),
+        "{uploaded:?}"
+    );
     let annotated = checkout
         .annotate(ukai_acp::review::AnnotateRequest {
             id: "a1".into(),

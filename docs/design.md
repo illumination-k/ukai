@@ -170,7 +170,9 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
   `PromptCaps` を見て決める（`ukai_core::attachment`）: 画像は `image`（8 MiB まで、非対応なら添付を断る）、
   `embeddedContext` があれば 256 KiB 以下の UTF-8 テキストは `resource` に埋め込み、それ以外は `resource_link`
-  （`file://` URI。ベースラインなので全エージェントが受ける）。
+  （`file://` URI。ベースラインなので全エージェントが受ける）。gateway のエージェントは手元のファイルを
+  読めないので、リンクになるはずのファイルは先に Pod へアップロードし（`Checkout::upload`、16 MiB まで）、
+  その写しをリンクする。`session/load` で再生されるユーザー発言の画像は `UserImage`（`data:` URL）で運ぶ。
   ACP のスキーマ変更（v2 への移行など）の影響をこの境界で吸収する。
 
 実装上の注意（SDK `agent-client-protocol` 3.3）:
@@ -301,6 +303,9 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   結果を、`GET /diff?base=branch|uncommitted` で checkout の差分を出す（`checkout`。後述「`@` と `!`」
   「checkout の差分」）。中身は `ukai_acp::checkout` の `list_files` / `run` / `diff` で、手元のエージェントで
   アプリが使うものと同じ。差分を出せない checkout（git のリポジトリでない）には 422 と理由を返す。
+  `POST /upload?name=…` はユーザーが prompt に添付したファイル（本文）を relay の一時ディレクトリ
+  （checkout の外。1 件ごとのディレクトリに元の名前で）に置き、そのパスを返す（`store_upload`。名前の
+  ないものは 422、16 MiB を超えるものは 413）。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
 - クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
 
@@ -332,7 +337,8 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
 - checkout のファイル一覧・差分とユーザーのコマンドを `Files.List`・`Files.Diff`・`Commands.Run` で中継する
   （relay の `/files`・`/diff`・`/run`。後述「`@` と `!`」「checkout の差分」）。エージェントのレビューへの
   ユーザーの返信と解決は `Files.Annotate`（relay の `POST /review`）。relay の 422 は ABORTED にして理由を
-  そのまま返す。ワークスペースの名指しとトークン、Pod を起こさないこと（FAILED_PRECONDITION）は
+  そのまま返す。添付ファイルは `Files.Upload`（relay の `POST /upload`）で Pod に置く（大きすぎる・名前が
+  ないものは INVALID_ARGUMENT。この service だけ受信メッセージの上限を 16 MiB 強に上げる）。ワークスペースの名指しとトークン、Pod を起こさないこと（FAILED_PRECONDITION）は
   `Ports.List` と同じ。`Commands.Run` を許すトークンは、エージェントに prompt でコマンドを走らせることも
   スケジュールでコマンドを登録することもすでにできるので、できることは増えない。
 - スケジュール（後述「スケジュール」）を `ukai.gateway.v1.Schedules` で持ち、自分で発火する。
@@ -869,8 +875,9 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
     - 手元のエージェントには relay の MCP サーバーが付かないので、まだ書けない。
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと貼り付け、📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。貼り付けはクリップボードを `arboard` で読み、Finder などでコピーしたファイルか、文字を伴わない
-  画像（スクリーンショット）を PNG にして添える。文字があれば web view の通常の貼り付けに任せる。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。ユーザー発言には
-  添付のファイル名を出す。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
+  画像（スクリーンショット）を PNG にして添える。文字があれば web view の通常の貼り付けに任せる。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。gateway のエージェントへは、
+  リンクになるファイルを添付した時点で Pod にアップロードする（その間はチップに「Uploading」と出し、送信は待たせる）。
+  ユーザー発言には添付した画像そのものと、それ以外のファイル名を出す（再生された履歴の画像も同じ）。下書き・添付・レビューコメントは pane のセッションを繋ぎ直しても残る。
 - **過去のセッション（hermes に倣う）。** エージェントが `sessionCapabilities.list` を持つと、agent pane のヘッダに
   時計のボタンを出す。開くと `session/list`（pane のプロジェクトの cwd で絞り、`nextCursor` を 10 ページまで追う）で
   pane 以外のセッションを更新日時の新しい順に並べ、選ぶとその id を pane に記録して `session/load` / `session/resume`
