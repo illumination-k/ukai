@@ -578,9 +578,13 @@ p0 = "マージ不可（壊れる・危ない）"
 
 `[review]` の説明は 1 行 200 文字まで、見えない文字は不可。タグは小文字・数字・`-` の 32 文字まで。
 
-環境変数 `UKAI_REPORT_DIRS`（`PATH` と同じ区切り、プロジェクトルート相対）があれば、そのディレクトリを
-`reports.dirs` に足す（`ukai_config::load_layered`。外に出る指定は同じく検証エラー）。`ukai.toml` を持たない
-リポジトリでも、Pod のイメージや `gateway.toml` のエージェントの `env` でレポートを出せるようにするため。
+`[reports]` は環境変数でも決められる（`ukai_config::load_layered`）。エージェントを動かす側の都合を
+対象リポジトリに入れずに済むよう、Pod のイメージや `gateway.toml` のエージェントの `env` で設定するため。
+`ukai.toml` がなくても、これだけで足りる。
+
+- `UKAI_REPORT_DIRS` … `reports.dirs` に足す（`PATH` と同じ区切り、プロジェクトルート相対。外に出る指定は同じく検証エラー）。
+- `UKAI_REPORT_GLOBS` … `reports.globs` を置き換える（`PATH` と同じ区切り。不正な glob は検証エラー）。
+- `UKAI_REPORT_ALLOW_NETWORK` … `reports.allow_network` を置き換える（`true` / `false` / `1` / `0`）。
 
 `[layouts]` / `[commands]` のような配置の宣言は意図的に持たない（未知のキーとして拒否する）。
 
