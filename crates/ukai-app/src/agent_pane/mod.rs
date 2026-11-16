@@ -41,6 +41,28 @@ pub struct AgentSession {
     dictation: Rc<DictationOwner>,
 }
 
+#[cfg(test)]
+impl AgentSession {
+    /// A session nothing is connected to, showing `transcript`.
+    pub fn detached(transcript: Transcript, unread: bool) -> Self {
+        let composer = Composer::new();
+        Self {
+            handle: None,
+            transcript: Signal::new_in_scope(transcript, ScopeId::APP),
+            composer,
+            checkout: None,
+            unread: Signal::new_in_scope(unread, ScopeId::APP),
+            dictation: Rc::new(DictationOwner(composer.dictation)),
+        }
+    }
+
+    /// What the session shows, for a test to play the agent: it writes here
+    /// what the session's events would have made of it.
+    pub fn transcript(&self) -> Signal<Transcript> {
+        self.transcript
+    }
+}
+
 /// What the user is putting together for the next prompt. It outlives a
 /// reconnect of the pane's session.
 #[derive(Clone, Copy, PartialEq)]
@@ -205,3 +227,6 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

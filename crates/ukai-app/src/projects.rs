@@ -70,6 +70,35 @@ pub struct AppSignals {
 }
 
 impl AppSignals {
+    /// The state of an app that just started with `projects`, their
+    /// `configs`, and the `layout` and `folds` it had when it last quit.
+    /// Call it where signals can be made: while a component renders.
+    pub fn new(
+        projects: Projects,
+        configs: HashMap<ProjectId, Result<Config, String>>,
+        layout: Layout,
+        folds: Folds,
+    ) -> Self {
+        Self {
+            projects: Signal::new(projects),
+            configs: Signal::new(configs),
+            gateways: Signal::new(HashMap::new()),
+            layout: Signal::new(layout),
+            sessions: Signal::new(HashMap::new()),
+            reports: Signal::new(HashMap::new()),
+            ports: Signal::new(HashMap::new()),
+            schedules: Signal::new(HashMap::new()),
+            knowledge: Signal::new(HashMap::new()),
+            folds: Signal::new(folds),
+            palette: Signal::new(false),
+            drag: Signal::new(None),
+            schedule_names: Signal::new(HashMap::new()),
+            schedule_revision: Signal::new(0),
+            knowledge_revision: Signal::new(0),
+            editing_notes: Signal::new(HashSet::new()),
+        }
+    }
+
     /// Whether something of the DOM is drawn over the panes, so the native
     /// views of reports and browser panes hide.
     pub fn covered(&self) -> bool {

@@ -550,6 +550,7 @@ fn AgentRow(agent: OpenAgent, depth: u8) -> Element {
     rsx! {
         div {
             class,
+            "data-pane": "{pane}",
             style: "--depth: {depth}",
             title: "{hint}",
             onclick: move |_| layout.write().focus(pane),

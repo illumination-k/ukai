@@ -29,5 +29,8 @@ ukai-voice = { workspace = true }
 uuid = { workspace = true }
 webbrowser = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true

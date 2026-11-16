@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::use_wry_event_handler;
@@ -37,24 +37,7 @@ pub fn App() -> Element {
                 )
             })
             .collect::<HashMap<_, _>>();
-        AppSignals {
-            projects: Signal::new(state.projects),
-            configs: Signal::new(configs),
-            gateways: Signal::new(HashMap::new()),
-            layout: Signal::new(state.layout),
-            sessions: Signal::new(HashMap::new()),
-            reports: Signal::new(HashMap::new()),
-            ports: Signal::new(HashMap::new()),
-            schedules: Signal::new(HashMap::new()),
-            knowledge: Signal::new(HashMap::new()),
-            folds: Signal::new(state.sidebar),
-            palette: Signal::new(false),
-            drag: Signal::new(None),
-            schedule_names: Signal::new(HashMap::new()),
-            schedule_revision: Signal::new(0),
-            knowledge_revision: Signal::new(0),
-            editing_notes: Signal::new(HashSet::new()),
-        }
+        AppSignals::new(state.projects, configs, state.layout, state.sidebar)
     });
     use_hook(|| {
         let restored: Vec<_> = app.configs.peek().keys().cloned().collect();
@@ -72,12 +55,6 @@ pub fn App() -> Element {
         app.folds,
     );
 
-    // Whatever pane the user is looking at has nothing unread: the focused
-    // one, once focus moves to it or the window comes back to the front.
-    use_effect(move || {
-        let focused = app.layout.read().focused();
-        mark_read(app.sessions, focused);
-    });
     use_wry_event_handler(move |event, _| {
         if let Event::WindowEvent {
             event: WindowEvent::Focused(true),
@@ -88,12 +65,31 @@ pub fn App() -> Element {
         }
     });
 
-    let shortcuts = use_context_provider(|| Shortcuts::load(&paths));
+    use_context_provider(|| Shortcuts::load(&paths));
     use_context_provider(|| Voice::load(&paths));
-    let palette = app.palette;
 
     rsx! {
         document::Stylesheet { href: MAIN_CSS }
+        Shell {}
+    }
+}
+
+/// Everything the window shows, from the state and settings [`App`]
+/// provides. Nothing here asks for the window, so tests mount it as it is.
+#[component]
+pub fn Shell() -> Element {
+    let app = use_context::<AppSignals>();
+    let shortcuts = use_context::<Shortcuts>();
+    let palette = app.palette;
+
+    // Whatever pane the user is looking at has nothing unread: the focused
+    // one, once focus moves to it or the window comes back to the front.
+    use_effect(move || {
+        let focused = app.layout.read().focused();
+        mark_read(app.sessions, focused);
+    });
+
+    rsx! {
         div {
             class: "shell",
             tabindex: "0",
@@ -110,3 +106,6 @@ pub fn App() -> Element {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;
