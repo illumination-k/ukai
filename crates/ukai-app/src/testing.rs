@@ -17,8 +17,8 @@ use dioxus::dioxus_core::WriteMutations;
 use dioxus::html::geometry::{ClientPoint, Coordinates, ElementPoint, PagePoint, ScreenPoint};
 use dioxus::html::input_data::{MouseButton, MouseButtonSet};
 use dioxus::html::{
-    PlatformEventData, SerializedHtmlEventConverter, SerializedKeyboardData, SerializedMouseData,
-    set_event_converter,
+    PlatformEventData, SerializedFormData, SerializedHtmlEventConverter, SerializedKeyboardData,
+    SerializedMouseData, set_event_converter,
 };
 use dioxus::prelude::*;
 
@@ -62,6 +62,8 @@ pub struct Dom {
     nodes: Vec<NodeData>,
     ids: HashMap<usize, usize>,
     stack: Vec<usize>,
+    /// How many mutations were written so far.
+    edits: usize,
 }
 
 impl Default for Dom {
@@ -80,6 +82,7 @@ impl Default for Dom {
             nodes: vec![root],
             ids: HashMap::from([(0, 0)]),
             stack: Vec::new(),
+            edits: 0,
         }
     }
 }
@@ -185,18 +188,25 @@ impl Dom {
     /// events they listen to, and text. Two documents that read the same
     /// show the same and react to the same.
     pub fn html(&self) -> String {
+        self.html_without(|_, _| false)
+    }
+
+    /// [`Self::html`] without the elements `skipped` picks, and what is
+    /// under them.
+    pub fn html_without(&self, skipped: impl Fn(&Dom, NodeRef) -> bool) -> String {
         let mut out = String::new();
         for child in &self.nodes[0].children {
-            self.write(*child, &mut out);
+            self.write(*child, &skipped, &mut out);
         }
         out
     }
 
-    fn write(&self, index: usize, out: &mut String) {
+    fn write(&self, index: usize, skipped: &impl Fn(&Dom, NodeRef) -> bool, out: &mut String) {
         let node = &self.nodes[index];
         match &node.kind {
             Kind::Placeholder => {}
             Kind::Text(text) => out.push_str(text),
+            Kind::Element { .. } if skipped(self, NodeRef(index)) => {}
             Kind::Element {
                 tag,
                 attributes,
@@ -211,7 +221,7 @@ impl Dom {
                 }
                 out.push('>');
                 for child in &node.children {
-                    self.write(*child, out);
+                    self.write(*child, skipped, out);
                 }
                 let _ = write!(out, "</{tag}>");
             }
@@ -318,8 +328,16 @@ impl Dom {
         })
     }
 
+    /// Take the `count` nodes on top of the stack to put them somewhere.
+    /// One that is in the document already moves: it leaves where it was.
     fn pop(&mut self, count: usize) -> Vec<usize> {
-        self.stack.split_off(self.stack.len() - count)
+        let nodes = self.stack.split_off(self.stack.len() - count);
+        for node in &nodes {
+            if self.nodes[*node].parent.is_some() {
+                self.detach(*node);
+            }
+        }
+        nodes
     }
 
     fn detach(&mut self, index: usize) -> (usize, usize) {
@@ -367,6 +385,7 @@ fn attribute_key(name: &str, namespace: Option<&str>) -> String {
 
 impl WriteMutations for Dom {
     fn append_children(&mut self, id: ElementId, m: usize) {
+        self.edits += 1;
         let nodes = self.pop(m);
         let parent = self.known(id);
         let end = self.nodes[parent].children.len();
@@ -374,29 +393,34 @@ impl WriteMutations for Dom {
     }
 
     fn assign_node_id(&mut self, path: &'static [u8], id: ElementId) {
+        self.edits += 1;
         let node = self.at_path(path);
         self.identify(node, id);
     }
 
     fn create_placeholder(&mut self, id: ElementId) {
+        self.edits += 1;
         let node = self.add(Kind::Placeholder);
         self.identify(node, id);
         self.stack.push(node);
     }
 
     fn create_text_node(&mut self, value: &str, id: ElementId) {
+        self.edits += 1;
         let node = self.add(Kind::Text(value.to_owned()));
         self.identify(node, id);
         self.stack.push(node);
     }
 
     fn load_template(&mut self, template: Template, index: usize, id: ElementId) {
+        self.edits += 1;
         let node = self.build(&template.roots[index]);
         self.identify(node, id);
         self.stack.push(node);
     }
 
     fn replace_node_with(&mut self, id: ElementId, m: usize) {
+        self.edits += 1;
         let nodes = self.pop(m);
         let old = self.known(id);
         let (parent, position) = self.detach(old);
@@ -404,6 +428,7 @@ impl WriteMutations for Dom {
     }
 
     fn replace_placeholder_with_nodes(&mut self, path: &'static [u8], m: usize) {
+        self.edits += 1;
         let nodes = self.pop(m);
         let old = self.at_path(path);
         let (parent, position) = self.detach(old);
@@ -411,12 +436,14 @@ impl WriteMutations for Dom {
     }
 
     fn insert_nodes_after(&mut self, id: ElementId, m: usize) {
+        self.edits += 1;
         let nodes = self.pop(m);
         let (parent, position) = self.position(self.known(id));
         self.insert(parent, position + 1, nodes);
     }
 
     fn insert_nodes_before(&mut self, id: ElementId, m: usize) {
+        self.edits += 1;
         let nodes = self.pop(m);
         let (parent, position) = self.position(self.known(id));
         self.insert(parent, position, nodes);
@@ -429,6 +456,7 @@ impl WriteMutations for Dom {
         value: &AttributeValue,
         id: ElementId,
     ) {
+        self.edits += 1;
         let node = self.known(id);
         let Kind::Element { attributes, .. } = &mut self.nodes[node].kind else {
             panic!("an attribute set on what is not an element");
@@ -451,11 +479,13 @@ impl WriteMutations for Dom {
     }
 
     fn set_node_text(&mut self, value: &str, id: ElementId) {
+        self.edits += 1;
         let node = self.known(id);
         self.nodes[node].kind = Kind::Text(value.to_owned());
     }
 
     fn create_event_listener(&mut self, name: &'static str, id: ElementId) {
+        self.edits += 1;
         let node = self.known(id);
         if let Kind::Element { listeners, .. } = &mut self.nodes[node].kind {
             listeners.insert(name);
@@ -463,6 +493,7 @@ impl WriteMutations for Dom {
     }
 
     fn remove_event_listener(&mut self, name: &'static str, id: ElementId) {
+        self.edits += 1;
         let node = self.known(id);
         if let Kind::Element { listeners, .. } = &mut self.nodes[node].kind {
             listeners.remove(name);
@@ -470,11 +501,13 @@ impl WriteMutations for Dom {
     }
 
     fn remove_node(&mut self, id: ElementId) {
+        self.edits += 1;
         let node = self.known(id);
         self.detach(node);
     }
 
     fn push_root(&mut self, id: ElementId) {
+        self.edits += 1;
         let node = self.known(id);
         self.stack.push(node);
     }
@@ -495,10 +528,18 @@ pub struct KeyPress {
     pub composing: bool,
 }
 
+/// How many renders in a row may each change the screen before it counts
+/// as never settling.
+const RENDERS: usize = 32;
+
 /// A component tree rendered into a [`Dom`], with the user's hands on it.
 pub struct Screen {
     vdom: VirtualDom,
     pub dom: Dom,
+    /// What components that sleep or spawn find when they look for tokio.
+    /// Nothing drives it, so no timer fires and no task runs: the screen
+    /// changes only by what the test does.
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Screen {
@@ -506,22 +547,41 @@ impl Screen {
     pub fn new(mut vdom: VirtualDom) -> Self {
         static CONVERTER: Once = Once::new();
         CONVERTER.call_once(|| set_event_converter(Box::new(SerializedHtmlEventConverter)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap_or_else(|error| panic!("no tokio runtime: {error}"));
         let mut dom = Dom::default();
-        vdom.rebuild(&mut dom);
-        let mut screen = Self { vdom, dom };
+        {
+            let _tokio = runtime.enter();
+            vdom.rebuild(&mut dom);
+        }
+        let mut screen = Self { vdom, dom, runtime };
         screen.render();
         screen
     }
 
-    /// Show whatever changed since the last render.
+    /// Show whatever changed since the last render. An effect runs once
+    /// the render it follows is done, and what it changes takes another,
+    /// as the app's event loop would give it; so this renders until a
+    /// render changes nothing.
     pub fn render(&mut self) {
-        self.vdom.render_immediate(&mut self.dom);
-        assert!(self.dom.stack.is_empty(), "nodes left unplaced");
+        let _tokio = self.runtime.enter();
+        for _ in 0..RENDERS {
+            let before = self.dom.edits;
+            self.vdom.render_immediate(&mut self.dom);
+            assert!(self.dom.stack.is_empty(), "nodes left unplaced");
+            if self.dom.edits == before {
+                return;
+            }
+        }
+        panic!("the screen keeps changing after {RENDERS} renders");
     }
 
     /// Run `f` where the root component's signals and contexts can be read
     /// and written.
     pub fn with<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _tokio = self.runtime.enter();
         self.vdom.in_scope(ScopeId::APP, f)
     }
 
@@ -538,9 +598,11 @@ impl Screen {
             return false;
         };
         let data: Rc<dyn Any> = Rc::new(data);
+        let tokio = self.runtime.enter();
         self.vdom
             .runtime()
             .handle_event(event, Event::new(data, bubbles), id);
+        drop(tokio);
         self.render();
         true
     }
@@ -597,6 +659,12 @@ impl Screen {
     /// element end with.
     pub fn click(&mut self, node: NodeRef) -> bool {
         self.mouse(node, "click", Some(MouseButton::Primary), None, (0.0, 0.0))
+    }
+
+    /// The text field `node` now holds `value`, as after typing or deleting.
+    pub fn input(&mut self, node: NodeRef, value: &str) -> bool {
+        let data = SerializedFormData::new(value.to_owned(), Vec::new());
+        self.send(node, "input", true, PlatformEventData::new(Box::new(data)))
     }
 
     pub fn double_click(&mut self, node: NodeRef) -> bool {

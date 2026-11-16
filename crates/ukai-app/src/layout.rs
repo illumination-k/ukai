@@ -35,7 +35,7 @@ const DIVIDER: f64 = 1.0;
 
 /// How far the pointer goes with a pane header held before it is a drag
 /// rather than a click, in CSS pixels.
-const DRAG_THRESHOLD: f64 = 4.0;
+pub(crate) const DRAG_THRESHOLD: f64 = 4.0;
 
 /// Something the user is dragging in the pane area.
 #[derive(Debug, Clone, PartialEq)]
@@ -939,6 +939,3 @@ fn Picker(pane: PaneId) -> Element {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
