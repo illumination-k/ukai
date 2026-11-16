@@ -172,3 +172,6 @@ fn element(kind: &Kind, children: &[Node]) -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

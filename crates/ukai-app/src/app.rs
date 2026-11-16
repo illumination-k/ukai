@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::use_wry_event_handler;
@@ -37,24 +37,7 @@ pub fn App() -> Element {
                 )
             })
             .collect::<HashMap<_, _>>();
-        AppSignals {
-            projects: Signal::new(state.projects),
-            configs: Signal::new(configs),
-            gateways: Signal::new(HashMap::new()),
-            layout: Signal::new(state.layout),
-            sessions: Signal::new(HashMap::new()),
-            reports: Signal::new(HashMap::new()),
-            ports: Signal::new(HashMap::new()),
-            schedules: Signal::new(HashMap::new()),
-            knowledge: Signal::new(HashMap::new()),
-            folds: Signal::new(state.sidebar),
-            palette: Signal::new(false),
-            drag: Signal::new(None),
-            schedule_names: Signal::new(HashMap::new()),
-            schedule_revision: Signal::new(0),
-            knowledge_revision: Signal::new(0),
-            editing_notes: Signal::new(HashSet::new()),
-        }
+        AppSignals::new(state.projects, configs, state.layout, state.sidebar)
     });
     use_hook(|| {
         let restored: Vec<_> = app.configs.peek().keys().cloned().collect();

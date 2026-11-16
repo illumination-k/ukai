@@ -10097,6 +10097,7 @@ dependencies = [
  "dioxus",
  "image",
  "notify-rust",
+ "proptest",
  "rfd",
  "time",
  "tokio",

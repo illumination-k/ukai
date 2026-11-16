@@ -600,6 +600,7 @@ fn PaneView(pane: PaneId) -> Element {
     rsx! {
         section {
             class,
+            "data-pane": "{pane}",
             onmousedown: move |_| {
                 if layout.peek().focused() != pane {
                     layout.write().focus(pane);
@@ -938,3 +939,6 @@ fn Picker(pane: PaneId) -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
