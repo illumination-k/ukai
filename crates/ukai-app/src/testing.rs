@@ -561,17 +561,24 @@ impl Screen {
         screen
     }
 
-    /// Show whatever changed since the last render. An effect runs once
-    /// the render it follows is done, and what it changes takes another,
-    /// as the app's event loop would give it; so this renders until a
-    /// render changes nothing.
+    /// Show whatever changed since the last render. An effect runs after
+    /// the render it follows, and what it changes takes another, as the
+    /// app's event loop would give it; so this renders until two renders in
+    /// a row change nothing: the first may only have run the effects that
+    /// were waiting.
     pub fn render(&mut self) {
         let _tokio = self.runtime.enter();
+        let mut quiet = 0;
         for _ in 0..RENDERS {
             let before = self.dom.edits;
             self.vdom.render_immediate(&mut self.dom);
             assert!(self.dom.stack.is_empty(), "nodes left unplaced");
-            if self.dom.edits == before {
+            quiet = if self.dom.edits == before {
+                quiet + 1
+            } else {
+                0
+            };
+            if quiet == 2 {
                 return;
             }
         }

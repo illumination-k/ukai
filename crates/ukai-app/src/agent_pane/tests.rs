@@ -18,7 +18,7 @@ use ukai_acp::{
 };
 use ukai_core::keymap::Platform;
 use ukai_core::sidebar::Folds;
-use ukai_core::{Connection, Entry, Layout, PaneContent, Projects, Status, Transcript};
+use ukai_core::{Entry, Layout, PaneContent, Projects, Status, Transcript};
 
 use super::AgentSession;
 use crate::app::tests::{Bench, Seed, config, root_of};
@@ -629,18 +629,12 @@ proptest! {
         for step in steps {
             match step {
                 Step::Event(mut event) => {
-                    // An agent numbers its requests one after another, and
-                    // starts over on a connection that replaces a lost one.
-                    let reconnecting = screen.with(|| {
-                        matches!(transcript.peek().connection, Connection::Reconnecting { .. })
-                    });
-                    match &mut event {
-                        SessionEvent::PermissionRequested { id, .. } => {
-                            *id = next_request;
-                            next_request += 1;
-                        }
-                        SessionEvent::Ready { .. } if reconnecting => next_request = 0,
-                        _ => {}
+                    // Requests are numbered one after another for as
+                    // long as the session lasts, over every connection it
+                    // goes through (`ukai_acp` sees to that).
+                    if let SessionEvent::PermissionRequested { id, .. } = &mut event {
+                        *id = next_request;
+                        next_request += 1;
                     }
                     screen.with(|| transcript.write().apply(event));
                     screen.render();
