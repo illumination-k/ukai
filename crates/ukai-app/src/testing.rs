@@ -26,6 +26,13 @@ use dioxus::prelude::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeRef(usize);
 
+/// One thing an element holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    Element(NodeRef),
+    Text(String),
+}
+
 #[derive(Debug)]
 enum Kind {
     Element {
@@ -89,6 +96,19 @@ impl Dom {
             .iter()
             .filter(|child| matches!(self.nodes[**child].kind, Kind::Element { .. }))
             .map(|child| NodeRef(*child))
+            .collect()
+    }
+
+    /// What `node` holds, in order: its elements and its text.
+    pub fn content(&self, node: NodeRef) -> Vec<Content> {
+        self.nodes[node.0]
+            .children
+            .iter()
+            .filter_map(|child| match &self.nodes[*child].kind {
+                Kind::Element { .. } => Some(Content::Element(NodeRef(*child))),
+                Kind::Text(text) => Some(Content::Text(text.clone())),
+                Kind::Placeholder => None,
+            })
             .collect()
     }
 
@@ -218,6 +238,15 @@ impl Dom {
             at = data.parent;
         }
         None
+    }
+
+    /// `node`'s own id, if it listens to `event` itself.
+    fn own_listener(&self, node: NodeRef, event: &str) -> Option<ElementId> {
+        let data = &self.nodes[node.0];
+        match (&data.kind, data.id) {
+            (Kind::Element { listeners, .. }, Some(id)) if listeners.contains(event) => Some(id),
+            _ => None,
+        }
     }
 
     fn add(&mut self, kind: Kind) -> usize {
@@ -462,6 +491,8 @@ pub struct KeyPress {
     pub key: &'static str,
     /// The DOM's `code`: `"KeyD"`, `"Tab"`.
     pub code: &'static str,
+    /// Whether an input method is taking the key for a composition.
+    pub composing: bool,
 }
 
 /// A component tree rendered into a [`Dom`], with the user's hands on it.
@@ -494,16 +525,22 @@ impl Screen {
         self.vdom.in_scope(ScopeId::APP, f)
     }
 
-    /// Send `event` to `node`, where it bubbles from as in a browser, and
-    /// render what it changed. Returns whether anything was listening.
-    fn send(&mut self, node: NodeRef, event: &str, data: PlatformEventData) -> bool {
-        let Some(id) = self.dom.listener(node, event) else {
+    /// Send `event` to `node` and render what it changed: from there up as
+    /// in a browser if it `bubbles`, to `node` alone if not. Returns whether
+    /// anything was listening.
+    fn send(&mut self, node: NodeRef, event: &str, bubbles: bool, data: PlatformEventData) -> bool {
+        let id = if bubbles {
+            self.dom.listener(node, event)
+        } else {
+            self.dom.own_listener(node, event)
+        };
+        let Some(id) = id else {
             return false;
         };
         let data: Rc<dyn Any> = Rc::new(data);
         self.vdom
             .runtime()
-            .handle_event(event, Event::new(data, true), id);
+            .handle_event(event, Event::new(data, bubbles), id);
         self.render();
         true
     }
@@ -513,12 +550,12 @@ impl Screen {
         node: NodeRef,
         event: &str,
         button: Option<MouseButton>,
-        held: bool,
+        held: Option<MouseButton>,
         at: (f64, f64),
     ) -> bool {
         let mut buttons = MouseButtonSet::empty();
-        if held {
-            buttons |= MouseButton::Primary;
+        if let Some(held) = held {
+            buttons |= held;
         }
         let coordinates = Coordinates::new(
             ScreenPoint::new(at.0, at.1),
@@ -527,28 +564,39 @@ impl Screen {
             PagePoint::new(at.0, at.1),
         );
         let data = SerializedMouseData::new(button, buttons, coordinates, Modifiers::empty());
-        self.send(node, event, PlatformEventData::new(Box::new(data)))
+        let bubbles = !matches!(event, "mouseenter" | "mouseleave");
+        self.send(node, event, bubbles, PlatformEventData::new(Box::new(data)))
     }
 
-    /// Press the primary button on `node` with the pointer at `at`.
-    pub fn mouse_down(&mut self, node: NodeRef, at: (f64, f64)) -> bool {
-        self.mouse(node, "mousedown", Some(MouseButton::Primary), true, at)
+    /// Press `button` on `node` with the pointer at `at`.
+    pub fn mouse_down(&mut self, node: NodeRef, button: MouseButton, at: (f64, f64)) -> bool {
+        self.mouse(node, "mousedown", Some(button), Some(button), at)
     }
 
-    /// Move the pointer over `node` to `at`, with the primary button `held`
-    /// or not.
-    pub fn mouse_move(&mut self, node: NodeRef, held: bool, at: (f64, f64)) -> bool {
+    /// Move the pointer over `node` to `at`, with `held` down if any.
+    pub fn mouse_move(&mut self, node: NodeRef, held: Option<MouseButton>, at: (f64, f64)) -> bool {
         self.mouse(node, "mousemove", None, held, at)
     }
 
-    /// Release the primary button over `node`.
-    pub fn mouse_up(&mut self, node: NodeRef, at: (f64, f64)) -> bool {
-        self.mouse(node, "mouseup", Some(MouseButton::Primary), false, at)
+    /// Release `button` over `node`.
+    pub fn mouse_up(&mut self, node: NodeRef, button: MouseButton, at: (f64, f64)) -> bool {
+        self.mouse(node, "mouseup", Some(button), None, at)
     }
 
-    /// The `click` a press and release on the same element end with.
+    /// The pointer comes over `node`, with `held` down if any.
+    pub fn mouse_enter(&mut self, node: NodeRef, held: Option<MouseButton>) -> bool {
+        self.mouse(node, "mouseenter", None, held, (0.0, 0.0))
+    }
+
+    /// The pointer leaves `node`, with `held` down if any.
+    pub fn mouse_leave(&mut self, node: NodeRef, held: Option<MouseButton>) -> bool {
+        self.mouse(node, "mouseleave", None, held, (0.0, 0.0))
+    }
+
+    /// The `click` a press and release of the primary button on the same
+    /// element end with.
     pub fn click(&mut self, node: NodeRef) -> bool {
-        self.mouse(node, "click", Some(MouseButton::Primary), false, (0.0, 0.0))
+        self.mouse(node, "click", Some(MouseButton::Primary), None, (0.0, 0.0))
     }
 
     pub fn double_click(&mut self, node: NodeRef) -> bool {
@@ -556,7 +604,7 @@ impl Screen {
             node,
             "dblclick",
             Some(MouseButton::Primary),
-            false,
+            None,
             (0.0, 0.0),
         )
     }
@@ -573,12 +621,27 @@ impl Screen {
                 modifiers |= modifier;
             }
         }
-        let key = Key::from_str(press.key)
-            .unwrap_or_else(|_| panic!("`{}` is not a DOM key value", press.key));
+        let key = if press.key.chars().count() == 1 {
+            Key::Character(press.key.to_owned())
+        } else {
+            Key::from_str(press.key)
+                .unwrap_or_else(|_| panic!("`{}` is not a DOM key value", press.key))
+        };
         let code = Code::from_str(press.code)
             .unwrap_or_else(|_| panic!("`{}` is not a DOM key code", press.code));
-        let data =
-            SerializedKeyboardData::new(key, code, Location::Standard, false, modifiers, false);
-        self.send(node, "keydown", PlatformEventData::new(Box::new(data)))
+        let data = SerializedKeyboardData::new(
+            key,
+            code,
+            Location::Standard,
+            false,
+            modifiers,
+            press.composing,
+        );
+        self.send(
+            node,
+            "keydown",
+            true,
+            PlatformEventData::new(Box::new(data)),
+        )
     }
 }
