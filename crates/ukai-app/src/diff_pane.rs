@@ -19,9 +19,10 @@ use ukai_acp::review::{AnnotateRequest, Annotation, Priority, Review};
 use ukai_acp::{Checkout, PaneWorkspace, WorkspaceScope};
 use ukai_core::annotation::{self, Filter, Placement};
 use ukai_core::diff::{self, ChangeKind, FileChange};
+use ukai_core::review::PULL_REQUEST_PROMPT;
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource, sidebar};
 
-use crate::agent_pane::review_of;
+use crate::agent_pane::{agent_idle, ask, review_of};
 use crate::diff_view::{AnnotationCard, DiffLines, LineNote, NoteActions};
 use crate::follow::poll;
 use crate::icons::{Icon, Svg};
@@ -192,6 +193,10 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
         .as_ref()
         .and_then(|path| files.iter().find(|file| file.path == *path))
         .cloned();
+    // "Create PR" asks the target, which has to be between turns to take it.
+    let idle = target.is_some_and(|pane| agent_idle(app.sessions, pane));
+    let nothing_to_send =
+        base() == DiffBase::Branch && matches!(current, Read::Loaded { .. }) && files.is_empty();
     let agent_review: Option<Review> = match &current {
         Read::Loaded { diff, .. } => diff.review.clone(),
         _ => None,
@@ -335,6 +340,18 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
                     }
                 }
                 if let (Some(pane), Some(name)) = (target, target_name.clone()) {
+                    button {
+                        class: "small primary",
+                        disabled: !idle || nothing_to_send,
+                        title: if nothing_to_send { "The branch has no changes to open a pull request for".to_owned() } else if idle { format!("Ask {name} to commit, push, and open a pull request") } else { format!("{name} is not ready for a message; wait for its turn to end") },
+                        onclick: move |_| {
+                            if ask(app.sessions, pane, PULL_REQUEST_PROMPT) {
+                                let mut layout = app.layout;
+                                layout.write().focus(pane);
+                            }
+                        },
+                        "Create PR"
+                    }
                     button {
                         class: "small outline",
                         title: "Go to {name}, where the comments are sent with your next message",
