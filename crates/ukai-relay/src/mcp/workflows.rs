@@ -48,9 +48,8 @@ pub(super) fn instructions(root: &Path) -> String {
          \x20   .build();\n\
          }};\n\
          ```\n\n\
-         `{RUN_WORKFLOW}` takes the script as `script` (its source; it can import `ayaito` \
-         and `zod` only), as `path` (a file of this checkout, which imports what the \
-         checkout has installed), or a declared flow's name as `flow`, with `input` as the \
+         `{RUN_WORKFLOW}` takes the script as `script` (its source, kept outside the checkout: it \
+         imports packages, not the checkout's files), as `path` (a file of this checkout), or a declared flow's name as `flow`, with `input` as the \
          flow's input. It returns at once with a run id; `{READ_WORKFLOW}` tells how the run \
          and each node are doing and, once it is over, its output — call it again until \
          the run has ended. `{STOP_WORKFLOW}` cancels a run. Starting a run again under its \

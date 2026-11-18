@@ -24,6 +24,7 @@ mod schedules;
 mod shortcuts;
 mod sidebar;
 mod voice;
+mod workflows;
 
 use std::path::{Path, PathBuf};
 

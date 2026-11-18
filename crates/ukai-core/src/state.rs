@@ -243,6 +243,24 @@ mod tests {
     }
 
     #[test]
+    fn a_workflows_pane_round_trips() {
+        let mut projects = Projects::default();
+        let project = projects.add(Path::new("/work/ukai"));
+        let content = PaneContent::Workflows {
+            project,
+            place: ReportSource::Agent {
+                agent: "cloud".into(),
+                workspace: None,
+            },
+        };
+        let json =
+            r#"{"kind":"workflows","project":"p1","place":{"kind":"agent","agent":"cloud"}}"#;
+        assert_eq!(serde_json::to_string(&content).ok().as_deref(), Some(json));
+        let back: Result<PaneContent, _> = serde_json::from_str(json);
+        assert_eq!(back.ok(), Some(content));
+    }
+
+    #[test]
     fn a_report_of_a_gateway_workspace_round_trips() {
         let mut projects = Projects::default();
         let project = projects.add(Path::new("/work/ukai"));

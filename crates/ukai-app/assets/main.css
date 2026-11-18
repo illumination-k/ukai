@@ -3211,3 +3211,119 @@ button.outline.danger {
   color: var(--muted-fg);
   font-size: 11px;
 }
+
+/* ---- workflows ---------------------------------------------------------- */
+
+.workflows .schedule-panel {
+  max-width: 760px;
+}
+
+.workflows-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.workflow-flow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.workflow-flow-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.workflow-flow-text .name {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.workflow-problem {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.workflow-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workflow-run:hover {
+  background: var(--hover);
+}
+
+.workflow-run.selected {
+  border-color: var(--border);
+  background: var(--selected);
+}
+
+.workflow-run .name {
+  flex: none;
+  max-width: 50%;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.workflow-nodes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workflow-node {
+  padding: 4px 0 4px calc(var(--depth) * 18px);
+  font-size: 12px;
+}
+
+.workflow-node-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.workflow-node .name {
+  flex: none;
+  max-width: 50%;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.workflow-kind {
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-fg);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.workflow-kind.agent {
+  border-color: var(--ring);
+  color: var(--fg);
+}
+
+.workflow-node-detail {
+  display: -webkit-box;
+  margin: 0 0 0 15px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}

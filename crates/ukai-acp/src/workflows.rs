@@ -688,8 +688,11 @@ mod tests {
 
     #[test]
     fn a_run_survives_json() {
-        let json = serde_json::to_string(&run()).unwrap();
-        assert_eq!(serde_json::from_str::<Run>(&json).unwrap(), run());
+        let json = serde_json::to_string(&run()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            serde_json::from_str::<Run>(&json).unwrap_or_else(|e| panic!("{e}")),
+            run()
+        );
     }
 
     #[test]

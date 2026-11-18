@@ -239,6 +239,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
+    use ukai_proto::gateway::v1::workflows_server::WorkflowsServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
 
     let web = GrpcWebLayer::new();
@@ -263,7 +264,8 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
         ),
     )
     .add_service(web.layer(CommandsServer::new(api.clone())))
-    .add_service(web.layer(SchedulesServer::new(api)))
+    .add_service(web.layer(SchedulesServer::new(api.clone())))
+    .add_service(web.layer(WorkflowsServer::new(api)))
     .prepare()
     .into_axum_router()
 }

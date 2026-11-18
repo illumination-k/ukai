@@ -11,12 +11,31 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [flowFile, runsDir, runId] = process.argv.slice(2);
 const dir = join(runsDir, runId);
+
+// A `node_modules` to fall back on for what a flow imports and its own
+// directories do not have: the image's ayaito, for a checkout without one
+// and for the scripts the relay keeps outside the checkout.
+const fallback = process.env.UKAI_WORKFLOW_MODULES;
+const fromFallback = fallback && pathToFileURL(join(fallback, "_")).href;
+if (fromFallback) {
+  registerHooks({
+    resolve(specifier, context, next) {
+      try {
+        return next(specifier, context);
+      } catch (error) {
+        const bare = !/^(\.|\/|file:|node:|data:)/.test(specifier);
+        if (!bare || error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+        return next(specifier, { ...context, parentURL: fromFallback });
+      }
+    },
+  });
+}
 
 /** The node whose agent call is being made: set as each node starts. */
 const current = new AsyncLocalStorage();
@@ -97,11 +116,22 @@ export function outline(node, depth = 0, edge = undefined, out = []) {
 async function load() {
   let ayaito;
   try {
-    ayaito = await import(pathToFileURL(createRequire(flowFile).resolve("ayaito")).href);
+    // The copy the flow itself imports, so that its Stop and OutputError are
+    // the ones this run tells by class: the flow's own first, then the fallback.
+    let found;
+    try {
+      found = pathToFileURL(createRequire(flowFile).resolve("ayaito")).href;
+    } catch {
+      found = "ayaito";
+    }
+    ayaito = await import(found);
   } catch (error) {
     throw new Error(
-      `ayaito is not installed where ${flowFile} can import it (run \`npm install ayaito zod\` in the checkout): ${error.message}`,
+      `ayaito is not installed where ${flowFile} can import it. Run \`npm install ayaito zod\` in the checkout. (${error.message})`,
     );
+  }
+  if (typeof ayaito.defineRuntime !== "function") {
+    throw new Error("ayaito 0.2 or later is needed: the one installed has no defineRuntime");
   }
   const runtime = ayaito.defineRuntime({
     name: "ukai",

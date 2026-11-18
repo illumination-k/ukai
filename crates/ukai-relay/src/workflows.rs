@@ -49,9 +49,11 @@ use ukai_core::workflow::{
 /// The runner, written next to the runs when the first one starts.
 const RUNNER: &str = include_str!("workflows/runner.mjs");
 
-/// Names a `node_modules` directory holding ayaito, for scripts the agent
-/// passes as source: they are kept out of the checkout, where they could
-/// import nothing. Without it, the checkout's own `node_modules` is used.
+/// Names a `node_modules` directory holding ayaito (an image's, say), which
+/// a flow's imports fall back on: for a checkout that has not installed it,
+/// and for the scripts the agent passes as source, which are kept out of
+/// the checkout and could import nothing. Without it, those scripts fall
+/// back on the checkout's own `node_modules`.
 pub const MODULES_ENV: &str = "UKAI_WORKFLOW_MODULES";
 
 /// How long a turn that is being abandoned may take to end.
@@ -274,7 +276,6 @@ impl Workflows {
         std::fs::create_dir_all(&scripts)
             .and_then(|()| std::fs::write(&file, script))
             .map_err(|error| vec![cannot("keep the script", &error)])?;
-        self.link_modules()?;
         Ok((format!("script {id}"), file))
     }
 
@@ -291,23 +292,6 @@ impl Workflows {
         } else {
             Err(vec![format!("`{path}` is not a file in the checkout")])
         }
-    }
-
-    /// Lets the scripts kept here import ayaito: `node_modules` next to
-    /// them points at [`MODULES_ENV`]'s directory, or else the checkout's.
-    fn link_modules(&self) -> Result<(), Vec<String>> {
-        let link = self.0.home.join("node_modules");
-        let target = std::env::var_os(MODULES_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.0.root.join("node_modules"));
-        if !target.join("ayaito").is_dir() {
-            return Err(vec![format!(
-                "ayaito is not installed in {}: run `npm install ayaito zod` in the checkout, or start a script of the checkout by `path`",
-                target.display()
-            )]);
-        }
-        let _ = std::fs::remove_file(&link);
-        symlink(&target, &link).map_err(|error| vec![cannot("reach ayaito", &error)])
     }
 
     fn new_id(&self) -> String {
@@ -341,6 +325,12 @@ impl Workflows {
             .env(
                 "UKAI_WORKFLOW_URL",
                 format!("http://127.0.0.1:{}", self.0.port),
+            )
+            .env(
+                MODULES_ENV,
+                std::env::var_os(MODULES_ENV)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.0.root.join("node_modules")),
             )
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
@@ -667,16 +657,6 @@ fn now() -> u64 {
 
 fn cannot(what: &str, error: &std::io::Error) -> String {
     format!("cannot {what}: {error}")
-}
-
-#[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(not(unix))]
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
 }
 
 /// Kills the run and, where the relay can, everything it started.

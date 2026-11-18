@@ -124,7 +124,8 @@ fn tells_a_runs_state(
 #[test]
 fn reads_an_outcome() {
     let outcome: Outcome =
-        serde_json::from_str("{\"status\":\"done\",\"output\":{\"topic\":\"x\"}}").unwrap();
+        serde_json::from_str("{\"status\":\"done\",\"output\":{\"topic\":\"x\"}}")
+            .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         outcome,
         Outcome::Done {
@@ -380,4 +381,13 @@ fn describes_a_run() {
         describe(&run),
         "Run r1 of weekly: failed (boom)\n- weekly: failed\n  - write: failed, 2 runs, 1 retries (boom)\n\nPrinted:\ntrace\n"
     );
+}
+
+#[rstest]
+#[case::millis(7, "7ms")]
+#[case::seconds(1563, "1s")]
+#[case::minutes(125_000, "2m 5s")]
+#[case::hours(3_725_000, "1h 2m")]
+fn tells_how_long(#[case] ms: u64, #[case] expected: &str) {
+    assert_eq!(took(ms), expected);
 }

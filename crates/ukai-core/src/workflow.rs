@@ -338,6 +338,17 @@ pub fn node_label(state: NodeState) -> &'static str {
     }
 }
 
+/// How long `ms` milliseconds are, as a run or a node shows it.
+pub fn took(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        0 if ms < 1000 => format!("{ms}ms"),
+        ..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
 /// `run` as text, for the agent that asked about it: its state, each node
 /// under its parent, and the output and what it printed.
 pub fn describe(run: &Run) -> String {
