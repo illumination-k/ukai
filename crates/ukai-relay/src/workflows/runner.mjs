@@ -139,7 +139,8 @@ async function load() {
       const answer = await turn(
         {
           run: runId,
-          node: current.getStore(),
+          // ayaito names the node once it passes that on; before, the context does.
+          node: request.node ?? current.getStore(),
           prompt: compose(request),
           model: request.model,
           access: request.access,

@@ -427,8 +427,8 @@ gateway は、エージェントごとに cron で **コマンド**か **prompt*
   ノードを描く順に、深さ付きで）、`events.jsonl` とチェックポイント（ayaito の `FsStore`）、`sessions.jsonl`
   （どのノードがどのセッションで動いたか）、`result.json`（終わり方）、`log.txt`（出力）。置き場所は relay の
   一時ディレクトリ（checkout の外。Pod と同じだけ持つ）で、新しい順に 30 件残す。
-  - ノードと呼び出しの対応は、ノードの開始イベントをそのノードの非同期コンテキスト（`AsyncLocalStorage`）に
-    残して取る。ayaito が呼び出しにノード名を渡すようになれば置き換える。
+  - ノードと呼び出しの対応は、ayaito が呼び出しに入れるノード名（`AgentRequest.node`）で取る。それを渡さない
+    版の ayaito では、ノードの開始イベントをそのノードの非同期コンテキスト（`AsyncLocalStorage`）に残して取る。
   - `ayaito` と `zod` は checkout の `node_modules` から読む。そこになければ（とくに checkout の外に置く
     `script` のスクリプトでは）`UKAI_WORKFLOW_MODULES` の `node_modules` に解決し直す（`module.registerHooks`）。
     イメージに入れておけば checkout を汚さない。
