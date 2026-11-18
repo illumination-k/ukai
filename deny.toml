@@ -52,15 +52,16 @@ ignore = [
   # tests alone use; the service itself is a client and links none of it.
   # Keep `cargo tree -p ukai-knowledge -e normal -i <crate>` empty for each.
   { id = "RUSTSEC-2025-0141", reason = "bincode via surrealmx (surrealdb kv-mem, tests only)" },
-  { id = "RUSTSEC-2026-0194", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
-  { id = "RUSTSEC-2026-0195", reason = "quick-xml via object_store (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2023-0071", reason = "rsa via jsonwebtoken (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via jsonwebtoken (surrealdb-core, tests only)" },
-  # Fixed in surrealdb 4, which needs the server (v3.3.4 in deploy/gateway) moved to 4 too.
-  { id = "RUSTSEC-2026-0454", reason = "reblessive via surrealdb-core (surrealdb kv-mem, tests only)" },
   # wasm32 only: surrealdb's timers there. Keep `cargo tree --workspace -i pin-utils`
   # empty, which it is for every target we build.
   { id = "RUSTSEC-2026-0441", reason = "pin-utils via wasmtimer (surrealdb, wasm32 only)" },
+  # Unmaintained, not vulnerable, and linked into the services: our own code
+  # keeps time with `time`, but surrealdb's types and object_store (the
+  # gateway's reports copy) are built on chrono. Drop these once both move off.
+  { id = "RUSTSEC-2026-0543", reason = "chrono via surrealdb and object_store" },
+  { id = "RUSTSEC-2026-0542", reason = "humantime via object_store and surrealdb-rpc" },
 ]
 
 [sources]
