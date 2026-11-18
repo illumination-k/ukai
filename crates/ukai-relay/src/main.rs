@@ -70,6 +70,10 @@ enum Mode {
         /// The file the relay keeps the agent's review of its changes in.
         #[arg(long)]
         review: Option<PathBuf>,
+        /// The relay itself (`http://127.0.0.1:<port>`), which runs the
+        /// workflows the agent starts.
+        #[arg(long)]
+        workflows: Option<String>,
     },
 }
 
@@ -115,6 +119,7 @@ async fn serve(cli: Cli) -> ExitCode {
         gateway,
         previews,
         review,
+        workflows,
     }) = cli.mode
     {
         let notes = match (gateway, &token) {
@@ -129,7 +134,9 @@ async fn serve(cli: Cli) -> ExitCode {
             }
             _ => None,
         };
-        return match ukai_relay::mcp::serve(&root, notes, previews, review).await {
+        let workflows =
+            workflows.map(|url| ukai_acp::workflows::RelayWorkflows::at(url, token.clone()));
+        return match ukai_relay::mcp::serve(&root, notes, previews, review, workflows).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "mcp server failed");
@@ -199,7 +206,7 @@ mod tests {
     fn mcp_needs_no_agent() {
         let cli = parse(&["mcp", "--root", "/workspace"]).unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None }) if root == std::path::Path::new("/workspace"))
+            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None, workflows: None }) if root == std::path::Path::new("/workspace"))
         );
         let cli =
             parse(&["mcp", "--gateway", "http://ukai-gateway"]).unwrap_or_else(|e| panic!("{e}"));

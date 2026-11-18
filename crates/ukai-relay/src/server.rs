@@ -89,6 +89,14 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // The agent's review of its changes, written through the MCP server
     // and read with the diff; see `crate::review`.
     let review = previews.with_file_name("review.json");
+    // Flows run here, their agent nodes as sessions on this `/acp`; see
+    // `crate::workflows`.
+    let workflows = crate::workflows::Workflows::new(
+        cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        previews.with_file_name("workflows"),
+        options.listen.port(),
+        options.token.clone(),
+    );
     let token = options.token.clone().map(Arc::<str>::from);
     let router = server
         .into_router()
@@ -103,6 +111,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
             previews.with_file_name("attachments"),
         ))
         .merge(crate::review::router(review.clone()))
+        .merge(crate::workflows::router(workflows.clone()))
         .merge(crate::ports::router(crate::ports::Ports {
             own: options.listen.port(),
             previews: previews.clone(),
@@ -164,6 +173,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 gateway.as_ref(),
                 Some(&previews),
                 Some(&review),
+                Some(&crate::mcp::Relay {
+                    url: format!("http://127.0.0.1:{}", options.listen.port()),
+                    token: options.token.clone(),
+                }),
             )]
         }
         (_, Err(error)) => {
@@ -210,7 +223,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 }
             },
             _ = tick.tick() => {
-                if hub.busy() {
+                // A flow between two agent nodes has no turn running.
+                if hub.busy() || workflows.busy() {
                     idle_since = None;
                 } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= options.idle_timeout {
                     tracing::info!(idle = ?options.idle_timeout, "idle, exiting");

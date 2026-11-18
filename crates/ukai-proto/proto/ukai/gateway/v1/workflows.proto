@@ -1,0 +1,129 @@
+// ayaito flows run in a workspace's pod by its relay: the ones the
+// checkout declares, and the runs the user or the agent started.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+
+// With the gateway's token. A workspace that is not running is
+// FAILED_PRECONDITION: none of these starts a pod. What the relay refuses
+// (an unknown flow, an input that is not JSON) is ABORTED with its reason.
+service Workflows {
+  rpc List(ListWorkflowsRequest) returns (WorkflowListing);
+  rpc Get(WorkflowRunRequest) returns (WorkflowRun);
+  rpc Start(StartWorkflowRequest) returns (WorkflowRunSummary);
+  rpc Stop(WorkflowRunRequest) returns (WorkflowRunSummary);
+}
+
+message ListWorkflowsRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+}
+
+message WorkflowRunRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  string run = 3;
+}
+
+message StartWorkflowRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  // A flow the checkout's `ukai.toml` declares.
+  string flow = 3;
+  // The flow's input, as JSON; empty for none.
+  string input = 4;
+  // A run to resume under its id, instead of a new one.
+  optional string run = 5;
+}
+
+message WorkflowListing {
+  repeated DeclaredWorkflow flows = 1;
+  // Newest first.
+  repeated WorkflowRunSummary runs = 2;
+}
+
+message DeclaredWorkflow {
+  string name = 1;
+  // Relative to the checkout.
+  string path = 2;
+  optional string description = 3;
+}
+
+enum WorkflowLauncher {
+  WORKFLOW_LAUNCHER_USER = 0;
+  WORKFLOW_LAUNCHER_AGENT = 1;
+}
+
+enum WorkflowRunState {
+  WORKFLOW_RUN_STATE_RUNNING = 0;
+  WORKFLOW_RUN_STATE_DONE = 1;
+  // A node ended the run early, as a success.
+  WORKFLOW_RUN_STATE_STOPPED = 2;
+  WORKFLOW_RUN_STATE_FAILED = 3;
+  WORKFLOW_RUN_STATE_CANCELLED = 4;
+  // The relay restarted while it ran.
+  WORKFLOW_RUN_STATE_INTERRUPTED = 5;
+}
+
+message WorkflowRunSummary {
+  string id = 1;
+  // The declared flow's name, or the script's path.
+  string flow = 2;
+  WorkflowLauncher by = 3;
+  // Milliseconds since the epoch by the pod's clock.
+  uint64 started = 4;
+  optional uint64 finished = 5;
+  WorkflowRunState state = 6;
+  // Why it stopped or failed.
+  optional string detail = 7;
+}
+
+message WorkflowRun {
+  WorkflowRunSummary summary = 1;
+  // As JSON.
+  string input = 2;
+  // The flow's nodes in the order they are drawn, each under its parent.
+  repeated WorkflowNode nodes = 3;
+  // As JSON; possibly cut short.
+  optional string output = 4;
+  // The end of what the run printed.
+  string log = 5;
+}
+
+enum WorkflowNodeKind {
+  WORKFLOW_NODE_KIND_FN = 0;
+  WORKFLOW_NODE_KIND_AGENT = 1;
+  WORKFLOW_NODE_KIND_FLOW = 2;
+  WORKFLOW_NODE_KIND_PARALLEL = 3;
+  WORKFLOW_NODE_KIND_UNTIL = 4;
+}
+
+enum WorkflowNodeState {
+  WORKFLOW_NODE_STATE_PENDING = 0;
+  WORKFLOW_NODE_STATE_RUNNING = 1;
+  WORKFLOW_NODE_STATE_DONE = 2;
+  WORKFLOW_NODE_STATE_SKIPPED = 3;
+  WORKFLOW_NODE_STATE_STOPPED = 4;
+  WORKFLOW_NODE_STATE_FAILED = 5;
+}
+
+message WorkflowNode {
+  string name = 1;
+  WorkflowNodeKind kind = 2;
+  // How deep under the flow it is drawn; the flow itself is 0.
+  uint32 depth = 3;
+  // What the edge into it does (`map`, its middleware), if anything.
+  optional string edge = 4;
+  WorkflowNodeState state = 5;
+  // How many times it started.
+  uint32 runs = 6;
+  uint32 retries = 7;
+  // How long its last finished run took.
+  optional uint64 ms = 8;
+  // Its error, or why it was skipped or stopped the run.
+  optional string detail = 9;
+  // The sessions its agent calls ran in, oldest first.
+  repeated string sessions = 10;
+}

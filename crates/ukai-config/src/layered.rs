@@ -39,8 +39,8 @@ fn dir(
 }
 
 /// Overlay `project` on `user`: agents and gateways are replaced by id, project
-/// permission rules are consulted before the user's, project, report, and
-/// review settings come from the project, and keybindings and voice from the
+/// permission rules are consulted before the user's, project, report,
+/// review, and workflow settings come from the project, and keybindings and voice from the
 /// user.
 pub fn merge(user: Config, project: Config) -> Config {
     let mut agents = user.agents;
@@ -56,6 +56,7 @@ pub fn merge(user: Config, project: Config) -> Config {
         permissions,
         reports: project.reports,
         review: project.review,
+        workflows: project.workflows,
         keybindings: user.keybindings,
         voice: user.voice,
     }

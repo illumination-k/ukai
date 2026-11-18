@@ -17,3 +17,4 @@ pub mod ports;
 pub mod reports;
 pub mod review;
 pub mod server;
+pub mod workflows;

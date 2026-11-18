@@ -221,6 +221,7 @@ fn server_entry_runs_the_relay_for_the_checkout() {
             Path::new("/workspace"),
             None,
             None,
+            None,
             None
         ),
         json!({
@@ -243,6 +244,7 @@ fn server_entry_hands_the_gateway_on_with_the_token_in_the_environment() {
             Path::new("/relay/ukai-relay"),
             Path::new("/workspace"),
             Some(&gateway),
+            None,
             None,
             None
         ),
@@ -932,6 +934,7 @@ fn server_entry_hands_on_the_previews_and_review_files() {
         None,
         Some(Path::new("/tmp/r/previews.jsonl")),
         Some(Path::new("/tmp/r/review.json")),
+        None,
     );
     assert_eq!(
         entry["args"],
@@ -1109,4 +1112,146 @@ fn refuses_a_review_with_every_problem_named() {
         json!({ "id": "a1", "body": "hi" }),
     );
     assert!(failed, "{text}");
+}
+
+#[rstest]
+#[case::alone(None, json!([{ "name": "UKAI_RELAY_TOKEN", "value": "relay" }]))]
+#[case::with_gateway(
+    Some(Gateway { url: "http://ukai-gateway".into(), token: "relay".into() }),
+    json!([{ "name": "UKAI_RELAY_TOKEN", "value": "relay" }])
+)]
+fn server_entry_hands_on_the_relay_for_workflows(
+    #[case] gateway: Option<Gateway>,
+    #[case] env: Value,
+) {
+    let relay = Relay {
+        url: "http://127.0.0.1:7070".into(),
+        token: Some("relay".into()),
+    };
+    let entry = server_entry(
+        Path::new("/relay/ukai-relay"),
+        Path::new("/workspace"),
+        gateway.as_ref(),
+        None,
+        None,
+        Some(&relay),
+    );
+    let args = entry["args"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        args[args.len() - 2..],
+        [json!("--workflows"), json!("http://127.0.0.1:7070")]
+    );
+    assert_eq!(entry["env"], env);
+}
+
+/// A relay's workflows for the checkout at `root`, served on a port of
+/// their own, and the client the MCP server reaches them with.
+async fn relay_workflows(root: &Path, home: &Path) -> RelayWorkflows {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let workflows = crate::workflows::Workflows::new(root.to_owned(), home.to_owned(), port, None);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, crate::workflows::router(workflows)).await;
+    });
+    RelayWorkflows::at(format!("http://127.0.0.1:{port}"), None)
+}
+
+async fn workflow_tool(
+    session: &Session,
+    root: &Path,
+    name: &str,
+    arguments: Value,
+) -> (String, bool) {
+    let message = req(
+        "tools/call",
+        json!({ "name": name, "arguments": arguments }),
+    );
+    let reply = handle(root, None::<&Fake>, session, &message)
+        .await
+        .unwrap();
+    (
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        reply["result"]["isError"].as_bool().unwrap_or_default(),
+    )
+}
+
+#[tokio::test]
+async fn workflow_tools_are_offered_with_a_relay_only() {
+    let dir = checkout(Some(
+        "[workflows.audit]\npath = \"flows/audit.ts\"\ndescription = \"Audits a directory\"\n",
+    ));
+    let home = tempfile::tempdir().unwrap();
+    let names = |reply: Value| -> Vec<String> {
+        reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let list = req("tools/list", json!({}));
+    let without = handle(dir.path(), None::<&Fake>, &session(), &list)
+        .await
+        .unwrap();
+    assert!(!names(without).iter().any(|name| name.contains("workflow")));
+
+    let session = session().with_workflows(relay_workflows(dir.path(), home.path()).await);
+    let with = handle(dir.path(), None::<&Fake>, &session, &list)
+        .await
+        .unwrap();
+    let offered = names(with);
+    for tool in [
+        "run_workflow",
+        "read_workflow",
+        "list_workflows",
+        "stop_workflow",
+    ] {
+        assert!(offered.iter().any(|name| name == tool), "{tool} is offered");
+    }
+
+    let init = req("initialize", json!({}));
+    let reply = handle(dir.path(), None::<&Fake>, &session, &init)
+        .await
+        .unwrap();
+    let instructions = reply["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("Workflows:"));
+    assert!(instructions.contains("- `audit` (flows/audit.ts): Audits a directory"));
+}
+
+#[tokio::test]
+async fn workflow_tools_reach_the_relay() {
+    let dir = checkout(Some("[workflows.audit]\npath = \"flows/audit.ts\"\n"));
+    let home = tempfile::tempdir().unwrap();
+    let session = session().with_workflows(relay_workflows(dir.path(), home.path()).await);
+
+    let (listing, failed) = workflow_tool(&session, dir.path(), "list_workflows", json!({})).await;
+    assert!(!failed);
+    assert_eq!(
+        listing,
+        "Declared workflows:\n- audit (flows/audit.ts)\n\nRuns, newest first:\n(none)\n"
+    );
+
+    // The declared script is not there: the relay's refusal comes back.
+    let (refusal, failed) = workflow_tool(
+        &session,
+        dir.path(),
+        "run_workflow",
+        json!({ "flow": "audit" }),
+    )
+    .await;
+    assert!(failed);
+    assert_eq!(refusal, "`flows/audit.ts` is not a file in the checkout");
+
+    let (missing, failed) = workflow_tool(
+        &session,
+        dir.path(),
+        "read_workflow",
+        json!({ "run": "nope" }),
+    )
+    .await;
+    assert!(failed);
+    assert_eq!(missing, "no such run; list_workflows lists the runs kept");
 }
