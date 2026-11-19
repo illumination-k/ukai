@@ -108,6 +108,15 @@ pub fn review_prompt(comments: &[ReviewComment], message: &str) -> String {
     prompt
 }
 
+/// What the diff pane's "Create PR" sends the agent working in the checkout.
+/// The agent opens the pull request itself: it has the checkout, and in a
+/// gateway's pod the credentials too.
+pub const PULL_REQUEST_PROMPT: &str = "Open a pull request for the changes in this checkout: \
+commit whatever is uncommitted (on a new branch if this is the default branch), push the branch, \
+and create the pull request, following the repository's pull request template if it has one. \
+If the branch already has an open pull request, push to it and update its description instead. \
+Reply with the pull request's URL.";
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

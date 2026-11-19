@@ -165,6 +165,37 @@ pub fn review_of(app: AppSignals, pane: PaneId) -> Option<Signal<Vec<ReviewComme
         .map(|session| session.composer.review)
 }
 
+/// Whether agent `pane` is connected and between turns, so [`ask`] reaches it.
+pub fn agent_idle(sessions: Sessions, pane: PaneId) -> bool {
+    sessions.read().get(&pane).is_some_and(|session| {
+        session.handle.is_some() && session.transcript.read().status == Status::Idle
+    })
+}
+
+/// Send `text` to agent `pane` as a turn of its own, leaving what its
+/// composer holds for the user's next message. `false` when the agent is not
+/// there to take it: not connected, or in a turn.
+pub fn ask(sessions: Sessions, pane: PaneId, text: &str) -> bool {
+    let Some(session) = sessions.peek().get(&pane).cloned() else {
+        return false;
+    };
+    let mut transcript = session.transcript;
+    if transcript.peek().status != Status::Idle {
+        return false;
+    }
+    let prompt = ukai_core::shell::prompt(&transcript.peek().unsent_shell(), text);
+    let delivered = session.handle.is_some_and(|handle| {
+        handle.prompt(ukai_acp::Prompt {
+            text: prompt,
+            attachments: Vec::new(),
+        })
+    });
+    if delivered {
+        transcript.write().push_prompt(text, Vec::new());
+    }
+    delivered
+}
+
 /// `has_saved_session`: the pane recorded an ACP session in an earlier run,
 /// so connecting offers to resume it.
 #[component]
