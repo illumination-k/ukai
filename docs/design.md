@@ -276,7 +276,8 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
 - エージェントからの要求（パーミッション）はクライアントが来るまで保留し、つないできたクライアントに出し直す。
 - クライアントの `cwd` はクライアントの手元のパスなので、`session/new` / `load` / `resume` の `cwd` は
   relay の作業ディレクトリに置き換える。エージェントには `fs/*` も terminal も広告しない。
-- `/acp` の隣に、作業ディレクトリのレポートを読み取り専用で出す（`reports`）。`GET /reports` が
+- `/acp` の隣に、作業ディレクトリのレポートを出す（`reports`。読み取りと、ユーザーが頼んだ 1 件の削除。
+  後述「削除」）。`GET /reports` が
   checkout の `ukai.toml` の `[reports]` に合うファイルを新しい順に（更新時刻付きで）返し、
   `GET /reports/files/<プロジェクト相対パス>` が 1 ファイルを `ETag` 付きで返す。配信範囲は
   `ukai_core::report::ReportTree` が `reports.dirs` の中だけに限る（`..`・エンコードされた `..`・
@@ -677,6 +678,21 @@ gateway のコピー）にしかないので、手元に持ってくる手段は
 ファイルだけで、相対参照している画像や CSS は付かない。失敗はネイティブのダイアログで出す（子 WebView は
 DOM より手前に出るため）。
 
+### 削除
+
+pane のヘッダーとサイドバーの行（hover）のゴミ箱で、レポートを消す（`report_pane.rs` の `delete_report`）。
+エージェントが書いたものをユーザーが片付ける手段で、確認はネイティブのダイアログ（保存の失敗と同じ理由）。
+消すのはそのファイルだけで、読み込んでいる画像や CSS は他のレポートのものでもありうるので残す。消したら
+それを表示している pane を閉じ、一覧からはすぐ外す（次の走査を待たない）。
+
+- 手元: `ReportFile::remove`。開けるもの（プロジェクト内の HTML / 画像）だけが消せる。
+- gateway のワークスペース: `DELETE /agents/<id>/reports/files/<path>`（`ReportsEndpoint::remove`）。
+  gateway は Pod が動いていれば relay の同じパスに `DELETE` を中継し、コピー（S3）からも消す
+  （`Archive::remove`。ファイルと manifest の両方）。Pod が動いていなければコピーだけを消し、Pod は起こさない。
+  コピーもなければ 410。
+- relay が消してよいものは `ReportTree::remove` が決める: `reports.dirs` の中（symlink を解決したうえで）の
+  HTML / 画像だけで、それ以外は 403。symlink は名前のほうを消し、指す先は残す。
+
 ### gateway エージェントのレポート
 
 gateway のエージェントは Pod の中に書くので、手元を走査しても見つからない。代わりに gateway に聞く
@@ -709,7 +725,7 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
   版（`ETag`）が変わったファイルだけを取り直して置き、消えたファイルは消す。restart で Pod を止める前にも
   1 回取る。relay の idle 終了はターンが終わって `idle_timeout` 経ってからなので、その間に追いつく。
 - **資格情報は gateway だけが持つ。** Pod には渡さない（エージェントの書いたものは信頼しないので、
-  バケットを触らせない。git の資格情報をサイドカーだけが持つのと同じ考え）。relay の読み取り専用の
+  バケットを触らせない。git の資格情報をサイドカーだけが持つのと同じ考え）。relay の読み取りの
   ルートを経由するので、配信範囲（`reports.dirs` の中だけ）も relay の判定のまま。
 - バケットの中は `<ワークスペース id>/manifest.json`（relay の一覧と、コピーした各ファイルの版）と
   `<ワークスペース id>/files/<checkout 相対パス>`（content type 付き）。コピーからの読み出しもパスを

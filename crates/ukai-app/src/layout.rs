@@ -25,7 +25,7 @@ use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
 use crate::ports::{PortPrompt, open_browser};
 use crate::projects::AppSignals;
-use crate::report_pane::{ReportView, download_report, pick_report};
+use crate::report_pane::{ReportView, delete_report, download_report, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
 
@@ -659,6 +659,15 @@ fn PaneView(pane: PaneId) -> Element {
                                 move |_| download_report(app, &project, &path, &source)
                             },
                             Svg { icon: Icon::Download }
+                        }
+                        button {
+                            class: "icon",
+                            title: "Delete this report…",
+                            onclick: {
+                                let (project, path, source) = (project.clone(), path.clone(), source.clone());
+                                move |_| delete_report(app, &project, &path, &source, || {})
+                            },
+                            Svg { icon: Icon::Trash }
                         }
                     }
                     button {

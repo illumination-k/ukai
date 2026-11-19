@@ -414,6 +414,14 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         matches!(annotated, Err(CheckoutError::NotRunning)),
         "{annotated:?}"
     );
+    // Nor does deleting a report: with no pod and no copy of its reports,
+    // there is none, which is what was asked for.
+    let deleted = ukai_acp::ReportsEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has reports"))
+        .remove("/reports/run.html")
+        .await;
+    assert!(deleted.is_ok(), "{deleted:?}");
     // Restarting a workspace with no pod leaves it without one.
     RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
         .unwrap_or_else(|e| panic!("{e}"))

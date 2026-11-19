@@ -29,6 +29,7 @@ pub enum Icon {
     Monitor,
     Diff,
     Download,
+    Trash,
 }
 
 impl Icon {
@@ -75,6 +76,13 @@ impl Icon {
             Self::Cloud => &["M4.5 12.5a3 3 0 0 1-.4-6 4 4 0 0 1 7.7-.9 3.2 3.2 0 0 1-.3 6.9z"],
             Self::Monitor => &["M2.5 3.5h11v7.5h-11z", "M6 13.5h4", "M8 11v2.5"],
             Self::Download => &["M8 2.5v7.5", "M4.5 6.5L8 10l3.5-3.5", "M3 13h10"],
+            Self::Trash => &[
+                "M3 4.5h10",
+                "M6.5 4.5V3h3v1.5",
+                "M4.5 4.5l.5 8.5h6l.5-8.5",
+                "M6.75 7v3.5",
+                "M9.25 7v3.5",
+            ],
             Self::Diff => &["M5 2.5v5", "M2.5 5h5", "M8.5 11h5", "M3.5 13.5l9-9"],
             Self::Globe => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
