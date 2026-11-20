@@ -818,11 +818,17 @@ fn ReportRow(
                         let (project, path, source) = deleted.clone();
                         let local = source.is_project();
                         let mut found = found;
-                        delete_report(app, &project, &path.clone(), &source, move || {
-                            if local {
-                                found.write().retain(|listed| *listed != path);
-                            }
-                        });
+                        delete_report(
+                            app,
+                            &project,
+                            &path.clone(),
+                            &source,
+                            move || {
+                                if local {
+                                    found.write().retain(|listed| *listed != path);
+                                }
+                            },
+                        );
                     },
                     Svg { icon: Icon::Trash }
                 }
