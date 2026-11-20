@@ -15,7 +15,8 @@
 //! them in its pod. Same token, same workspace headers; a report request
 //! never starts a pod. With a bucket ([`archive`]), the gateway keeps a copy
 //! of every running workspace's reports and answers from it once the pod is
-//! gone.
+//! gone. `DELETE /agents/<id>/reports/files/<path>` deletes one report, from
+//! the pod's checkout and from that copy.
 //!
 //! `GET /agents/<id>/forward/<port>` upgrades to a WebSocket carrying one
 //! TCP connection to a port in that workspace's pod, through the pod's
@@ -205,7 +206,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(|| async { "ok" }))
         .route("/agents/{id}/acp", get(connect))
         .route("/agents/{id}/reports", get(reports))
-        .route("/agents/{id}/reports/files/{*path}", get(reports))
+        .route(
+            "/agents/{id}/reports/files/{*path}",
+            get(reports).delete(remove_report),
+        )
         .route("/agents/{id}/forward/{port}", get(forward))
         .with_state(gateway.clone())
         .merge(grpc(gateway.clone()))
@@ -328,6 +332,78 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
+}
+
+/// `DELETE /agents/<id>/reports/files/<path>`: delete one report of the
+/// workspace this client asks for, wherever it is — in the checkout of its
+/// running pod, through the relay, and in the copy the gateway keeps.
+///
+/// As for a read, the workspace is resolved as for `/acp` with the same
+/// token, and no pod is started: a workspace that is not running has only
+/// its copy to delete from. 204 once the report is gone, 404 when there was
+/// none, and the relay's refusal (403) for anything that is not a report.
+async fn remove_report(
+    State(gateway): State<Arc<Gateway>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let target = reports_target(uri.path())
+        .and_then(|(id, suffix)| Some((id, suffix.strip_prefix(ukai_acp::reports::FILES_PATH)?)));
+    let Some((id, path)) = target else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let plan = match workspace_plan(&gateway, &id, &headers) {
+        Ok(plan) => plan,
+        Err(refused) => return refused.into_response(),
+    };
+    let workspace = plan.workspace_id();
+    let running = match access::running_relay(&gateway, &plan).await {
+        Ok(running) => running,
+        Err(denial) => return denial.into_response(),
+    };
+    if running.is_none() && gateway.archive.is_none() {
+        return gone();
+    }
+    let mut status = StatusCode::NOT_FOUND;
+    if let Some(endpoint) = running {
+        let sent = gateway
+            .http
+            .delete(endpoint.reports_url(&format!("{}{path}", ukai_acp::reports::FILES_PATH)))
+            .bearer_auth(&endpoint.token)
+            .timeout(REPORT_TIMEOUT)
+            .send()
+            .await;
+        status = match sent.map(|response| StatusCode::from_u16(response.status().as_u16())) {
+            Ok(Ok(status)) => status,
+            Ok(Err(_)) => StatusCode::BAD_GATEWAY,
+            Err(error) => {
+                tracing::warn!(agent = %id, %error, "cannot delete the workspace's report");
+                StatusCode::BAD_GATEWAY
+            }
+        };
+        // What the relay refuses or cannot do stays in the copy as well.
+        if !status.is_success() && status != StatusCode::NOT_FOUND {
+            return status.into_response();
+        }
+    }
+    if let Some(archive) = &gateway.archive {
+        match archive.remove(workspace, path).await {
+            Ok(true) => status = StatusCode::NO_CONTENT,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(agent = %id, %error, "cannot delete the copy of the workspace's report");
+                // Deleted in the pod, so the next round of copying drops
+                // it; with no pod the copy is all there was.
+                if !status.is_success() {
+                    status = StatusCode::BAD_GATEWAY;
+                }
+            }
+        }
+    }
+    if status.is_success() {
+        tracing::info!(agent = %id, %workspace, "deleted a report");
+    }
+    status.into_response()
 }
 
 /// A report request answered from the copy of a workspace that is not

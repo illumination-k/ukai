@@ -38,7 +38,7 @@ use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource};
 use crate::child_view::{ChildView, use_child_view};
 use crate::follow::{self, Workspace};
 use crate::icons::{Icon, Svg};
-use crate::layout::{launch_target, open_report};
+use crate::layout::{close_pane, launch_target, open_report};
 use crate::projects::{AppSignals, project_context};
 use crate::remote_reports::{self, Listing};
 use crate::schedules::{local_now, when_unix};
@@ -261,6 +261,116 @@ async fn save(source: &Source, target: &Path) -> Result<(), String> {
         }
     };
     std::fs::write(target, body).map_err(|error| format!("{}: {error}", target.display()))
+}
+
+/// Delete a report once the user confirms: the file in the project, or for a
+/// gateway agent's workspace the one in its pod and in the copy the gateway
+/// keeps. Only the file itself goes, not what it loads. The panes showing it
+/// close, and `done` runs, e.g. to take it off a listing before the next
+/// scan does.
+///
+/// Asking and failing are native dialogs: a report's web view is drawn over
+/// the app's DOM.
+pub fn delete_report(
+    app: AppSignals,
+    project: &ProjectId,
+    path: &Path,
+    source: &ReportSource,
+    done: impl FnOnce() + 'static,
+) {
+    let opened = open_source(app, project, path, source);
+    let (project, path, source) = (project.clone(), path.to_owned(), source.clone());
+    spawn(async move {
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(problem) => return cannot_delete(problem).await,
+        };
+        let place = if source.is_project() {
+            "The file is deleted from the project."
+        } else {
+            "It is deleted from the agent's workspace and from the gateway's copy."
+        };
+        let confirmed = rfd::AsyncMessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Delete this report?")
+            .set_description(format!(
+                "{}\n\n{place} This cannot be undone.",
+                path.display()
+            ))
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                DELETE.to_owned(),
+                "Cancel".to_owned(),
+            ))
+            .show()
+            .await;
+        let confirmed = match confirmed {
+            rfd::MessageDialogResult::Ok | rfd::MessageDialogResult::Yes => true,
+            rfd::MessageDialogResult::Custom(button) => button == DELETE,
+            rfd::MessageDialogResult::No | rfd::MessageDialogResult::Cancel => false,
+        };
+        if !confirmed {
+            return;
+        }
+        if let Err(problem) = remove(&opened).await {
+            return cannot_delete(problem).await;
+        }
+        // Nothing below waits: what follows may unmount the component this
+        // runs for, which would stop it halfway.
+        if let Some(workspace) = Workspace::at(&project, &source) {
+            let mut reports = app.reports;
+            if let Some(Listing::Reports(paths) | Listing::Saved { paths, .. }) =
+                reports.write().get_mut(&workspace)
+            {
+                paths.retain(|listed| *listed != path);
+            }
+        }
+        done();
+        let showing: Vec<PaneId> = layout_open_reports(&app.layout.peek(), &project)
+            .into_iter()
+            .filter(|(_, open_path, open_source)| *open_path == path && *open_source == source)
+            .map(|(pane, _, _)| pane)
+            .collect();
+        for pane in showing {
+            close_pane(app, pane);
+        }
+    });
+}
+
+async fn cannot_delete(problem: String) {
+    tracing::warn!(%problem, "cannot delete a report");
+    rfd::AsyncMessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Cannot delete this report")
+        .set_description(problem)
+        .show()
+        .await;
+}
+
+/// The button that confirms deleting a report.
+const DELETE: &str = "Delete";
+
+/// Delete the report `source` names from where it is.
+async fn remove(source: &Source) -> Result<(), String> {
+    match source {
+        Source::Local(report) => report.remove().map_err(|error| error.to_string()),
+        Source::Remote(remote) => remote
+            .endpoint
+            .remove(&report::url_path(&remote.path))
+            .await
+            .map_err(|error| match error {
+                ReportsError::Gone => "the agent's workspace is not running anymore and the \
+                                       gateway kept no copy of its reports"
+                    .to_owned(),
+                ReportsError::Status(403) => {
+                    "this file is outside the workspace's report directories".to_owned()
+                }
+                ReportsError::Status(405) => {
+                    "this gateway, or the relay in its agent image, cannot delete reports yet; update it"
+                        .to_owned()
+                }
+                error => error.to_string(),
+            }),
+    }
 }
 
 /// The element the child web view covers. While `covered` is set something
@@ -627,6 +737,7 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
                             source: place.clone(),
                             open: open.clone(),
                             depth: inner,
+                            found,
                         }
                     }
                 },
@@ -639,6 +750,7 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
                             source: place.clone(),
                             open: open.clone(),
                             depth: inner,
+                            found,
                         }
                     }
                 },
@@ -648,7 +760,8 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
 }
 
 /// One report in the sidebar: focuses the pane already showing it, else
-/// opens it where [`launch_target`] puts it.
+/// opens it where [`launch_target`] puts it. `found` is the scan of this
+/// machine's reports the row may come from, which deleting it takes it off.
 #[component]
 fn ReportRow(
     project: ProjectId,
@@ -656,6 +769,7 @@ fn ReportRow(
     source: ReportSource,
     open: Vec<(PaneId, PathBuf, ReportSource)>,
     depth: u8,
+    found: Signal<Vec<PathBuf>>,
 ) -> Element {
     let app = use_context::<AppSignals>();
     let shown = open
@@ -671,6 +785,7 @@ fn ReportRow(
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
     let saved = (project.clone(), path.clone(), source.clone());
+    let deleted = saved.clone();
 
     rsx! {
         div {
@@ -699,6 +814,28 @@ fn ReportRow(
                         download_report(app, &saved.0, &saved.1, &saved.2);
                     },
                     Svg { icon: Icon::Download }
+                }
+                button {
+                    class: "icon",
+                    title: "Delete…",
+                    onclick: move |event: MouseEvent| {
+                        event.stop_propagation();
+                        let (project, path, source) = deleted.clone();
+                        let local = source.is_project();
+                        let mut found = found;
+                        delete_report(
+                            app,
+                            &project,
+                            &path.clone(),
+                            &source,
+                            move || {
+                                if local {
+                                    found.write().retain(|listed| *listed != path);
+                                }
+                            },
+                        );
+                    },
+                    Svg { icon: Icon::Trash }
                 }
             }
         }

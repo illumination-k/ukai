@@ -12,7 +12,8 @@
 //!
 //! The gateway holds the bucket's credentials and the pods never do: what an
 //! agent writes is untrusted, and copying is the gateway's work, through the
-//! relay's read-only report routes. Anything S3 speaks works — RustFS in
+//! relay's report routes. A report the user deletes goes from the copy too
+//! ([`Archive::remove`]). Anything S3 speaks works — RustFS in
 //! `deploy/gateway`, AWS S3, MinIO — configured with the standard `AWS_*`
 //! variables (`AmazonS3Builder::from_env`) and `UKAI_REPORTS_BUCKET`.
 //!
@@ -262,6 +263,51 @@ impl Archive {
         }))
     }
 
+    /// Delete one report from `workspace`'s copy, by the URL path a report's
+    /// web view asks for it with: the file, and its entry in the manifest,
+    /// so the listing stops offering it. `false` when the copy holds no such
+    /// report — nothing a pane could show is not a report, as for the relay
+    /// (`ukai_core::report::ReportTree::remove`).
+    pub async fn remove(&self, workspace: &str, url_path: &str) -> Result<bool, BoxError> {
+        let Some(path) = requested_path(url_path) else {
+            return Ok(false);
+        };
+        let Some(key) = file_key(workspace, &path) else {
+            return Ok(false);
+        };
+        if ukai_core::report::ReportKind::of(std::path::Path::new(&path)).is_none() {
+            return Ok(false);
+        }
+        // Held across the writes, so two deletions do not each write a
+        // manifest missing only its own report. A round of copying already
+        // under way may still write the report's entry back; the round after
+        // it drops it, the relay no longer naming the file.
+        let mut manifests = self.manifests.lock().await;
+        let mut manifest = match manifests.get(workspace) {
+            Some(manifest) => manifest.clone(),
+            None => match self.read_manifest(workspace).await? {
+                Some(manifest) => manifest,
+                None => return Ok(false),
+            },
+        };
+        if manifest.files.remove(&path).is_none() {
+            return Ok(false);
+        }
+        manifest.listing.retain(|entry| entry.path != path);
+        match self.store.delete(&key).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let body = serde_json::to_vec(&manifest)?;
+        self.store
+            .put(&manifest_key(workspace), PutPayload::from(body))
+            .await?;
+        if let Some(known) = manifests.get_mut(workspace) {
+            *known = manifest;
+        }
+        Ok(true)
+    }
+
     async fn read_manifest(&self, workspace: &str) -> Result<Option<Manifest>, BoxError> {
         match self.store.get(&manifest_key(workspace)).await {
             Ok(found) => Ok(Some(serde_json::from_slice(&found.bytes().await?)?)),
@@ -290,10 +336,16 @@ pub fn file_key(workspace: &str, path: &str) -> Option<Path> {
 /// [`file_key`] of a percent-encoded URL path (`/reports/run%201.html`),
 /// decoded exactly once, so `%2e%2e` is refused as `..` is.
 pub fn requested_key(workspace: &str, url_path: &str) -> Option<Path> {
+    file_key(workspace, &requested_path(url_path)?)
+}
+
+/// The checkout-relative path a percent-encoded URL path names, as the
+/// manifest has it: decoded once, without the leading `/`.
+fn requested_path(url_path: &str) -> Option<String> {
     let decoded = percent_encoding::percent_decode_str(url_path)
         .decode_utf8()
         .ok()?;
-    file_key(workspace, decoded.strip_prefix('/').unwrap_or(&decoded))
+    Some(decoded.strip_prefix('/').unwrap_or(&decoded).to_owned())
 }
 
 /// The relay in a workspace's pod, as a [`Source`], through its read-only
@@ -661,10 +713,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deletes_a_report_from_the_copy() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let archive = Archive::new(store.clone());
+        let relay = Fake::default();
+        relay.write("reports/run 1.html", "v1", "<p>one</p>");
+        relay.write("reports/other.html", "v1", "<p>other</p>");
+        relay.write("reports/data.bin", "v1", "bin");
+        relay.list(&["reports/run 1.html", "reports/other.html"]);
+        sync(&archive, &relay).await;
+        let remove = async |archive: &Archive, url_path: &str| {
+            archive
+                .remove("w1", url_path)
+                .await
+                .unwrap_or_else(|e| panic!("remove: {e}"))
+        };
+        let listed = async |archive: &Archive| {
+            let listing = archive.listing("w1").await.ok().flatten();
+            listing
+                .unwrap_or_default()
+                .reports
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>()
+        };
+
+        assert!(remove(&archive, "/reports/run%201.html").await);
+        assert_eq!(read(&archive, "/reports/run%201.html").await, None);
+        assert_eq!(listed(&archive).await, ["reports/other.html"]);
+        // Gone already, never there, another workspace's, or not a report.
+        assert!(!remove(&archive, "/reports/run%201.html").await);
+        assert!(!remove(&archive, "/reports/nope.html").await);
+        assert!(!remove(&archive, "/reports/../../w2/files/reports/x.html").await);
+        assert!(!remove(&archive, "/reports/data.bin").await);
+        assert!(read(&archive, "/reports/data.bin").await.is_some());
+        assert!(
+            !archive
+                .remove("w2", "/reports/other.html")
+                .await
+                .unwrap_or(true)
+        );
+
+        // A gateway that starts over deletes by the manifest in the bucket,
+        // and the next round of copying does not bring the report back.
+        let restarted = Archive::new(store);
+        assert!(remove(&restarted, "/reports/other.html").await);
+        assert!(listed(&restarted).await.is_empty());
+        relay.remove("reports/run 1.html");
+        relay.remove("reports/other.html");
+        relay.list(&[]);
+        relay.fetched();
+        sync(&restarted, &relay).await;
+        assert!(relay.fetched().is_empty());
+        assert!(listed(&restarted).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_workspace_never_copied_has_no_listing() {
         let archive = Archive::new(Arc::new(InMemory::new()));
         assert_eq!(archive.listing("w1").await.ok().flatten(), None);
         assert_eq!(read(&archive, "/reports/run.html").await, None);
+        assert_eq!(
+            archive.remove("w1", "/reports/run.html").await.ok(),
+            Some(false)
+        );
     }
 
     #[rstest]

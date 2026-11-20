@@ -216,6 +216,15 @@ impl ReportFile {
             .ok()
     }
 
+    /// Delete the report from the project. Only the file itself goes: what
+    /// it loads may be another report's too.
+    pub fn remove(&self) -> Result<(), ReportError> {
+        std::fs::remove_file(&self.file).map_err(|source| ReportError::Io {
+            path: self.file.clone(),
+            source,
+        })
+    }
+
     /// The path (and query) the web view starts at: the page itself, or for
     /// an image a page that fits it to the pane.
     pub fn entry(&self) -> String {
@@ -352,6 +361,40 @@ impl ReportTree {
         match self.resolve(path) {
             Some(file) => Reply::file(&file),
             None => Reply::status(403),
+        }
+    }
+
+    /// Delete the report a project-relative URL path names, answering with
+    /// the status of the request: 204 once it is gone, 403 for anything
+    /// outside the report directories and for a file a pane could not show
+    /// (an asset, a directory), 404 for a file that is not there.
+    ///
+    /// The name asked for is what goes, so a symlink is removed rather than
+    /// the file it points to; where it points is still what decides whether
+    /// it may be.
+    pub fn remove(&self, path: &str) -> u16 {
+        let Some(named) = join(&self.root, path) else {
+            return 403;
+        };
+        let Some(resolved) = self.resolve(path) else {
+            return 403;
+        };
+        // The directory holding the name is resolved too: a missing or
+        // dangling name resolves to itself, wherever its parents lead.
+        let held = named
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_some_and(|parent| self.bases.iter().any(|base| parent.starts_with(base)));
+        if !held && named.parent().is_some_and(Path::exists) {
+            return 403;
+        }
+        if ReportKind::of(&named).is_none() || resolved.is_dir() {
+            return 403;
+        }
+        match std::fs::remove_file(&named) {
+            Ok(()) => 204,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 404,
+            Err(_) => 500,
         }
     }
 

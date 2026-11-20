@@ -332,6 +332,71 @@ fn a_tree_without_report_dirs_serves_nothing() {
     assert_eq!(tree.serve("/reports/2026/run 1.html").status, 403);
 }
 
+#[test]
+fn removes_a_report_and_leaves_what_it_loads() {
+    let root = project();
+    let report = open(&root, "reports/2026/run 1.html");
+    assert!(report.remove().is_ok());
+    assert!(!root.path().join("reports/2026/run 1.html").exists());
+    assert!(root.path().join("reports/img/plot.png").exists());
+    // Gone already: the second time says so.
+    assert!(matches!(report.remove(), Err(ReportError::Io { .. })));
+}
+
+#[rstest]
+#[case::report("/reports/2026/run%201.html", 204, "reports/2026/run 1.html")]
+#[case::image("/reports/img/plot.png", 204, "reports/img/plot.png")]
+#[case::unicode("/reports/%E3%82%B0%E3%83%A9%E3%83%95.svg", 204, "reports/グラフ.svg")]
+#[case::missing("/reports/nope.html", 404, "reports/nope.html")]
+#[case::missing_directory("/reports/none/run.html", 404, "reports/none/run.html")]
+fn a_tree_removes_a_report(#[case] path: &str, #[case] status: u16, #[case] file: &str) {
+    let root = project();
+    assert_eq!(tree(&root, &["reports"]).remove(path), status, "{path}");
+    assert!(!root.path().join(file).exists());
+}
+
+#[rstest]
+// Inside the project, outside the report directories.
+#[case::outside_the_bases("/notes.html", "notes.html")]
+#[case::secret("/.env", ".env")]
+#[case::parent("/reports/../notes.html", "notes.html")]
+#[case::encoded_parent("/reports/%2e%2e/notes.html", "notes.html")]
+#[case::backslash("/reports/..\\notes.html", "notes.html")]
+// Inside them, but nothing a pane shows.
+#[case::not_a_report("/reports/data.bin", "reports/data.bin")]
+#[case::directory("/reports/img", "reports/img")]
+#[case::root("/", "reports")]
+fn a_tree_removes_nothing_else(#[case] path: &str, #[case] kept: &str) {
+    let root = project();
+    assert_eq!(tree(&root, &["reports"]).remove(path), 403, "{path}");
+    assert!(root.path().join(kept).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_removes_a_link_and_not_what_it_names() {
+    let root = project();
+    let link = |target: &str, name: &str| {
+        std::os::unix::fs::symlink(root.path().join(target), root.path().join(name))
+            .unwrap_or_else(|e| panic!("symlink: {e}"));
+    };
+    link("notes.html", "reports/leak.html");
+    link("reports/グラフ.svg", "reports/alias.svg");
+    link(".", "reports/out");
+    link("nowhere.html", "reports/dangling.html");
+    let tree = tree(&root, &["reports"]);
+    // A link out of the report directories is not the tree's to touch.
+    assert_eq!(tree.remove("/reports/leak.html"), 403);
+    assert_eq!(tree.remove("/reports/out/notes.html"), 403);
+    assert!(root.path().join("notes.html").exists());
+    assert!(root.path().join("reports/leak.html").is_symlink());
+    // A link inside them goes; the file it names stays.
+    assert_eq!(tree.remove("/reports/alias.svg"), 204);
+    assert!(!root.path().join("reports/alias.svg").is_symlink());
+    assert!(root.path().join("reports/グラフ.svg").exists());
+    assert_eq!(tree.remove("/reports/dangling.html"), 204);
+}
+
 #[rstest]
 #[case::offline(false, true)]
 #[case::online(true, false)]

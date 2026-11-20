@@ -5,12 +5,13 @@
 //! attached would block on a request nobody answers, and the agent's file
 //! edits belong in the pod's checkout rather than on this machine. Its
 //! reports therefore stay where it wrote them and are read back instead —
-//! the relay serves its reports tree read-only next to `/acp`, the gateway
-//! proxies that per workspace, and this is the client side.
+//! the relay serves its reports tree next to `/acp` (to read, and to delete
+//! a report the user is done with), the gateway proxies that per workspace,
+//! and this is the client side.
 //!
 //! Listed paths are project-relative, as in `state.json`: a listing entry
 //! and the pane that shows it name the same `reports/run.html`. What may be
-//! read is the server's business (`ukai_core::report::ReportTree`, which the
+//! read or deleted is the server's business (`ukai_core::report::ReportTree`, which the
 //! relay serves from); nothing here decides it.
 
 use std::time::Duration;
@@ -193,6 +194,14 @@ impl ReportsEndpoint {
             .map(str::to_owned))
     }
 
+    /// Delete one report at `url_path`, from the workspace's checkout and
+    /// from the copy the gateway keeps of it. A report that is already gone
+    /// is as good as deleted.
+    pub async fn remove(&self, url_path: &str) -> Result<(), ReportsError> {
+        let request = self.client.delete(self.file_url(url_path));
+        removed(self.send(request).await?.status().as_u16())
+    }
+
     fn file_url(&self, url_path: &str) -> String {
         format!("{}{FILES_PATH}{url_path}", self.base)
     }
@@ -240,6 +249,17 @@ fn failure(status: u16) -> ReportsError {
     match status {
         404 | 410 => ReportsError::Gone,
         other => ReportsError::Status(other),
+    }
+}
+
+/// What the answer to a `DELETE` means. Unlike a read, 404 is the file not
+/// being there, which is what was asked for; a workspace with nothing left
+/// to delete from is 410.
+fn removed(status: u16) -> Result<(), ReportsError> {
+    match status {
+        200 | 204 | 404 => Ok(()),
+        410 => Err(ReportsError::Gone),
+        other => Err(ReportsError::Status(other)),
     }
 }
 
@@ -325,6 +345,18 @@ mod tests {
         assert!(matches!(failure(410), ReportsError::Gone));
         assert!(matches!(failure(404), ReportsError::Gone));
         assert!(matches!(failure(401), ReportsError::Status(401)));
+    }
+
+    #[rstest]
+    #[case::deleted(204, true)]
+    #[case::already_gone(404, true)]
+    #[case::forbidden(403, false)]
+    #[case::no_workspace(410, false)]
+    // A gateway from before reports could be deleted.
+    #[case::not_allowed(405, false)]
+    fn reads_the_answer_to_a_delete(#[case] status: u16, #[case] ok: bool) {
+        assert_eq!(removed(status).is_ok(), ok, "{status}");
+        assert!(matches!(removed(410), Err(ReportsError::Gone)));
     }
 
     #[test]

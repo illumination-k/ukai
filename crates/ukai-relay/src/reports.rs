@@ -1,4 +1,5 @@
-//! Read-only HTTP access to the reports in the relay's working directory.
+//! HTTP access to the reports in the relay's working directory: reading
+//! them, and deleting one the user is done with.
 //!
 //! The agent writes its reports into the checkout it works in, because the
 //! relay advertises no `fs/*` capability to it (see [`crate::hub`]). A client
@@ -13,9 +14,12 @@
 //!   with its `ETag`: what the gateway copies to keep the reports readable
 //!   once the pod is gone.
 //!
-//! Both are confined by [`ReportTree`]: only files inside a `reports.dirs`
-//! entry are served, after resolving symlinks, so a report's relative assets
-//! load and nothing else in the checkout is reachable. The configuration is
+//! - `DELETE /reports/files/<project-relative path>` … delete one report
+//!   (an HTML page or an image, not what it loads), when the user asks to.
+//!
+//! All are confined by [`ReportTree`]: only files inside a `reports.dirs`
+//! entry are served or deleted, after resolving symlinks, so a report's
+//! relative assets load and nothing else in the checkout is reachable. The configuration is
 //! read per request, so editing `ukai.toml` in the pod takes effect without
 //! a restart.
 
@@ -34,11 +38,15 @@ use ukai_core::report::ReportTree;
 #[derive(Debug, Clone)]
 pub struct Root(PathBuf);
 
-/// `GET /reports` and `GET /reports/files/{*path}` for the tree at `root`.
+/// `GET /reports`, `GET /reports/tree`, and `GET` and `DELETE
+/// /reports/files/{*path}` for the tree at `root`.
 pub fn router(root: PathBuf) -> Router {
     Router::new()
         .route(REPORTS_PATH, get(listing))
-        .route(&format!("{REPORTS_PATH}{FILES_PATH}/{{*path}}"), get(file))
+        .route(
+            &format!("{REPORTS_PATH}{FILES_PATH}/{{*path}}"),
+            get(file).delete(remove),
+        )
         .route(&format!("{REPORTS_PATH}{TREE_PATH}"), get(tree_files))
         .with_state(Root(root))
 }
@@ -109,6 +117,25 @@ async fn file(State(Root(root)): State<Root>, uri: Uri) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// Delete one report of the tree. The path is read as [`file`] reads it, and
+/// [`ReportTree::remove`] decides what may go.
+async fn remove(State(Root(root)): State<Root>, uri: Uri) -> Response {
+    let prefix = format!("{REPORTS_PATH}{FILES_PATH}");
+    let Some(path) = uri.path().strip_prefix(&prefix) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(tree) = tree(&root) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let status = tree.remove(path);
+    if status == 204 {
+        tracing::info!(path, "deleted a report");
+    }
+    StatusCode::from_u16(status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+}
+
 /// The reports tree of the checkout at `root`, as its `ukai.toml` declares
 /// it. `None` when that file is unreadable or the root itself is gone.
 fn tree(root: &Path) -> Option<ReportTree> {
@@ -166,9 +193,18 @@ mod tests {
     }
 
     async fn get(root: &TempDir, uri: &str) -> (u16, Vec<(String, String)>, Vec<u8>) {
+        request(root, "GET", uri).await
+    }
+
+    async fn request(
+        root: &TempDir,
+        method: &str,
+        uri: &str,
+    ) -> (u16, Vec<(String, String)>, Vec<u8>) {
         let response = router(root.path().to_owned())
             .oneshot(
                 Request::builder()
+                    .method(method)
                     .uri(uri)
                     .body(Body::empty())
                     .unwrap_or_else(|_| Request::new(Body::empty())),
@@ -299,6 +335,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deletes_a_report_and_leaves_what_it_loads() {
+        let root = checkout(r#"["reports"]"#);
+        let url = "/reports/files/reports/run%201.html";
+        let (status, _, body) = request(&root, "DELETE", url).await;
+        assert_eq!((status, body.as_slice()), (204, &b""[..]));
+        assert!(!root.path().join("reports/run 1.html").exists());
+        assert!(root.path().join("reports/img/plot.png").exists());
+        let (status, _, body) = get(&root, "/reports").await;
+        assert_eq!(status, 200);
+        let listing: Listing = serde_json::from_slice(&body).unwrap_or_default();
+        let paths: Vec<_> = listing.reports.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["reports/img/plot.png"]);
+        // Gone already.
+        let (status, _, _) = request(&root, "DELETE", url).await;
+        assert_eq!(status, 404);
+    }
+
+    #[rstest]
+    #[case::outside_the_reports_dirs("/reports/files/notes.html", 403, "notes.html")]
+    #[case::secret("/reports/files/.env", 403, ".env")]
+    #[case::parent("/reports/files/reports/../notes.html", 403, "notes.html")]
+    #[case::encoded_parent("/reports/files/reports/%2e%2e/notes.html", 403, "notes.html")]
+    #[case::directory("/reports/files/reports/img", 403, "reports/img/plot.png")]
+    // Neither the listing nor the tree is a file to delete.
+    #[case::listing("/reports", 405, "reports/run 1.html")]
+    #[case::tree("/reports/tree", 405, "reports/run 1.html")]
+    #[tokio::test]
+    async fn deletes_nothing_outside_the_reports_tree(
+        #[case] uri: &str,
+        #[case] expected: u16,
+        #[case] kept: &str,
+    ) {
+        let root = checkout(r#"["reports"]"#);
+        let (status, _, _) = request(&root, "DELETE", uri).await;
+        assert_eq!(status, expected, "{uri}");
+        assert!(root.path().join(kept).exists());
+    }
+
+    #[tokio::test]
     async fn an_unreadable_configuration_serves_nothing() {
         let root = checkout(r#"["reports"]"#);
         fs::write(root.path().join("ukai.toml"), "[reports\n")
@@ -307,6 +382,9 @@ mod tests {
         assert_eq!((status, body.as_slice()), (200, &br#"{"reports":[]}"#[..]));
         let (status, _, _) = get(&root, "/reports/files/reports/run%201.html").await;
         assert_eq!(status, 403);
+        let (status, _, _) = request(&root, "DELETE", "/reports/files/reports/run%201.html").await;
+        assert_eq!(status, 403);
+        assert!(root.path().join("reports/run 1.html").exists());
     }
 
     #[tokio::test]
