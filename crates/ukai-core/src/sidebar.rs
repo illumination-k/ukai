@@ -1,6 +1,6 @@
-//! The sidebar's tree: each project, the workspaces its agents work in (this
-//! machine's checkout, and the gateway workspaces), the agent panes open in
-//! each, and which of its nodes the user has folded.
+//! The sidebar's contents: the workspaces the selected project's agents
+//! work in (this machine's checkout, and the gateway workspaces), the agent
+//! panes open in each, and which of its nodes the user has folded.
 //!
 //! A workspace is named by the [`ReportSource`] its reports and ports are read
 //! from, so the agents, reports, and ports of one checkout land under one
@@ -59,12 +59,6 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// Whether this machine's checkout is all there is, so the sidebar can
-    /// leave out the workspace level.
-    pub fn flat(&self) -> bool {
-        matches!(self.workspaces.as_slice(), [only] if only.place.is_project())
-    }
-
     pub fn agent_count(&self) -> usize {
         self.workspaces.iter().map(|w| w.agents.len()).sum()
     }
@@ -131,8 +125,6 @@ pub fn tree(layout: &Layout, project: &ProjectId, config: Option<&Config>) -> Tr
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Node {
-    Project,
-    Workspace { place: ReportSource },
     Reports { place: ReportSource },
     Ports { place: ReportSource },
     Knowledge,
@@ -165,10 +157,24 @@ impl Fold {
 
 /// Which nodes the user opened or folded, as the nodes whose state differs
 /// from their default, so a node never touched follows the default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Folds {
     toggled: Vec<Fold>,
+}
+
+/// A node the sidebar no longer has is dropped rather than failing the
+/// whole state.
+impl<'de> Deserialize<'de> for Folds {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = Vec::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(Self {
+            toggled: entries
+                .into_iter()
+                .filter_map(|entry| serde_json::from_value(entry).ok())
+                .collect(),
+        })
+    }
 }
 
 impl Folds {
@@ -323,7 +329,6 @@ mod tests {
         );
         assert_eq!(tree.gateways, ["cloud", "pods"]);
         assert_eq!(tree.agent_count(), 6);
-        assert!(!tree.flat());
     }
 
     #[test]
@@ -347,26 +352,31 @@ mod tests {
     #[rstest]
     #[case::no_config(None)]
     #[case::local_agents_only(Some(config(&[("local", stdio())])))]
-    fn is_flat_with_only_this_machine(#[case] config: Option<Config>) {
+    fn lists_only_this_machine_without_a_gateway(#[case] config: Option<Config>) {
         let mut projects = Projects::default();
         let project = projects.add(Path::new("/work/ukai"));
         let mut layout = Layout::default();
         let pane = agent_pane(&mut layout, &project, "local", None);
         let tree = tree(&layout, &project, config.as_ref());
-        assert!(tree.flat());
         assert!(tree.gateways.is_empty());
         assert_eq!(places(&tree), [(ReportSource::Project, vec![pane])]);
     }
 
     #[test]
-    fn a_gateway_pane_is_not_flat_even_with_its_agent_gone() {
+    fn lists_a_gateway_pane_even_with_its_agent_gone() {
         // The pane's workspace says where it works, whatever the
         // configuration says now.
         let mut projects = Projects::default();
         let project = projects.add(Path::new("/work/ukai"));
         let mut layout = Layout::default();
-        agent_pane(&mut layout, &project, "cloud", pod("c"));
-        assert!(!tree(&layout, &project, None).flat());
+        let pane = agent_pane(&mut layout, &project, "cloud", pod("c"));
+        assert_eq!(
+            places(&tree(&layout, &project, None)),
+            [
+                (ReportSource::Project, vec![]),
+                (agent_place("cloud", pod("c")), vec![pane]),
+            ]
+        );
     }
 
     #[test]
@@ -383,8 +393,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::project(Node::Project, true)]
-    #[case::workspace(Node::Workspace { place: ReportSource::Project }, true)]
     #[case::reports(Node::Reports { place: ReportSource::Project }, true)]
     #[case::ports(Node::Ports { place: ReportSource::Project }, true)]
     #[case::knowledge(Node::Knowledge, false)]
@@ -414,10 +422,10 @@ mod tests {
         let a = projects.add(Path::new("/work/a"));
         let b = projects.add(Path::new("/work/b"));
         let mut folds = Folds::default();
-        folds.toggle(Fold::new(&a, Node::Project));
+        folds.toggle(Fold::new(&a, Node::Schedules));
         folds.toggle(Fold::new(&b, Node::Knowledge));
         folds.forget(&a);
-        assert!(folds.is_open(&Fold::new(&a, Node::Project)));
+        assert!(!folds.is_open(&Fold::new(&a, Node::Schedules)));
         assert!(folds.is_open(&Fold::new(&b, Node::Knowledge)));
     }
 
@@ -436,5 +444,17 @@ mod tests {
         let json = serde_json::to_string(&folds).unwrap_or_default();
         let back: Result<Folds, _> = serde_json::from_str(&json);
         assert_eq!(back.ok(), Some(folds));
+    }
+
+    #[test]
+    fn drops_nodes_it_no_longer_has() {
+        let json = r#"[
+            {"project": "p1", "node": {"kind": "project"}},
+            {"project": "p1", "node": {"kind": "schedules"}}
+        ]"#;
+        let folds: Result<Folds, _> = serde_json::from_str(json);
+        let folds = folds.unwrap_or_default();
+        assert_eq!(folds.toggled.len(), 1);
+        assert_eq!(folds.toggled[0].node, Node::Schedules);
     }
 }

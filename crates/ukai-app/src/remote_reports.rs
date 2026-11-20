@@ -64,7 +64,11 @@ pub fn Follow() -> Element {
             let wanted = {
                 let layout = app.layout.peek();
                 let configs = app.configs.peek();
-                followed(&layout, &configs, &app.folds.peek())
+                followed(
+                    &layout,
+                    &configs,
+                    app.projects.peek().selected().map(|p| &p.id),
+                )
             };
             relist(
                 app,
