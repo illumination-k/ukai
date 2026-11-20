@@ -5,6 +5,7 @@
 //! pane id) rather than in component state. Closing a pane drops its entry,
 //! and with it the session.
 
+mod branch;
 mod composer;
 mod config;
 mod entry;
@@ -221,7 +222,7 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                         }
                         button {
                             class: "outline",
-                            onclick: move |_| connect(app, pane, false),
+                            onclick: move |_| branch::new_session(app, pane),
                             "New session"
                         }
                     }

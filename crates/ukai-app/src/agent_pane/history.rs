@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use ukai_core::{History, PaneId, Status, session_label, updated_label};
 
-use super::session::{connect, open_session};
+use super::branch::{new_session, open_session};
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 
@@ -55,7 +55,7 @@ pub fn HistoryMenu(pane: PaneId) -> Element {
                             role: "menuitem",
                             onclick: move |_| {
                                 open.set(false);
-                                connect(app, pane, false);
+                                new_session(app, pane);
                             },
                             span { class: "check",
                                 Svg { icon: Icon::Plus, size: 12 }

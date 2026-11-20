@@ -11,7 +11,7 @@ use ukai_acp::{
 use ukai_core::config::ApplyDefaults;
 use ukai_core::{Alert, PaneContent, PaneId, Status, Transcript};
 
-use super::{AgentSession, Composer, Sessions};
+use super::{AgentSession, Composer, Sessions, branch};
 use crate::alert;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::voice::DictationOwner;
@@ -75,6 +75,7 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
                     if let Some((id, value)) = defaults.on_event(&event) {
                         control.set_config(id, value);
                     }
+                    let ended = matches!(event, SessionEvent::TurnEnded { .. });
                     let raised = Alert::of(&event);
                     transcript.write().apply(event);
                     if transcript.peek().queued.is_some() {
@@ -82,6 +83,9 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
                     }
                     if let Some(raised) = raised {
                         alert::raise(&window, layout, pane, unread, &source, &raised);
+                    }
+                    if ended {
+                        branch::record(app, pane);
                     }
                 }
             });
@@ -108,11 +112,22 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
     );
 }
 
-/// Continue the agent's session `id` in `pane`, replacing the one there.
-pub(super) fn open_session(app: AppSignals, pane: PaneId, id: String) {
-    let mut layout = app.layout;
-    layout.write().record_session(pane, id);
-    connect(app, pane, true);
+/// Where `pane`'s agent works: what its session found, else resolved anew.
+pub(super) fn checkout_for(app: AppSignals, pane: PaneId) -> Option<Checkout> {
+    if let Some(session) = app.sessions.peek().get(&pane) {
+        return session.checkout.clone();
+    }
+    let Some(PaneContent::Agent {
+        project,
+        agent,
+        workspace,
+        ..
+    }) = app.layout.peek().content(pane).cloned()
+    else {
+        return None;
+    };
+    let context = project_context(&app.projects.peek(), &app.configs.peek(), &project).ok()?;
+    checkout_of(&context, &agent, workspace.as_ref())
 }
 
 /// Where the pane's agent works: the project root, or its gateway workspace.

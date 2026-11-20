@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 use ukai_config::Config;
+use ukai_core::branch::SessionBranches;
 use ukai_core::sidebar::Folds;
 use ukai_core::{Layout, PaneId, ProjectId, Projects};
 
@@ -55,6 +56,8 @@ pub struct AppSignals {
     pub knowledge: KnowledgeListings,
     /// What of the sidebar's tree is folded.
     pub folds: Signal<Folds>,
+    /// The branch each session last worked on (`crate::agent_pane::branch`).
+    pub branches: Signal<SessionBranches>,
     /// Whether the command palette is open.
     pub palette: Signal<bool>,
     /// A pane boundary or pane the user is dragging.
@@ -146,6 +149,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
         mut layout,
         mut sessions,
         mut folds,
+        mut branches,
         ..
     } = app;
     let panes: Vec<_> = layout
@@ -166,6 +170,7 @@ pub fn remove_project(app: AppSignals, id: &ProjectId) {
     configs.write().remove(id);
     gateways.write().remove(id);
     folds.write().forget(id);
+    branches.write().retain_projects(|project| project != id);
 }
 
 /// Ask for a folder with the native dialog and open it as a project.

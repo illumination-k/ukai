@@ -651,6 +651,18 @@ impl Checkout {
         Ok(review.into())
     }
 
+    /// Whether `other` is the same checkout, so switching the branch of one
+    /// switches the other's too.
+    pub fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(one), Self::Local(other)) => one == other,
+            (Self::Gateway(one), Self::Gateway(other)) => {
+                one.agent == other.agent && one.workspace == other.workspace
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the agent works on another machine, where it cannot read
     /// this one's files.
     pub fn is_remote(&self) -> bool {

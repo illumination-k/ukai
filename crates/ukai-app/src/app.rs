@@ -48,6 +48,7 @@ pub fn App() -> Element {
             schedules: Signal::new(HashMap::new()),
             knowledge: Signal::new(HashMap::new()),
             folds: Signal::new(state.sidebar),
+            branches: Signal::new(state.branches),
             palette: Signal::new(false),
             drag: Signal::new(None),
             schedule_names: Signal::new(HashMap::new()),
@@ -70,6 +71,7 @@ pub fn App() -> Element {
         app.projects,
         app.layout,
         app.folds,
+        app.branches,
     );
 
     // Whatever pane the user is looking at has nothing unread: the focused
