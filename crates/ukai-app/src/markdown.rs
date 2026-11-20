@@ -141,8 +141,11 @@ fn element(kind: &Kind, children: &[Node]) -> Element {
             span { class: "image-alt", title: "Image not loaded", {inner} }
         },
         Kind::Table => rsx! {
-            div { class: "table-wrap",
-                table { {inner} }
+            div { class: "table-block",
+                div { class: "table-wrap",
+                    table { {inner} }
+                }
+                CopyButton { text: markdown::table_tsv(children) }
             }
         },
         Kind::TableHead => rsx! {

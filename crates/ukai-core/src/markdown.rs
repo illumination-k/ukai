@@ -322,6 +322,47 @@ fn url_len(text: &str) -> usize {
     }
 }
 
+/// A table's rows as tab-separated values, the form a spreadsheet pastes
+/// into cells. `children` are a [`Kind::Table`]'s. A cell's tabs and line
+/// breaks become spaces so it stays one cell.
+pub fn table_tsv(children: &[Node]) -> String {
+    let mut tsv = String::new();
+    for row in children {
+        let Node::Element {
+            kind: Kind::TableHead | Kind::TableRow,
+            children: cells,
+        } = row
+        else {
+            continue;
+        };
+        let cells: Vec<String> = cells
+            .iter()
+            .map(|cell| {
+                let mut text = String::new();
+                plain_text(std::slice::from_ref(cell), &mut text);
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .collect();
+        tsv.push_str(&cells.join("\t"));
+        tsv.push('\n');
+    }
+    tsv
+}
+
+/// The text `nodes` show, without markup.
+fn plain_text(nodes: &[Node], out: &mut String) {
+    for node in nodes {
+        match node {
+            Node::Text(text) | Node::Code(text) => out.push_str(text),
+            Node::CodeBlock { text, .. } => out.push_str(text),
+            Node::HardBreak => out.push(' '),
+            Node::Rule => {}
+            Node::Task(checked) => out.push_str(if *checked { "[x] " } else { "[ ] " }),
+            Node::Element { children, .. } => plain_text(children, out),
+        }
+    }
+}
+
 impl From<Alignment> for Align {
     fn from(alignment: Alignment) -> Self {
         match alignment {

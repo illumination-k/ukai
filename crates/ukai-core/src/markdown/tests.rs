@@ -152,6 +152,19 @@ fn tables_carry_alignment_per_cell() {
 }
 
 #[test]
+fn tables_copy_as_tab_separated_values() {
+    let [Node::Element { children, .. }] = &parse(
+        "| name | note |\n|---|---|\n| **a** `b` | [link](https://x.test) c<br>d |\n| tab\there | |\n",
+    )[..] else {
+        panic!("not one table");
+    };
+    assert_eq!(
+        table_tsv(children),
+        "name\tnote\na b\tlink c<br>d\ntab here\t\n"
+    );
+}
+
+#[test]
 fn task_lists() {
     assert_eq!(
         parse("- [x] done\n- [ ] todo\n"),
