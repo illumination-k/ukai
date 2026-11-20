@@ -44,22 +44,28 @@ pub fn BrowserView(
     match source {
         // `localhost`, not `127.0.0.1`: a dev server bound to `::1` only is
         // as local as one on IPv4, and the web view tries both.
+        // Each surface goes in a list of one: Dioxus honours a key only
+        // among a list's siblings, and another page needs another web view.
         ReportSource::Project => rsx! {
-            BrowserSurface {
-                key: "{pane}-{port}-{path}",
-                origin: format!("http://localhost:{port}"),
-                path,
-                tunnelled: false,
+            for path in [path] {
+                BrowserSurface {
+                    key: "{pane}-{port}-{path}",
+                    origin: format!("http://localhost:{port}"),
+                    path,
+                    tunnelled: false,
+                }
             }
         },
         ReportSource::Agent { agent, workspace } => rsx! {
-            TunnelledBrowser {
-                key: "{pane}-{agent}-{port}-{path}",
-                project,
-                agent,
-                workspace,
-                port,
-                path,
+            for (agent, workspace, path) in [(agent, workspace, path)] {
+                TunnelledBrowser {
+                    key: "{pane}-{agent}-{port}-{path}",
+                    project: project.clone(),
+                    agent,
+                    workspace,
+                    port,
+                    path,
+                }
             }
         },
     }
@@ -104,14 +110,16 @@ fn TunnelledBrowser(
             }
         },
         Some(Ok(tunnel)) => rsx! {
-            BrowserSurface {
-                key: "{tunnel.local_port()}",
-                // `127.0.0.1`: the tunnel listens on IPv4 only, and
-                // `localhost` could reach another server on `::1`.
-                origin: format!("http://127.0.0.1:{}", tunnel.local_port()),
-                path,
-                tunnelled: true,
-                tunnel: Some(TunnelHandle(tunnel)),
+            for tunnel in [tunnel] {
+                BrowserSurface {
+                    key: "{tunnel.local_port()}",
+                    // `127.0.0.1`: the tunnel listens on IPv4 only, and
+                    // `localhost` could reach another server on `::1`.
+                    origin: format!("http://127.0.0.1:{}", tunnel.local_port()),
+                    path: path.clone(),
+                    tunnelled: true,
+                    tunnel: Some(TunnelHandle(tunnel)),
+                }
             }
         },
     }
