@@ -23,6 +23,7 @@ mod report_pane;
 mod schedules;
 mod shortcuts;
 mod sidebar;
+mod terminal_pane;
 mod voice;
 
 use std::path::{Path, PathBuf};

@@ -17,9 +17,21 @@ use crate::remote_reports::Follow;
 use crate::schedules::FollowSchedules;
 use crate::shortcuts::{Shortcuts, on_keydown};
 use crate::sidebar::Sidebar;
+use crate::terminal_pane::use_terminal_cleanup;
 use crate::voice::Voice;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+// xterm.js for terminal panes, bundled rather than fetched: the app loads
+// nothing from the network into its own web view.
+const XTERM_CSS: Asset = asset!("/assets/vendor/xterm/xterm.css");
+const XTERM_JS: Asset = asset!(
+    "/assets/vendor/xterm/xterm.js",
+    AssetOptions::js().with_minify(false)
+);
+const XTERM_FIT_JS: Asset = asset!(
+    "/assets/vendor/xterm/addon-fit.js",
+    AssetOptions::js().with_minify(false)
+);
 
 #[component]
 pub fn App() -> Element {
@@ -55,6 +67,7 @@ pub fn App() -> Element {
             schedule_revision: Signal::new(0),
             knowledge_revision: Signal::new(0),
             editing_notes: Signal::new(HashSet::new()),
+            terminals: Signal::new(HashMap::new()),
         }
     });
     use_hook(|| {
@@ -66,6 +79,7 @@ pub fn App() -> Element {
             add_project(&paths, app, root);
         }
     });
+    use_terminal_cleanup(app);
     use_autosave(
         paths.state_file.clone(),
         app.projects,
@@ -96,6 +110,9 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: MAIN_CSS }
+        document::Stylesheet { href: XTERM_CSS }
+        document::Script { src: XTERM_JS }
+        document::Script { src: XTERM_FIT_JS }
         div {
             class: "shell",
             tabindex: "0",

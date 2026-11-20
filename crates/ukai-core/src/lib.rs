@@ -25,6 +25,7 @@ pub mod shell;
 pub mod sidebar;
 pub mod slash;
 pub mod state;
+pub mod terminal;
 mod transcript;
 
 pub use layout::{

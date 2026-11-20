@@ -28,6 +28,7 @@ use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, delete_report, download_report, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
+use crate::terminal_pane::{TerminalPane, open_terminal_in};
 
 /// The width of the divider between two children of a split, in CSS pixels;
 /// matches `.divider` in `main.css`.
@@ -300,6 +301,13 @@ pub fn pane_label(
             match place.agent() {
                 Some(agent) => format!("Changes · {agent}"),
                 None => "Changes".to_owned(),
+            },
+        ),
+        Some(PaneContent::Terminal { project, place }) => (
+            Some(project_name(project)),
+            match place.agent() {
+                Some(agent) => format!("Terminal · {agent}"),
+                None => "Terminal".to_owned(),
             },
         ),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
@@ -736,6 +744,16 @@ fn PaneView(pane: PaneId) -> Element {
                         }
                     }
                 },
+                PaneContent::Terminal { project, place } => rsx! {
+                    for (project, place) in [(project, place)] {
+                        TerminalPane {
+                            key: "{project}-{place:?}",
+                            pane,
+                            project,
+                            place,
+                        }
+                    }
+                },
                 PaneContent::Report { project, path, source } => rsx! {
                     ReportView {
                         pane,
@@ -930,6 +948,16 @@ fn Picker(pane: PaneId) -> Element {
                                 },
                                 Svg { icon: Icon::Document }
                                 "Open report or image…"
+                            }
+                            button {
+                                class: "outline open-file",
+                                title: "Open a shell in this project's root",
+                                onclick: {
+                                    let project = project.clone();
+                                    move |_| open_terminal_in(app, pane, &project, &ReportSource::Project)
+                                },
+                                Svg { icon: Icon::Terminal }
+                                "Open a terminal"
                             }
                             button {
                                 class: "outline open-file",

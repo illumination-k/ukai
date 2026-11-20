@@ -16,6 +16,8 @@ futures = { workspace = true }
 http-body-util = { workspace = true }
 ignore = { workspace = true }
 percent-encoding = { workspace = true }
+# The terminal pane's shell, here and (through the relay) in a pod.
+portable-pty = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

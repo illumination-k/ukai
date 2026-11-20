@@ -70,6 +70,8 @@ pub struct AppSignals {
     pub knowledge_revision: Signal<u64>,
     /// The note panes with a draft, which opening another note leaves alone.
     pub editing_notes: Signal<HashSet<PaneId>>,
+    /// Every terminal pane's shell.
+    pub terminals: crate::terminal_pane::Terminals,
 }
 
 impl AppSignals {

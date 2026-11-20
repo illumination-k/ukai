@@ -39,6 +39,9 @@
   --chat-width: 46rem;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", sans-serif;
   --mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Consolas, monospace;
+  --terminal-bg: #ffffff;
+  --terminal-fg: #171717;
+  --terminal-selection: rgb(59 130 246 / 0.25);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -63,6 +66,9 @@
     --chat-fg: color-mix(in srgb, var(--fg) 78%, var(--bg));
     --chat-strong: color-mix(in srgb, var(--fg) 90%, var(--bg));
     --attention: #f97316;
+    --terminal-bg: #0a0a0a;
+    --terminal-fg: #e5e5e5;
+    --terminal-selection: rgb(59 130 246 / 0.35);
   }
 }
 
@@ -2506,6 +2512,41 @@ button.config-trigger:disabled {
 }
 
 /* ---- diff pane: a checkout's changes ---------------------------------- */
+
+/* A terminal pane: xterm.js fills the host, which the fit addon measures. */
+.terminal-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--terminal-bg);
+}
+
+.terminal-host {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 4px 4px 10px;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+/* xterm.css paints the viewport black; below the last row it shows. */
+.terminal-host .xterm .xterm-viewport {
+  background-color: var(--terminal-bg) !important;
+}
+
+.terminal-ended {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-fg);
+  font-size: 12px;
+}
 
 .diff-pane {
   display: flex;

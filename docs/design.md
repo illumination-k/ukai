@@ -108,7 +108,7 @@ ukai は ACP の "Client" なので、エージェントからの要求に応え
 - `session/request_permission` … UI にダイアログを出し、ユーザー判断を返す。設定で自動許可ルールを持てる（後述 `permissions`）。
 - `fs/read_text_file` / `fs/write_text_file` … **プロジェクトルート配下に限定して**提供。
   これは手元で動くエージェント（stdio と、手元のツリーを見ているリモートエージェント）の経路。
-- `terminal/*` … 初期は capability を広告しない。
+- `terminal/*` … 初期は capability を広告しない（ユーザーが使うターミナルは別。後述「ターミナル」）。
 
 gateway のエージェント（`[gateways]`）は別で、`fs/*` は**通らない**。間に立つ `ukai-relay` はエージェントに
 client capability を広告しない（クライアントがいない間に動くターンが応答者のいない `fs/*` で止まるし、
@@ -307,8 +307,9 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   `POST /upload?name=…` はユーザーが prompt に添付したファイル（本文）を relay の一時ディレクトリ
   （checkout の外。1 件ごとのディレクトリに元の名前で）に置き、そのパスを返す（`store_upload`。名前の
   ないものは 422、16 MiB を超えるものは 413）。
+- 同じく `GET /terminal?cols=&rows=` で checkout のシェルを WebSocket で出す（`terminal`。後述「ターミナル」）。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
-- クライアントがおらずターンも動いていない状態が `idle_timeout` 続いたら終了する。
+- クライアントがおらず、ターンも動いておらず、ターミナルも開いていない状態が `idle_timeout` 続いたら終了する。
 
 ### `ukai-gateway`
 
@@ -335,6 +336,8 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   （WebSocket）で中継する。ワークスペースの決め方・トークン・Pod を起こさないことはレポートと同じ（`Ports.List`
   はワークスペースをヘッダーではなく要求の `Workspace` で名指し、動いていなければ FAILED_PRECONDITION）。forward はクライアントを upgrade する
   前に relay へつなぎ、relay の 502（何も listen していない）はそのまま返す。
+- ターミナルは `GET /agents/<id>/terminal?cols=&rows=`（WebSocket）を relay の `/terminal` へ中継する。決め方・トークン・
+  Pod を起こさないこと・upgrade 前に relay へつなぐことは forward と同じ。
 - checkout のファイル一覧・差分とユーザーのコマンドを `Files.List`・`Files.Diff`・`Commands.Run` で中継する
   （relay の `/files`・`/diff`・`/run`。後述「`@` と `!`」「checkout の差分」）。エージェントのレビューへの
   ユーザーの返信と解決は `Files.Annotate`（relay の `POST /review`）。relay の 422 は ABORTED にして理由を
@@ -600,7 +603,8 @@ p0 = "マージ不可（壊れる・危ない）"
 - 画面はタブの列で、各タブは pane の分割木（`ukai-core::Layout`）。split は方向・2 つ以上の子・子ごとの
   比率を持ち、同じ方向の入れ子は親に平坦化する（比率は親の枠に按分）。不変条件は `Layout::check` と
   プロパティテストで検査している。
-- pane の中身: `agent { project, agent, session }`（ACP セッション 1 本）/ `report { project, path }` / 空。
+- pane の中身: `agent { project, agent, session }`（ACP セッション 1 本）/ `report { project, path }` /
+  `terminal { project, place }`（後述「ターミナル」）などと空。
   **pane ごとにプロジェクトを持つ**ので、1 つのタブに別プロジェクトのエージェントを並べられる（herdr と同じ。
   orca は worktree ごとに配置を丸ごと切り替える方式で、混在はできない）。
 - 新しい pane / タブは空で開き、プロジェクトを選んでから、その設定にあるエージェント（起動コマンド付き）を選ぶ。
@@ -891,6 +895,26 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
       `[review]` で決め（後述）、relay は Pod の checkout のそれを読む（reports と同じ）。`[review.tags]` を
       宣言したらそのタグだけを受ける。
     - 手元のエージェントには relay の MCP サーバーが付かないので、まだ書けない。
+- **ターミナル。** サイドバーの各ワークスペースの「Terminal」（押すたびに新しい pane）か空 pane の「Open a terminal」で
+  terminal pane（`PaneContent::Terminal { project, place }`。`place` は diff pane と同じくワークスペースを名指す
+  `ReportSource`）を開き、その checkout でユーザーのシェルを使う。ACP の `terminal/*` はエージェント → クライアントの
+  向きなので使わない（`!` と同じく ukai が自分でやる）。
+  - シェルはログインシェル（`portable_pty::CommandBuilder::new_default_prog`、`TERM=xterm-256color`）を疑似端末で
+    動かす（`ukai_acp::terminal`）。手元はアプリが直接プロジェクトのルートで、gateway のワークスペースは Pod の relay が
+    checkout で同じ `terminal::open` を使い、`GET /terminal?cols=&rows=` の WebSocket で出す。gateway は
+    `GET /agents/<id>/terminal` をそこへ中継する（ワークスペースの決め方・トークンは forward と同じで、**Pod は起こさない**。
+    動いていなければ 410 で、pane は「Open the agent to start it」と出す）。WebSocket の binary フレームは端末のバイト列
+    （両向き）、text フレームは `terminal::Control`（クライアント → `resize`、relay → `exit { code }` のあと close）。
+    WebSocket を閉じるとシェルに hangup する。relay はターミナルが開いている間 idle で終わらない。
+  - 描画は xterm.js（`assets/vendor/xterm` に同梱した 6.0.0 と fit アドオン。ネットワークからは読まない）で、アプリの
+    web view の中に置く。xterm.js はバイト列をセルに書くだけで HTML にしないので、出力が IPC を持つ web view の
+    マークアップになることはない。大きさは pane に合わせ（`ResizeObserver` + fit）、変わるたびに `resize` を送る。
+  - シェルは view ではなく pane のもの（`terminal_pane::Terminals`）。タブの切り替えで view が作り直されても動き続け、
+    出力の末尾 1 MiB（`ukai_core::terminal::Backlog`、行頭で切る）を新しい view に流してから続きを送る。pane を閉じるか
+    中身を替えると終わる。シェル自体は保存しないので、アプリを起動し直すと同じ場所で新しいシェルが始まる。
+    シェルが終わると pane の上に終了コードと「Restart」を出す。
+  - フォーカスがターミナルにある間、⌘ を含まないキーはアプリのショートカットに渡さない（macOS 以外では `mod` が
+    ctrl で、ctrl+d や ctrl+w はシェルのもののため）。
 - **添付（orca に倣う）。** 入力欄へのファイルのドロップと貼り付け、📎（ファイル選択ダイアログ）で、ファイルや画像を
   次の prompt に添える。貼り付けはクリップボードを `arboard` で読み、Finder などでコピーしたファイルか、文字を伴わない
   画像（スクリーンショット）を PNG にして添える。文字があれば web view の通常の貼り付けに任せる。送り方は前述の `ukai_core::attachment` が決め、断った理由は入力欄に出す。gateway のエージェントへは、

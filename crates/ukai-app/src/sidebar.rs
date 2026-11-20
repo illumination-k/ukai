@@ -14,7 +14,7 @@ use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::sidebar::{self, Fold, OpenAgent, Workspace};
-use ukai_core::{ProjectId, ReportSource};
+use ukai_core::{PaneContent, ProjectId, ReportSource};
 
 use crate::agent_pane::{agent_status, session_title};
 use crate::alert::is_unread;
@@ -27,6 +27,7 @@ use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, r
 use crate::report_pane::ReportGroup;
 use crate::schedules::ScheduleNode;
 use crate::shortcuts::Shortcuts;
+use crate::terminal_pane::open_terminal;
 
 /// The workspace whose contents the second column shows.
 type Opened = Signal<Option<(ProjectId, ReportSource)>>;
@@ -533,8 +534,8 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, opened: Opened) -> El
     }
 }
 
-/// The second column: what is in one workspace — its changes, reports, and
-/// ports.
+/// The second column: what is in one workspace — its changes, a terminal,
+/// its reports, and ports.
 #[component]
 fn WorkspaceDetail(project: ProjectId, place: ReportSource, opened: Opened) -> Element {
     let app = use_context::<AppSignals>();
@@ -557,6 +558,7 @@ fn WorkspaceDetail(project: ProjectId, place: ReportSource, opened: Opened) -> E
             }
         }
         ChangesRow { project: project.clone(), place: place.clone(), depth: 0 }
+        TerminalRow { project: project.clone(), place: place.clone(), depth: 0 }
         ReportGroup { project: project.clone(), place: place.clone(), depth: 0 }
         PortGroup { project, place, depth: 0 }
     }
@@ -577,6 +579,27 @@ fn ChangesRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
                 Svg { icon: Icon::Diff, size: 12 }
             }
             span { class: "name", "Changes" }
+        }
+    }
+}
+
+/// A shell in a workspace's checkout: click to open another terminal pane.
+#[component]
+fn TerminalRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
+    let app = use_context::<AppSignals>();
+    let open = app.layout.read().contents().any(|(_, content)| {
+        matches!(content, PaneContent::Terminal { project: p, place: q } if *p == project && *q == place)
+    });
+    rsx! {
+        div {
+            class: if open { "row report-row open" } else { "row report-row" },
+            style: "--depth: {depth}",
+            title: "Open a shell in this checkout",
+            onclick: move |_| open_terminal(app, &project, &place),
+            span { class: "row-icon",
+                Svg { icon: Icon::Terminal, size: 12 }
+            }
+            span { class: "name", "Terminal" }
         }
     }
 }
