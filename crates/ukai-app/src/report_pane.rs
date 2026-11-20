@@ -149,8 +149,13 @@ pub fn ReportView(
     let covered = use_memo(move || app.covered());
     let opened = open_source(app, &project, &path, &source);
     match opened {
+        // Dioxus honours a key only among siblings of a list, so the surface
+        // goes in a list of one: a pane opening another report then builds a
+        // new web view rather than keeping the first.
         Ok(source) => rsx! {
-            ReportSurface { key: "{pane}-{source.key()}", source, covered }
+            for source in [source] {
+                ReportSurface { key: "{pane}-{source.key()}", source, covered }
+            }
         },
         Err(error) => rsx! {
             div { class: "pane-body report-error",

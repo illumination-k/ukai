@@ -692,30 +692,39 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Agent { session, .. } => rsx! {
                     AgentView { pane, has_saved_session: session.is_some() }
                 },
+                // A key counts only among a list's siblings, so each keyed
+                // view goes in a list of one: showing another schedule, note,
+                // or diff in the pane then starts its view afresh.
                 PaneContent::Schedule { project, agent, schedule } => rsx! {
-                    ScheduleView {
-                        key: "{agent}-{schedule:?}",
-                        pane,
-                        project,
-                        agent,
-                        schedule,
+                    for (project, agent, schedule) in [(project, agent, schedule)] {
+                        ScheduleView {
+                            key: "{agent}-{schedule:?}",
+                            pane,
+                            project,
+                            agent,
+                            schedule,
+                        }
                     }
                 },
                 PaneContent::Note { project, agent, note } => rsx! {
-                    NoteView {
-                        key: "{agent}-{note:?}",
-                        pane,
-                        project,
-                        agent,
-                        note,
+                    for (project, agent, note) in [(project, agent, note)] {
+                        NoteView {
+                            key: "{agent}-{note:?}",
+                            pane,
+                            project,
+                            agent,
+                            note,
+                        }
                     }
                 },
                 PaneContent::Diff { project, place } => rsx! {
-                    DiffPane {
-                        key: "{project}-{place:?}",
-                        pane,
-                        project,
-                        place,
+                    for (project, place) in [(project, place)] {
+                        DiffPane {
+                            key: "{project}-{place:?}",
+                            pane,
+                            project,
+                            place,
+                        }
                     }
                 },
                 PaneContent::Report { project, path, source } => rsx! {
