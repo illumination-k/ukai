@@ -25,6 +25,7 @@ pub mod sidebar;
 pub mod slash;
 pub mod state;
 mod transcript;
+pub mod workflow;
 
 pub use layout::{
     Direction, Layout, Node, PaneContent, PaneId, ReportSource, Side, Tab, boundary_span,

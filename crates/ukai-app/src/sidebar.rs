@@ -25,6 +25,7 @@ use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, r
 use crate::report_pane::ReportGroup;
 use crate::schedules::ScheduleNode;
 use crate::shortcuts::Shortcuts;
+use crate::workflows::{open_workflows, workflows_open};
 
 #[component]
 pub fn Sidebar() -> Element {
@@ -485,6 +486,13 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
                 place: place.clone(),
                 depth: inner,
             }
+            if !place.is_project() {
+                WorkflowsRow {
+                    project: project.clone(),
+                    place: place.clone(),
+                    depth: inner,
+                }
+            }
             ReportGroup {
                 project: project.clone(),
                 place: place.clone(),
@@ -495,6 +503,26 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
                 place: place.clone(),
                 depth: inner,
             }
+        }
+    }
+}
+
+/// The workflows a gateway agent's workspace runs: click to see them and
+/// their runs in a pane.
+#[component]
+fn WorkflowsRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
+    let app = use_context::<AppSignals>();
+    let open = workflows_open(&app.layout.read(), &project, &place);
+    rsx! {
+        div {
+            class: if open { "row report-row open" } else { "row report-row" },
+            style: "--depth: {depth}",
+            title: "The ayaito flows this workspace runs, and their runs",
+            onclick: move |_| open_workflows(app, &project, &place),
+            span { class: "row-icon",
+                Svg { icon: Icon::Flow, size: 12 }
+            }
+            span { class: "name", "Workflows" }
         }
     }
 }

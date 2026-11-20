@@ -43,6 +43,7 @@ use ukai_acp::knowledge::{
     Editor, KnowledgeEndpoint, KnowledgeError, Note, NoteSpec, NoteSummary, NoteWrite,
 };
 use ukai_acp::review::{Author, Priority, Review};
+use ukai_acp::workflows::RelayWorkflows;
 use ukai_config::Reports;
 use ukai_core::annotation;
 use ukai_core::knowledge::TAGS_MAX;
@@ -63,6 +64,8 @@ const DELETE_KNOWLEDGE: &str = "delete_knowledge";
 const REVIEW_DIFF: &str = "review_diff";
 const REPLY_ANNOTATION: &str = "reply_annotation";
 const READ_REVIEW: &str = "read_review";
+
+mod workflows;
 
 /// How long `initialize` waits on the gateway for the notes so far.
 const INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -128,6 +131,9 @@ pub struct Session {
     /// Where the agent's review of its changes is kept, for the relay to
     /// send with the diff; without it the review tools are not offered.
     review: Option<PathBuf>,
+    /// The relay's workflows; without them the workflow tools are not
+    /// offered.
+    workflows: Option<RelayWorkflows>,
 }
 
 impl Default for Session {
@@ -143,6 +149,7 @@ impl Session {
             head,
             previews: None,
             review: None,
+            workflows: None,
         }
     }
 
@@ -157,6 +164,13 @@ impl Session {
     #[must_use]
     pub fn with_review(mut self, file: PathBuf) -> Self {
         self.review = Some(file);
+        self
+    }
+
+    /// Offer the workflow tools, run by the relay at `relay`.
+    #[must_use]
+    pub fn with_workflows(mut self, relay: RelayWorkflows) -> Self {
+        self.workflows = Some(relay);
         self
     }
 }
@@ -188,18 +202,28 @@ pub struct Gateway {
     pub token: String,
 }
 
+/// The relay itself, as its MCP server reaches it to run workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relay {
+    /// `http://127.0.0.1:<port>`.
+    pub url: String,
+    pub token: Option<String>,
+}
+
 /// The ACP `mcpServers` entry that starts this server for the checkout at
 /// `root`, with `program` being the relay binary. With `gateway`, it also
 /// serves the knowledge kept there; the token goes in the environment, not
 /// the arguments, so it stays out of `ps`. With `previews`, the agent can
 /// ask for its servers to be shown, recorded in that file; with `review`, it
-/// can review its changes, kept in that file.
+/// can review its changes, kept in that file; with `relay`, it can run
+/// workflows there.
 pub fn server_entry(
     program: &Path,
     root: &Path,
     gateway: Option<&Gateway>,
     previews: Option<&Path>,
     review: Option<&Path>,
+    relay: Option<&Relay>,
 ) -> Value {
     let mut args = vec![
         json!(SUBCOMMAND),
@@ -217,6 +241,13 @@ pub fn server_entry(
         args.extend([json!("--gateway"), json!(gateway.url)]);
         env.push(json!({ "name": TOKEN_ENV, "value": gateway.token }));
     }
+    if let Some(relay) = relay {
+        args.extend([json!("--workflows"), json!(relay.url)]);
+        // The gateway's token is the relay's: the pod has one.
+        if let (Some(token), true) = (&relay.token, env.is_empty()) {
+            env.push(json!({ "name": TOKEN_ENV, "value": token }));
+        }
+    }
     json!({
         "name": SERVER_NAME,
         "command": program.to_string_lossy(),
@@ -228,12 +259,13 @@ pub fn server_entry(
 /// Serve MCP on stdin/stdout for the checkout at `root` until stdin closes,
 /// with the knowledge at `notes` when there is a gateway to keep it,
 /// previews recorded in `previews` and the review kept in `review` when the
-/// relay reads them.
+/// relay reads them, and the workflows `workflows` runs.
 pub async fn serve(
     root: &Path,
     notes: Option<KnowledgeEndpoint>,
     previews: Option<PathBuf>,
     review: Option<PathBuf>,
+    workflows: Option<RelayWorkflows>,
 ) -> io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -243,6 +275,9 @@ pub async fn serve(
     }
     if let Some(review) = review {
         session = session.with_review(review);
+    }
+    if let Some(workflows) = workflows {
+        session = session.with_workflows(workflows);
     }
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -302,13 +337,14 @@ pub async fn handle<N: Notes>(
                     "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
                     "instructions": instructions(root, known.as_ref(), session.previews.is_some())
                         + &session.review.as_ref().map(|_| review_instructions(root)).unwrap_or_default()
+                        + &session.workflows.as_ref().map(|_| workflows::instructions(root)).unwrap_or_default()
                 }),
             )
         }
         "ping" => result(id, json!({})),
         "tools/list" => result(
             id,
-            json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some()) }),
+            json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some(), session.workflows.is_some()) }),
         ),
         "tools/call" => {
             let name = message.pointer("/params/name").and_then(Value::as_str);
@@ -324,6 +360,24 @@ pub async fn handle<N: Notes>(
                 {
                     let file = session.review.as_deref().unwrap_or(Path::new(""));
                     call_review(root, file, tool, &arguments)
+                }
+                (
+                    Some(
+                        tool @ (workflows::RUN_WORKFLOW
+                        | workflows::READ_WORKFLOW
+                        | workflows::LIST_WORKFLOWS
+                        | workflows::STOP_WORKFLOW),
+                    ),
+                    _,
+                    _,
+                ) if session.workflows.is_some() => {
+                    let Some(relay) = &session.workflows else {
+                        return Some(error(id, -32602, "unknown tool"));
+                    };
+                    match workflows::call(relay, tool, &arguments).await {
+                        Some(outcome) => outcome,
+                        None => return Some(error(id, -32602, "unknown tool")),
+                    }
                 }
                 (Some(tool), Some(notes), _) => {
                     match call_knowledge(root, notes, session, tool, &arguments).await {
@@ -349,7 +403,7 @@ pub async fn handle<N: Notes>(
 /// The tools on offer: the knowledge ones only with a gateway to keep it,
 /// `open_preview` only with a relay to list the previews, and the review
 /// ones only with a relay to keep the review.
-fn tools(knowledge: bool, previews: bool, review: bool) -> Vec<Value> {
+fn tools(knowledge: bool, previews: bool, review: bool, workflows: bool) -> Vec<Value> {
     let name = json!({
         "type": "string",
         "description": "The note's name: lowercase letters, digits, and `-`, like `release-process`."
@@ -389,6 +443,9 @@ fn tools(knowledge: bool, previews: bool, review: bool) -> Vec<Value> {
     }
     if review {
         tools.extend(review_tools());
+    }
+    if workflows {
+        tools.extend(workflows::tools());
     }
     if knowledge {
         tools.extend([

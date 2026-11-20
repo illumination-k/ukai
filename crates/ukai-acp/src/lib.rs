@@ -31,6 +31,7 @@ pub mod schedules;
 mod secrets;
 mod session;
 pub mod updates;
+pub mod workflows;
 
 pub use checkout::Checkout;
 pub use fs::{FsError, FsRoot};
@@ -46,6 +47,7 @@ pub use session::{
     SlashCommand, TURN_STATE_METHOD, ToolStatus, Usage, spawn_session, spawn_session_with,
 };
 pub use updates::{RestartEndpoint, Update, UpdateCheck};
+pub use workflows::WorkflowsEndpoint;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig};
 use agent_client_protocol_http::{HttpClient, HttpClientError};

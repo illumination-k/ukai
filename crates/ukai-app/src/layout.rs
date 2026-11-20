@@ -28,6 +28,7 @@ use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, download_report, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
+use crate::workflows::WorkflowsPane;
 
 /// The width of the divider between two children of a split, in CSS pixels;
 /// matches `.divider` in `main.css`.
@@ -300,6 +301,13 @@ pub fn pane_label(
             match place.agent() {
                 Some(agent) => format!("Changes · {agent}"),
                 None => "Changes".to_owned(),
+            },
+        ),
+        Some(PaneContent::Workflows { project, place }) => (
+            Some(project_name(project)),
+            match place.agent() {
+                Some(agent) => format!("Workflows · {agent}"),
+                None => "Workflows".to_owned(),
             },
         ),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
@@ -725,6 +733,14 @@ fn PaneView(pane: PaneId) -> Element {
                             project,
                             place,
                         }
+                    }
+                },
+                PaneContent::Workflows { project, place } => rsx! {
+                    WorkflowsPane {
+                        key: "{project}-{place:?}",
+                        pane,
+                        project,
+                        place,
                     }
                 },
                 PaneContent::Report { project, path, source } => rsx! {

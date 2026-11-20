@@ -1,8 +1,8 @@
 //! The gateway's control plane besides knowledge, as gRPC and gRPC-Web
 //! (`ukai.gateway.v1`): `Agents` (the agents, and restarting a workspace),
 //! `Ports` (what listens in a workspace), `Files` and `Commands` (the files
-//! of a workspace's checkout, and the user's commands run in it), and
-//! `Schedules`. All take the
+//! of a workspace's checkout, and the user's commands run in it),
+//! `Schedules`, and `Workflows` (the flows a workspace's relay runs). All take the
 //! gateway's token. What is not request and answer stays HTTP: ACP's
 //! `/acp`, the tunnels at `/forward`, and the reports a web view loads.
 
@@ -15,6 +15,7 @@ use ukai_acp::checkout::{
 };
 use ukai_acp::ports::PortListing;
 use ukai_acp::review::{AnnotateRequest, Review};
+use ukai_acp::workflows::{Launcher, RelayError, StartRequest};
 use ukai_core::schedule::{ScheduleInfo, ScheduleSpec, Trigger};
 use ukai_proto::gateway::v1 as gw;
 use ukai_proto::gateway::v1::schedule_change::Outcome as Change;
@@ -333,6 +334,96 @@ impl gw::commands_server::Commands for Api {
             Status::unavailable("cannot run the command in the workspace")
         })?;
         Ok(Response::new(output.into()))
+    }
+}
+
+/// What a relay's workflows answered, as the gateway's clients are told: a
+/// refusal keeps its reason.
+fn workflow_failure(agent: &str, error: RelayError) -> Status {
+    match error {
+        RelayError::NotFound => Status::not_found("no such run"),
+        RelayError::Refused(why) => Status::aborted(why),
+        RelayError::Unreachable(error) => {
+            tracing::warn!(%agent, %error, "cannot reach the workspace's workflows");
+            Status::unavailable("cannot reach the workspace's workflows")
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl gw::workflows_server::Workflows for Api {
+    async fn list(
+        &self,
+        request: Request<gw::ListWorkflowsRequest>,
+    ) -> Result<Response<gw::WorkflowListing>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let listing = relay
+            .workflows(&self.gateway.http)
+            .list()
+            .await
+            .map_err(|error| workflow_failure(&request.agent, error))?;
+        Ok(Response::new(listing.into()))
+    }
+
+    async fn get(
+        &self,
+        request: Request<gw::WorkflowRunRequest>,
+    ) -> Result<Response<gw::WorkflowRun>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let run = relay
+            .workflows(&self.gateway.http)
+            .get(&request.run)
+            .await
+            .map_err(|error| workflow_failure(&request.agent, error))?;
+        Ok(Response::new(run.into()))
+    }
+
+    async fn start(
+        &self,
+        request: Request<gw::StartWorkflowRequest>,
+    ) -> Result<Response<gw::WorkflowRunSummary>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        tracing::info!(agent = %request.agent, job = %plan.job_name(), flow = %request.flow, "starting a workflow for the user");
+        // Only what the checkout declares: a script of the user's own would
+        // be a command, which `Commands.Run` is for.
+        let start = StartRequest {
+            flow: Some(request.flow),
+            input: request.input,
+            run: request.run,
+            by: Launcher::User,
+            ..StartRequest::default()
+        };
+        let run = relay
+            .workflows(&self.gateway.http)
+            .start(&start)
+            .await
+            .map_err(|error| workflow_failure(&request.agent, error))?;
+        Ok(Response::new(run.into()))
+    }
+
+    async fn stop(
+        &self,
+        request: Request<gw::WorkflowRunRequest>,
+    ) -> Result<Response<gw::WorkflowRunSummary>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let run = relay
+            .workflows(&self.gateway.http)
+            .stop(&request.run)
+            .await
+            .map_err(|error| workflow_failure(&request.agent, error))?;
+        Ok(Response::new(run.into()))
     }
 }
 

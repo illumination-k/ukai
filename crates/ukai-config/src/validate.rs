@@ -43,6 +43,14 @@ pub enum Problem {
     UnknownPriority(String),
     #[error("review.{0}: {1}")]
     ReviewDescription(String, DescriptionProblem),
+    #[error(
+        "workflows: `{0}` is not lowercase letters, digits, and `-`, at most {REVIEW_TAG_MAX} characters"
+    )]
+    InvalidWorkflowName(String),
+    #[error("workflows.{name}.path: `{}` is not a file inside the project", .path.display())]
+    WorkflowOutsideProject { name: String, path: PathBuf },
+    #[error("workflows.{0}.description: {1}")]
+    WorkflowDescription(String, DescriptionProblem),
 }
 
 /// What is wrong with a description in `[review]`, which the agent is told
@@ -124,6 +132,7 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         .chain(bad_globs)
         .chain(bad_language)
         .chain(review_problems(&config.review))
+        .chain(workflow_problems(config))
         .collect()
 }
 
@@ -132,6 +141,28 @@ fn is_gateway_url(url: &str) -> bool {
     url.split_once("://").is_some_and(|(scheme, rest)| {
         matches!(scheme, "http" | "https" | "ws" | "wss") && !rest.trim_end_matches('/').is_empty()
     })
+}
+
+fn workflow_problems(config: &Config) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (name, workflow) in &config.workflows {
+        if !is_tag(name) {
+            problems.push(Problem::InvalidWorkflowName(name.clone()));
+        }
+        if workflow.path.as_os_str().is_empty() || !inside_project(&workflow.path) {
+            problems.push(Problem::WorkflowOutsideProject {
+                name: name.clone(),
+                path: workflow.path.clone(),
+            });
+        }
+        if let Some(description) = &workflow.description {
+            problems.extend(
+                description_problems(description)
+                    .map(|why| Problem::WorkflowDescription(name.clone(), why)),
+            );
+        }
+    }
+    problems
 }
 
 fn review_problems(review: &Review) -> Vec<Problem> {

@@ -27,6 +27,10 @@ pub struct Config {
     pub reports: Reports,
     #[serde(default)]
     pub review: Review,
+    /// ayaito flows the user can start in a gateway agent's workspace, by
+    /// name.
+    #[serde(default)]
+    pub workflows: BTreeMap<String, Workflow>,
     /// Keyboard shortcuts by action name, over the defaults. Only the
     /// user-level `config.toml` may set them: they apply to the whole app.
     #[serde(default)]
@@ -244,6 +248,20 @@ pub struct Review {
     /// `p0` to `p3` → what it means in this project, over the defaults.
     #[serde(default)]
     pub priorities: BTreeMap<String, String>,
+}
+
+/// A flow of the checkout: a script whose default export is an [ayaito]
+/// node, or a function of what ukai gives it (the runtime whose agents are
+/// sessions of the workspace's agent) returning one.
+///
+/// [ayaito]: https://github.com/illumination-k/ayaito
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workflow {
+    /// The script, relative to the project root.
+    pub path: PathBuf,
+    /// One line telling the user and the agent what it does.
+    pub description: Option<String>,
 }
 
 /// The priorities an annotation may have, most pressing first.

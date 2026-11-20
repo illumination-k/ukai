@@ -38,3 +38,9 @@ decision = "allow"
 
 [reports]
 dirs = ["reports"]
+
+# ayaito flows the user can start in a gateway agent's workspace (the agent
+# can also write and start its own).
+[workflows.crate-review]
+path = "flows/crate-review.ts"
+description = "Reviews a crate's error handling, tests, and docs side by side"

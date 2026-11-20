@@ -204,6 +204,39 @@ fn review_problem(#[case] src: &str, #[case] expected: Vec<Problem>) {
     assert_eq!(problems(src), expected);
 }
 
+#[rstest]
+#[case::bad_name(
+    "[workflows.Weekly]\npath = \"flows/weekly.ts\"",
+    vec![Problem::InvalidWorkflowName("Weekly".into())]
+)]
+#[case::outside(
+    "[workflows.weekly]\npath = \"../weekly.ts\"",
+    vec![Problem::WorkflowOutsideProject { name: "weekly".into(), path: "../weekly.ts".into() }]
+)]
+#[case::no_path(
+    "[workflows.weekly]\npath = \"\"",
+    vec![Problem::WorkflowOutsideProject { name: "weekly".into(), path: "".into() }]
+)]
+#[case::empty_description(
+    "[workflows.weekly]\npath = \"flows/weekly.ts\"\ndescription = \" \"",
+    vec![Problem::WorkflowDescription("weekly".into(), DescriptionProblem::Empty)]
+)]
+fn workflow_problem(#[case] src: &str, #[case] expected: Vec<Problem>) {
+    assert_eq!(problems(src), expected);
+}
+
+#[test]
+fn reads_a_workflow() {
+    let config = parse(
+        "[workflows.weekly]\npath = \"flows/weekly.ts\"\ndescription = \"Writes the weekly article\"",
+    );
+    let workflows = config.map(|c| c.workflows).unwrap_or_default();
+    assert_eq!(
+        workflows.get("weekly").map(|w| w.path.clone()),
+        Some("flows/weekly.ts".into())
+    );
+}
+
 #[test]
 fn reads_the_review_vocabulary() {
     let config = parse(

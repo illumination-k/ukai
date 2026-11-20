@@ -422,6 +422,15 @@ impl RelayEndpoint {
         format!("http://{}{DIFF_PATH}?base={base}", self.address)
     }
 
+    /// The workflows the pod's relay runs.
+    pub fn workflows(&self, http: &reqwest::Client) -> ukai_acp::workflows::RelayWorkflows {
+        ukai_acp::workflows::RelayWorkflows::new(
+            http.clone(),
+            format!("http://{}", self.address),
+            Some(self.token.clone()),
+        )
+    }
+
     /// The WebSocket carrying one connection to `port` in the pod.
     pub fn forward_url(&self, port: u16) -> String {
         format!("ws://{}{FORWARD_PATH}/{port}", self.address)

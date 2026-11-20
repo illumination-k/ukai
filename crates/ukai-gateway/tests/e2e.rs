@@ -367,6 +367,7 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
     use ukai_acp::checkout::{Checkout, CheckoutError, DiffBase};
     use ukai_acp::ports::{PortsEndpoint, PortsError};
     use ukai_acp::updates::RestartEndpoint;
+    use ukai_acp::workflows::{WorkflowsEndpoint, WorkflowsError};
 
     let token = env("UKAI_E2E_GATEWAY_TOKEN");
     let pane = PaneWorkspace {
@@ -414,6 +415,14 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         matches!(annotated, Err(CheckoutError::NotRunning)),
         "{annotated:?}"
     );
+    // Nor do its workflows: listing them, or starting one.
+    let workflows = WorkflowsEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has workflows"));
+    let listed = workflows.list().await;
+    assert_eq!(listed, Err(WorkflowsError::NotRunning));
+    let started = workflows.start("weekly", "", None).await;
+    assert_eq!(started, Err(WorkflowsError::NotRunning));
     // Restarting a workspace with no pod leaves it without one.
     RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
         .unwrap_or_else(|e| panic!("{e}"))

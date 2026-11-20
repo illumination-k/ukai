@@ -10214,6 +10214,7 @@ dependencies = [
  "futures",
  "nix",
  "rstest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

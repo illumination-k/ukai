@@ -131,6 +131,13 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "ReportSource::is_project")]
         place: ReportSource,
     },
+    /// The workflows a gateway agent's workspace runs (`crate::workflow`):
+    /// the flows its checkout declares and the runs so far. `place` names
+    /// the workspace as a report's source does.
+    Workflows {
+        project: ProjectId,
+        place: ReportSource,
+    },
 }
 
 /// Where a report pane reads its file from, and where a browser pane's port
@@ -182,7 +189,8 @@ impl PaneContent {
             | PaneContent::Browser { project, .. }
             | PaneContent::Schedule { project, .. }
             | PaneContent::Note { project, .. }
-            | PaneContent::Diff { project, .. } => Some(project),
+            | PaneContent::Diff { project, .. }
+            | PaneContent::Workflows { project, .. } => Some(project),
         }
     }
 }
