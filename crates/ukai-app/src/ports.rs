@@ -63,7 +63,11 @@ pub fn FollowPorts() -> Element {
                 let layout = app.layout.peek();
                 let configs = app.configs.peek();
                 (
-                    followed(&layout, &configs, &app.folds.peek()),
+                    followed(
+                        &layout,
+                        &configs,
+                        app.projects.peek().selected().map(|p| &p.id),
+                    ),
                     workspaces(&layout, &configs),
                 )
             };

@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use tokio::time::Instant;
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::{AgentSpec, Config};
-use ukai_core::sidebar::{self, Fold, Folds, Node};
+use ukai_core::sidebar;
 use ukai_core::{Layout, PaneContent, ProjectId, ReportSource};
 
 use crate::projects::AppSignals;
@@ -183,20 +183,15 @@ pub fn workspaces(
 }
 
 /// What the pollers read: the workspaces of the open agent panes, then the
-/// others the sidebar shows under the projects it has open (a shared
+/// others the sidebar shows of the project selected in it (a shared
 /// workspace is there with no pane in it, and keeps its reports).
 pub fn followed(
     layout: &Layout,
     configs: &HashMap<ProjectId, Result<Config, String>>,
-    folds: &Folds,
+    selected: Option<&ProjectId>,
 ) -> Vec<Workspace> {
     let mut found = workspaces(layout, configs);
-    let mut projects: Vec<&ProjectId> = configs.keys().collect();
-    projects.sort();
-    for project in projects {
-        if !folds.is_open(&Fold::new(project, Node::Project)) {
-            continue;
-        }
+    if let Some(project) = selected {
         let config = configs.get(project).and_then(|config| config.as_ref().ok());
         for shown in sidebar::tree(layout, project, config).workspaces {
             if let Some(workspace) = Workspace::at(project, &shown.place)
@@ -412,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn follows_the_shared_workspaces_of_open_projects_too() {
+    fn follows_the_shared_workspaces_of_the_selected_project_too() {
         let mut projects = Projects::default();
         let open = projects.add(std::path::Path::new("/work/ukai"));
         let folded = projects.add(std::path::Path::new("/work/other"));
@@ -426,13 +421,10 @@ mod tests {
             (open.clone(), config(&[("claude", gateway())])),
             (folded.clone(), config(&[("claude", gateway())])),
         ]);
-        let mut folds = Folds::default();
-        folds.toggle(Fold::new(&folded, Node::Project));
-
-        // A folded project's shared workspace is not looked at, but a pane's
+        // Another project's shared workspace is not looked at, but a pane's
         // workspace is, wherever it is.
         assert_eq!(
-            followed(&layout, &configs, &folds),
+            followed(&layout, &configs, Some(&open)),
             [
                 Workspace::of(&folded, "claude", own.as_ref()),
                 Workspace::of(&open, "claude", None),

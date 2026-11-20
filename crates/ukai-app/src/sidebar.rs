@@ -1,8 +1,10 @@
-//! The sidebar: a tree of the open projects. Under each, the workspaces its
-//! agents work in — this machine's checkout, and the gateway workspaces —
-//! each with its agent panes (click to focus), reports, and ports; beside
-//! them, the knowledge and schedules of the project's gateway agents. What
-//! goes where is [`ukai_core::sidebar`]'s; this draws it.
+//! The sidebar, in two columns under a dropdown of the open projects. The
+//! first lists the selected project's workspaces — this machine's checkout,
+//! and the gateway workspaces — each with its agent panes (click to focus),
+//! and then the knowledge and schedules of its gateway agents. Clicking a
+//! pane or a workspace opens the second column on what is in that
+//! workspace: its changes, reports, and ports. What goes where is
+//! [`ukai_core::sidebar`]'s; this draws it.
 
 use std::collections::HashMap;
 
@@ -11,7 +13,7 @@ use ukai_acp::WorkspaceScope;
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
-use ukai_core::sidebar::{self, Fold, Node, OpenAgent, Workspace};
+use ukai_core::sidebar::{self, Fold, OpenAgent, Workspace};
 use ukai_core::{ProjectId, ReportSource};
 
 use crate::agent_pane::{agent_status, session_title};
@@ -26,23 +28,38 @@ use crate::report_pane::ReportGroup;
 use crate::schedules::ScheduleNode;
 use crate::shortcuts::Shortcuts;
 
+/// The workspace whose contents the second column shows.
+type Opened = Signal<Option<(ProjectId, ReportSource)>>;
+
 #[component]
 pub fn Sidebar() -> Element {
     let app = use_context::<AppSignals>();
     let paths = use_context::<Paths>();
     let shortcuts = use_context::<Shortcuts>();
-    let projects: Vec<(ProjectId, String, String)> = app
-        .projects
-        .read()
-        .iter()
-        .map(|project| {
-            (
-                project.id.clone(),
-                project.name(),
-                project.root.display().to_string(),
-            )
-        })
-        .collect();
+    let mut projects_signal = app.projects;
+    let mut launching = use_signal(|| false);
+    let opened: Opened = use_signal(|| None);
+    let (projects, selected): (Vec<(ProjectId, String, String)>, Option<ProjectId>) = {
+        let projects = app.projects.read();
+        (
+            projects
+                .iter()
+                .map(|project| {
+                    (
+                        project.id.clone(),
+                        project.name(),
+                        project.root.display().to_string(),
+                    )
+                })
+                .collect(),
+            projects.selected().map(|project| project.id.clone()),
+        )
+    };
+    let root = selected
+        .as_ref()
+        .and_then(|id| projects.iter().find(|(known, _, _)| known == id))
+        .map(|(_, _, root)| root.clone())
+        .unwrap_or_default();
     let pick = {
         let paths = paths.clone();
         move || {
@@ -50,16 +67,88 @@ pub fn Sidebar() -> Element {
             move |_| pick_and_add_project(paths.clone(), app)
         }
     };
+    // The workspace the second column shows, while it is still one of the
+    // selected project's.
+    let shown = opened.read().clone().filter(|(project, place)| {
+        Some(project) == selected.as_ref() && {
+            let configs = app.configs.read();
+            let config = configs.get(project).and_then(|config| config.as_ref().ok());
+            sidebar::tree(&app.layout.read(), project, config)
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.place == *place)
+        }
+    });
+
+    let class = if shown.is_some() {
+        "sidebar wide"
+    } else {
+        "sidebar"
+    };
 
     rsx! {
-        nav { class: "sidebar",
+        nav { class,
             div { class: "sidebar-header",
-                span { class: "section-label", "Projects" }
+                if let Some(id) = selected.clone() {
+                    select {
+                        class: "project-select",
+                        title: "{root}",
+                        value: "{id}",
+                        onchange: move |event: FormEvent| {
+                            let chosen = event.value();
+                            let mut projects = projects_signal.write();
+                            let found = projects
+                                .iter()
+                                .find(|project| project.id.to_string() == chosen)
+                                .map(|project| project.id.clone());
+                            if let Some(found) = found {
+                                projects.select(&found);
+                                launching.set(false);
+                            }
+                        },
+                        for (option_id, name, root) in projects.clone() {
+                            option {
+                                key: "{option_id}",
+                                value: "{option_id}",
+                                title: "{root}",
+                                selected: option_id == id,
+                                "{name}"
+                            }
+                        }
+                    }
+                    button {
+                        class: if launching() { "icon open" } else { "icon" },
+                        title: "Open an agent…",
+                        onclick: move |_| launching.toggle(),
+                        Svg { icon: Icon::Plus }
+                    }
+                    button {
+                        class: "icon",
+                        title: "Reload configuration",
+                        onclick: {
+                            let id = id.clone();
+                            let paths = paths.clone();
+                            move |_| reload_project(&paths, app, &id)
+                        },
+                        Svg { icon: Icon::Reload }
+                    }
+                    button {
+                        class: "icon",
+                        title: "Close project (ends its sessions)",
+                        onclick: {
+                            let id = id.clone();
+                            move |_| remove_project(app, &id)
+                        },
+                        Svg { icon: Icon::Close }
+                    }
+                } else {
+                    span { class: "section-label", "Projects" }
+                }
                 button {
                     class: "icon",
                     title: "Open project…",
                     onclick: pick(),
-                    Svg { icon: Icon::Plus }
+                    Svg { icon: Icon::Folder }
                 }
             }
             if projects.is_empty() {
@@ -71,13 +160,25 @@ pub fn Sidebar() -> Element {
                     }
                 }
             }
-            div { class: "tree",
-                for (id, name, root) in projects {
-                    ProjectNode {
-                        key: "{id}",
-                        id,
-                        name,
-                        root,
+            if let Some(id) = selected {
+                div { class: "sidebar-columns",
+                    div { class: "sidebar-column tree",
+                        ProjectPanes {
+                            key: "{id}",
+                            id: id.clone(),
+                            launching,
+                            opened,
+                        }
+                    }
+                    if let Some((project, place)) = shown {
+                        div { class: "sidebar-column sidebar-detail tree",
+                            WorkspaceDetail {
+                                key: "{place_key(&place)}",
+                                project,
+                                place,
+                                opened,
+                            }
+                        }
                     }
                 }
             }
@@ -121,7 +222,6 @@ pub fn Head(
     #[props(default)] marker: Option<&'static str>,
     #[props(default)] title: String,
     #[props(default)] class: String,
-    #[props(default)] on_toggle: Option<EventHandler<()>>,
     children: Element,
 ) -> Element {
     let app = use_context::<AppSignals>();
@@ -135,9 +235,6 @@ pub fn Head(
             aria_expanded: open,
             onclick: move |_| {
                 folds.write().toggle(fold.clone());
-                if let Some(on_toggle) = on_toggle {
-                    on_toggle.call(());
-                }
             },
             span { class: if open { "fold open" } else { "fold" },
                 Svg { icon: Icon::Chevron, size: 10 }
@@ -159,15 +256,12 @@ pub fn Head(
     }
 }
 
-/// One project: its workspaces, then its knowledge and schedules when it has
-/// a gateway agent. A project with only this machine's checkout lists its
-/// agents, reports, and ports right under it.
+/// The first column: what can be launched (while asked for), the project's
+/// workspaces with their agent panes, then its knowledge and schedules when
+/// it has a gateway agent.
 #[component]
-fn ProjectNode(id: ProjectId, name: String, root: String) -> Element {
+fn ProjectPanes(id: ProjectId, launching: Signal<bool>, opened: Opened) -> Element {
     let app = use_context::<AppSignals>();
-    let paths = use_context::<Paths>();
-    let mut launching = use_signal(|| false);
-    let mut projects = app.projects;
     let (tree, problem, launch) = {
         let configs = app.configs.read();
         let config = configs.get(&id);
@@ -183,141 +277,79 @@ fn ProjectNode(id: ProjectId, name: String, root: String) -> Element {
             .unwrap_or_default();
         (tree, problem, launch)
     };
-    let fold = Fold::new(&id, Node::Project);
-    let mut folds = app.folds;
-    let open = folds.read().is_open(&fold);
-    let count = match tree.agent_count() {
-        0 => String::new(),
-        n => n.to_string(),
-    };
-    let flat = tree.flat();
-    let launch_fold = fold.clone();
 
     rsx! {
-        div { class: "project-group",
-            Head {
-                fold: fold.clone(),
-                depth: 0,
-                icon: Icon::Folder,
-                label: name,
-                meta: count,
-                title: root,
-                class: "project-row",
-                on_toggle: {
-                    let id = id.clone();
-                    move |()| projects.write().select(&id)
-                },
-                button {
-                    class: if launching() { "icon open" } else { "icon" },
-                    title: "Open an agent…",
-                    onclick: move |event: MouseEvent| {
-                        event.stop_propagation();
-                        folds.write().open(launch_fold.clone());
-                        launching.toggle();
-                    },
-                    Svg { icon: Icon::Plus }
-                }
-                button {
-                    class: "icon",
-                    title: "Reload configuration",
-                    onclick: {
-                        let id = id.clone();
-                        let paths = paths.clone();
-                        move |event: MouseEvent| {
-                            event.stop_propagation();
-                            reload_project(&paths, app, &id);
-                        }
-                    },
-                    Svg { icon: Icon::Reload }
-                }
-                button {
-                    class: "icon",
-                    title: "Close project (ends its sessions)",
-                    onclick: {
-                        let id = id.clone();
-                        move |event: MouseEvent| {
-                            event.stop_propagation();
-                            remove_project(app, &id);
-                        }
-                    },
-                    Svg { icon: Icon::Close }
+        if launching() {
+            if launch.is_empty() {
+                p { class: "muted hint tree-hint", style: "--depth: 0",
+                    "No agents or gateways declared in ukai.toml."
                 }
             }
-            if open {
-                if launching() {
-                    if launch.is_empty() {
+            for Group { gateway, status, choices } in launch {
+                // A gateway's agents sit one level under it.
+                if let Some(gateway) = &gateway {
+                    div {
+                        key: "launch-gateway-{gateway}",
+                        class: "row launch-row launch-gateway",
+                        style: "--depth: 0",
+                        span { class: "row-icon",
+                            Svg { icon: Icon::Globe, size: 12 }
+                        }
+                        span { class: "name", "{gateway}" }
+                        if status == Status::Loading {
+                            span { class: "meta", "listing…" }
+                        }
+                    }
+                    if let Status::Failed(why) = &status {
                         p {
                             class: "muted hint tree-hint",
                             style: "--depth: 1",
-                            "No agents or gateways declared in ukai.toml."
-                        }
-                    }
-                    for Group { gateway, status, choices } in launch {
-                        // A gateway's agents sit one level under it.
-                        if let Some(gateway) = &gateway {
-                            div {
-                                key: "launch-gateway-{gateway}",
-                                class: "row launch-row launch-gateway",
-                                style: "--depth: 1",
-                                span { class: "row-icon",
-                                    Svg { icon: Icon::Globe, size: 12 }
-                                }
-                                span { class: "name", "{gateway}" }
-                                if status == Status::Loading {
-                                    span { class: "meta", "listing…" }
-                                }
-                            }
-                            if let Status::Failed(why) = &status {
-                                p {
-                                    class: "muted hint tree-hint",
-                                    style: "--depth: 2",
-                                    title: "{why}",
-                                    "Cannot list its agents."
-                                }
-                            }
-                        }
-                        for Choice { agent, name, badge, scope, line } in choices {
-                            div {
-                                key: "launch-{agent}-{badge}",
-                                class: "row launch-row",
-                                style: if gateway.is_some() { "--depth: 2" } else { "--depth: 1" },
-                                title: "{line}",
-                                onclick: {
-                                    let id = id.clone();
-                                    move |_| {
-                                        launching.set(false);
-                                        launch_agent(app, &id, &agent, scope);
-                                    }
-                                },
-                                span { class: "row-icon",
-                                    Svg { icon: Icon::Plus, size: 12 }
-                                }
-                                span { class: "name", "{name}" }
-                                span { class: "meta", "{badge}" }
-                            }
+                            title: "{why}",
+                            "Cannot list its agents."
                         }
                     }
                 }
-                if let Some(problem) = problem {
-                    pre { class: "config-error tree-hint", style: "--depth: 1", "{problem}" }
-                }
-                for workspace in tree.workspaces {
-                    WorkspaceNode {
-                        key: "{place_key(&workspace.place)}",
-                        project: id.clone(),
-                        workspace,
-                        depth: 1,
-                        flat,
+                for Choice { agent, name, badge, scope, line } in choices {
+                    div {
+                        key: "launch-{agent}-{badge}",
+                        class: "row launch-row",
+                        style: if gateway.is_some() { "--depth: 1" } else { "--depth: 0" },
+                        title: "{line}",
+                        onclick: {
+                            let id = id.clone();
+                            move |_| {
+                                launching.set(false);
+                                launch_agent(app, &id, &agent, scope);
+                            }
+                        },
+                        span { class: "row-icon",
+                            Svg { icon: Icon::Plus, size: 12 }
+                        }
+                        span { class: "name", "{name}" }
+                        span { class: "meta", "{badge}" }
                     }
                 }
-                if !tree.gateways.is_empty() {
-                    KnowledgeNode { project: id.clone(), depth: 1 }
-                    ScheduleNode {
-                        project: id.clone(),
-                        gateways: tree.gateways.clone(),
-                        depth: 1,
-                    }
-                }
+            }
+            div { class: "tree-divider" }
+        }
+        if let Some(problem) = problem {
+            pre { class: "config-error tree-hint", style: "--depth: 0", "{problem}" }
+        }
+        for workspace in tree.workspaces {
+            WorkspaceNode {
+                key: "{place_key(&workspace.place)}",
+                project: id.clone(),
+                workspace,
+                opened,
+            }
+        }
+        if !tree.gateways.is_empty() {
+            div { class: "tree-divider" }
+            KnowledgeNode { project: id.clone(), depth: 0 }
+            ScheduleNode {
+                project: id.clone(),
+                gateways: tree.gateways.clone(),
+                depth: 0,
             }
         }
     }
@@ -378,22 +410,14 @@ fn place_label(
     }
 }
 
-/// A workspace: its agent panes, reports, and ports. With `flat`, it is the
-/// project's only one, so it has no row of its own.
+/// A workspace in the first column: a row that opens it in the second, and
+/// its agent panes under it.
 #[component]
-fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool) -> Element {
+fn WorkspaceNode(project: ProjectId, workspace: Workspace, opened: Opened) -> Element {
     let app = use_context::<AppSignals>();
     let mut choosing = use_signal(|| false);
+    let mut opened = opened;
     let Workspace { place, agents } = workspace;
-    let fold = Fold::new(
-        &project,
-        Node::Workspace {
-            place: place.clone(),
-        },
-    );
-    let mut folds = app.folds;
-    let open = flat || folds.read().is_open(&fold);
-    let inner = if flat { depth } else { depth + 1 };
     // The agents a new session here can be: this machine's, or the one
     // whose workspace this is.
     let local: Vec<String> = match app.configs.read().get(&project) {
@@ -406,14 +430,16 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
         _ => Vec::new(),
     };
     let (icon, label, meta, title) = place_label(&place, &app.schedule_names.read());
+    let selected = opened
+        .read()
+        .as_ref()
+        .is_some_and(|(p, known)| *p == project && *known == place);
     let new_session = {
         let project = project.clone();
         let place = place.clone();
         let local = local.clone();
-        let fold = fold.clone();
         move |event: MouseEvent| {
             event.stop_propagation();
-            folds.write().open(fold.clone());
             match &place {
                 ReportSource::Project => match local.as_slice() {
                     [only] => launch_agent(app, &project, only, None),
@@ -438,14 +464,30 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
     let can_start = !place.is_project() || !local.is_empty();
 
     rsx! {
-        if !flat {
-            Head {
-                fold: fold.clone(),
-                depth,
-                icon,
-                label,
-                meta,
-                title,
+        div {
+            class: if selected { "row tree-head workspace-row selected" } else { "row tree-head workspace-row" },
+            style: "--depth: 0",
+            title: "{title}",
+            onclick: {
+                let project = project.clone();
+                let place = place.clone();
+                move |_| {
+                    let next = (project.clone(), place.clone());
+                    let mut opened = opened.write();
+                    *opened = if opened.as_ref() == Some(&next) { None } else { Some(next) };
+                }
+            },
+            span { class: "row-icon",
+                Svg { icon, size: 12 }
+            }
+            span { class: "name", "{label}" }
+            if !meta.is_empty() {
+                span { class: "meta", "{meta}" }
+            }
+            span { class: "fold-hint",
+                Svg { icon: Icon::Chevron, size: 10 }
+            }
+            span { class: "row-actions",
                 if can_start {
                     button {
                         class: "icon",
@@ -456,46 +498,67 @@ fn WorkspaceNode(project: ProjectId, workspace: Workspace, depth: u8, flat: bool
                 }
             }
         }
-        if open {
-            if choosing() {
-                for agent in local {
-                    div {
-                        key: "launch-{agent}",
-                        class: "row launch-row",
-                        style: "--depth: {inner}",
-                        onclick: {
-                            let project = project.clone();
-                            move |_| {
-                                choosing.set(false);
-                                launch_agent(app, &project, &agent, None);
-                            }
-                        },
-                        span { class: "row-icon",
-                            Svg { icon: Icon::Plus, size: 12 }
+        if choosing() {
+            for agent in local {
+                div {
+                    key: "launch-{agent}",
+                    class: "row launch-row",
+                    style: "--depth: 1",
+                    onclick: {
+                        let project = project.clone();
+                        move |_| {
+                            choosing.set(false);
+                            launch_agent(app, &project, &agent, None);
                         }
-                        span { class: "name", "{agent}" }
+                    },
+                    span { class: "row-icon",
+                        Svg { icon: Icon::Plus, size: 12 }
                     }
+                    span { class: "name", "{agent}" }
                 }
             }
-            for agent in agents {
-                AgentRow { key: "{agent.pane}", agent, depth: inner }
-            }
-            ChangesRow {
-                project: project.clone(),
-                place: place.clone(),
-                depth: inner,
-            }
-            ReportGroup {
-                project: project.clone(),
-                place: place.clone(),
-                depth: inner,
-            }
-            PortGroup {
-                project: project.clone(),
-                place: place.clone(),
-                depth: inner,
+        }
+        for agent in agents {
+            AgentRow {
+                key: "{agent.pane}",
+                agent,
+                depth: 1,
+                on_open: {
+                    let project = project.clone();
+                    let place = place.clone();
+                    move |()| opened.set(Some((project.clone(), place.clone())))
+                },
             }
         }
+    }
+}
+
+/// The second column: what is in one workspace — its changes, reports, and
+/// ports.
+#[component]
+fn WorkspaceDetail(project: ProjectId, place: ReportSource, opened: Opened) -> Element {
+    let app = use_context::<AppSignals>();
+    let mut opened = opened;
+    let (icon, label, meta, title) = place_label(&place, &app.schedule_names.read());
+    rsx! {
+        div { class: "detail-header", title: "{title}",
+            span { class: "row-icon",
+                Svg { icon, size: 12 }
+            }
+            span { class: "name", "{label}" }
+            if !meta.is_empty() {
+                span { class: "meta", "{meta}" }
+            }
+            button {
+                class: "icon",
+                title: "Close",
+                onclick: move |_| opened.set(None),
+                Svg { icon: Icon::Close }
+            }
+        }
+        ChangesRow { project: project.clone(), place: place.clone(), depth: 0 }
+        ReportGroup { project: project.clone(), place: place.clone(), depth: 0 }
+        PortGroup { project, place, depth: 0 }
     }
 }
 
@@ -518,9 +581,10 @@ fn ChangesRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
     }
 }
 
-/// An open agent pane, with its state: click to focus it.
+/// An open agent pane, with its state: click to focus it and open its
+/// workspace beside.
 #[component]
-fn AgentRow(agent: OpenAgent, depth: u8) -> Element {
+fn AgentRow(agent: OpenAgent, depth: u8, on_open: EventHandler<()>) -> Element {
     let app = use_context::<AppSignals>();
     let mut layout = app.layout;
     let OpenAgent { pane, agent, tab } = agent;
@@ -552,7 +616,10 @@ fn AgentRow(agent: OpenAgent, depth: u8) -> Element {
             class,
             style: "--depth: {depth}",
             title: "{hint}",
-            onclick: move |_| layout.write().focus(pane),
+            onclick: move |_| {
+                layout.write().focus(pane);
+                on_open.call(());
+            },
             span { class: "dot {state}" }
             span { class: "name", "{agent}" }
             if let Some(session) = session {

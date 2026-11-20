@@ -296,18 +296,121 @@ button:focus-visible,
   flex: 0 0 260px;
   flex-direction: column;
   min-width: 0;
-  overflow-y: auto;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
+}
+
+/* With a workspace opened, the second column takes its own width. */
+.sidebar.wide {
+  flex-basis: 520px;
 }
 
 .sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 2px;
   height: 32px;
-  margin-top: 8px;
-  padding: 0 8px 0 16px;
+  margin: 8px 0 4px;
+  padding: 0 8px;
+}
+
+.sidebar-header .section-label {
+  flex: 1;
+  padding-left: 8px;
+}
+
+.project-select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  margin-right: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sidebar-columns {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar-column {
+  flex: 0 0 260px;
+  min-width: 0;
+  padding-bottom: 8px;
+  overflow-y: auto;
+}
+
+.sidebar-detail {
+  flex: 1 1 260px;
+  border-left: 1px solid var(--border);
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 4px 0 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.detail-header .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-header .meta {
+  overflow: hidden;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-header button.icon {
+  margin-left: auto;
+}
+
+.tree-divider {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--border);
+}
+
+/* A workspace opens beside rather than under: its chevron points there. */
+.workspace-row .fold-hint {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 12px;
+  margin-left: auto;
+  color: var(--muted-fg);
+  opacity: 0;
+}
+
+.workspace-row:hover .fold-hint,
+.workspace-row.selected .fold-hint {
+  opacity: 1;
+}
+
+.workspace-row .meta + .fold-hint {
+  margin-left: 0;
+}
+
+.workspace-row:has(.row-actions button):hover .fold-hint {
+  display: none;
 }
 
 .section-label {
