@@ -1,7 +1,7 @@
 //! What survives a restart: registered projects with the model and effort
 //! their agents' new sessions start with, the tab/pane layout, including
 //! each agent pane's ACP session id so it can be continued, and what of the
-//! sidebar is folded.
+//! sidebar is folded, and the branch each session last worked on.
 //!
 //! One versioned JSON document, written atomically. Transcripts are not
 //! stored: agents that support `session/load` replay them.
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::branch::SessionBranches;
 use crate::layout::{Layout, PaneContent};
 use crate::project::Projects;
 use crate::sidebar::Folds;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub layout: Layout,
     #[serde(default, skip_serializing_if = "Folds::is_empty")]
     pub sidebar: Folds,
+    #[serde(default, skip_serializing_if = "SessionBranches::is_empty")]
+    pub branches: SessionBranches,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,17 +54,27 @@ pub enum StateError {
 }
 
 impl AppState {
-    pub fn new(projects: Projects, layout: Layout, sidebar: Folds) -> Self {
+    pub fn new(
+        projects: Projects,
+        layout: Layout,
+        sidebar: Folds,
+        branches: SessionBranches,
+    ) -> Self {
         Self {
             version: STATE_VERSION,
             projects,
             layout,
             sidebar,
+            branches,
         }
     }
 
-    /// Empty every pane that refers to a project no longer registered.
+    /// Empty every pane that refers to a project no longer registered, and
+    /// forget its sessions' branches.
     pub fn drop_orphans(&mut self) {
+        let projects = &self.projects;
+        self.branches
+            .retain_projects(|project| projects.get(project).is_some());
         let orphans: Vec<_> = self
             .layout
             .contents()
@@ -197,7 +210,16 @@ mod tests {
             &project,
             crate::sidebar::Node::Knowledge,
         ));
-        AppState::new(projects, layout, sidebar)
+        let mut branches = crate::branch::SessionBranches::default();
+        branches.record(
+            crate::branch::SessionKey {
+                project,
+                agent: "claude".into(),
+                session: "sess-1".into(),
+            },
+            "feature/x".into(),
+        );
+        AppState::new(projects, layout, sidebar, branches)
     }
 
     #[test]
@@ -360,5 +382,6 @@ mod tests {
                 .contents()
                 .all(|(_, content)| *content == PaneContent::Empty)
         );
+        assert!(state.branches.is_empty());
     }
 }

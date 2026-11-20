@@ -3,6 +3,7 @@
 
 pub mod annotation;
 pub mod attachment;
+pub mod branch;
 pub mod browser;
 pub mod composer;
 pub mod config;
