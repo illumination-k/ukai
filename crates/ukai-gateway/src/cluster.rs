@@ -19,6 +19,7 @@ use kube::{Client, Config};
 use ukai_acp::checkout::{DIFF_PATH, DiffBase, FILES_PATH, RUN_PATH, UPLOAD_PATH};
 use ukai_acp::ports::{FORWARD_PATH, PORTS_PATH};
 use ukai_acp::review::REVIEW_PATH;
+use ukai_acp::terminal::{Size, TERMINAL_PATH};
 
 use crate::job::{
     AGENT_CONTAINER, GIT_ANNOTATION, KNOWLEDGE_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT,
@@ -426,6 +427,14 @@ impl RelayEndpoint {
     pub fn forward_url(&self, port: u16) -> String {
         format!("ws://{}{FORWARD_PATH}/{port}", self.address)
     }
+
+    /// The WebSocket carrying a shell in the pod's checkout, `size` large.
+    pub fn terminal_url(&self, size: Size) -> String {
+        format!(
+            "ws://{}{TERMINAL_PATH}?cols={}&rows={}",
+            self.address, size.cols, size.rows
+        )
+    }
 }
 
 /// The token `pod`'s relay wants from its clients.
@@ -662,6 +671,10 @@ mod tests {
         assert_eq!(
             endpoint.forward_url(5173),
             "ws://10.0.0.7:7070/forward/5173"
+        );
+        assert_eq!(
+            endpoint.terminal_url(ukai_acp::terminal::Size { cols: 90, rows: 20 }),
+            "ws://10.0.0.7:7070/terminal?cols=90&rows=20"
         );
         assert_eq!(
             endpoint.reports_url("/files/reports/run%201.html"),

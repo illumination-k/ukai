@@ -22,6 +22,10 @@
 //! TCP connection to a port in that workspace's pod, through the pod's
 //! `ukai-relay`. Like reports, it never starts a pod.
 //!
+//! `GET /agents/<id>/terminal?cols=&rows=` upgrades to a WebSocket carrying
+//! a shell in that workspace's checkout (the relay's `/terminal`, see
+//! `ukai_acp::terminal`), for a terminal pane. It never starts a pod either.
+//!
 //! The rest is request and answer, served as gRPC and gRPC-Web on the same
 //! port ([`api`], `ukai.gateway.v1`): `Agents` lists the agents and restarts
 //! a workspace (stopping its pod, so the next connection starts a fresh
@@ -69,8 +73,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -211,6 +216,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             get(reports).delete(remove_report),
         )
         .route("/agents/{id}/forward/{port}", get(forward))
+        .route("/agents/{id}/terminal", get(terminal))
         .with_state(gateway.clone())
         .merge(grpc(gateway.clone()))
         // The gRPC routes come with a fallback answering every other path
@@ -499,6 +505,43 @@ async fn forward(
         let (relay_tx, relay_rx) = upstream.split();
         if let Err(error) = pump(client_tx, client_rx, relay_tx, relay_rx).await {
             tracing::debug!(agent = %id, port, %error, "a forwarded connection ended with an error");
+        }
+    })
+}
+
+/// `GET /agents/<id>/terminal`: a shell in the checkout of the workspace's
+/// pod, as a WebSocket passed through to the relay's. The relay is reached
+/// before the client is upgraded, so a failure there is a status the client
+/// can show rather than a socket that closes at once.
+async fn terminal(
+    State(gateway): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    size: Result<Query<ukai_acp::terminal::Size>, QueryRejection>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let size = size.map(|Query(size)| size).unwrap_or_default().clamped();
+    let endpoint = match serving_relay(&gateway, &id, &headers).await {
+        Ok(endpoint) => endpoint,
+        Err(response) => return response,
+    };
+    let upstream = match connect_relay_url(&endpoint.terminal_url(size), &endpoint.token).await {
+        Ok(upstream) => upstream,
+        Err(tungstenite::Error::Http(response)) => {
+            return StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY)
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(agent = %id, %error, "cannot reach the workspace's relay");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    upgrade.on_upgrade(move |socket| async move {
+        let (client_tx, client_rx) = socket.split();
+        let (relay_tx, relay_rx) = upstream.split();
+        if let Err(error) = pump(client_tx, client_rx, relay_tx, relay_rx).await {
+            tracing::debug!(agent = %id, %error, "a terminal ended with an error");
         }
     })
 }

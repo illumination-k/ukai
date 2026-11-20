@@ -422,6 +422,21 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         .remove("/reports/run.html")
         .await;
     assert!(deleted.is_ok(), "{deleted:?}");
+    // Nor does opening a terminal there.
+    let terminal = ukai_acp::terminal::TerminalEndpoint::resolve(
+        &agent_spec(&token),
+        |_, _| None,
+        Some(&pane),
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap_or_else(|| panic!("a gateway agent has a terminal"))
+    .connect(ukai_acp::terminal::Size::default())
+    .await;
+    assert!(
+        matches!(terminal, Err(ukai_acp::terminal::TerminalError::NotRunning)),
+        "{:?}",
+        terminal.map(|_| ())
+    );
     // Restarting a workspace with no pod leaves it without one.
     RestartEndpoint::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
         .unwrap_or_else(|e| panic!("{e}"))

@@ -31,7 +31,8 @@ pub struct Options {
     /// The gateway that started this pod: with `token`, the MCP server
     /// hands the agent the knowledge it keeps for the project.
     pub gateway: Option<String>,
-    /// Exit after this long with no client connected and no turn running.
+    /// Exit after this long with no client connected, no turn running, and
+    /// no terminal open.
     pub idle_timeout: Duration,
     pub command: String,
     pub args: Vec<String>,
@@ -90,6 +91,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // and read with the diff; see `crate::review`.
     let review = previews.with_file_name("review.json");
     let token = options.token.clone().map(Arc::<str>::from);
+    // A shell in the checkout, for a terminal pane; see `crate::terminal`.
+    let terminals = crate::terminal::Terminals::default();
     let router = server
         .into_router()
         .merge(crate::reports::router(
@@ -103,6 +106,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
             previews.with_file_name("attachments"),
         ))
         .merge(crate::review::router(review.clone()))
+        .merge(crate::terminal::router(
+            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+            terminals.clone(),
+        ))
         .merge(crate::ports::router(crate::ports::Ports {
             own: options.listen.port(),
             previews: previews.clone(),
@@ -210,7 +217,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 }
             },
             _ = tick.tick() => {
-                if hub.busy() {
+                // Someone typing in a terminal is as busy as a turn.
+                if hub.busy() || terminals.open() > 0 {
                     idle_since = None;
                 } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= options.idle_timeout {
                     tracing::info!(idle = ?options.idle_timeout, "idle, exiting");
@@ -243,7 +251,7 @@ async fn authorize(token: Option<Arc<str>>, request: Request, next: Next) -> Res
         return next.run(request).await;
     };
     // `/health` stays open for the kubelet's probes; `/acp`, the reports
-    // of the agent's checkout, its files and commands, and its ports all
+    // of the agent's checkout, its files and commands, its terminals, and its ports all
     // want the token.
     if request.uri().path().starts_with("/health") {
         return next.run(request).await;

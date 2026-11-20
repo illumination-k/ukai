@@ -263,37 +263,59 @@ impl PortsEndpoint {
         &self,
         port: u16,
     ) -> Result<WebSocketStream<reqwest::Upgraded>, PortsError> {
-        let key = generate_key();
-        let response = self
-            .forward
-            .get(self.forward_url(port))
-            .version(reqwest::Version::HTTP_11)
-            .header(CONNECTION, "Upgrade")
-            .header(UPGRADE, "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header(SEC_WEBSOCKET_KEY, &key)
-            .send();
-        let response = tokio::time::timeout(CONNECT_TIMEOUT, response)
+        upgrade(&self.forward, &self.forward_url(port))
             .await
-            .map_err(|_| PortsError::Unreachable("timed out".to_owned()))?
-            .map_err(|error| PortsError::Unreachable(error.to_string()))?;
-        let status = response.status().as_u16();
-        if status != 101 {
-            return Err(failure(status));
-        }
-        let accepted = response.headers().get(SEC_WEBSOCKET_ACCEPT);
-        let expected = HeaderValue::from_str(&derive_accept_key(key.as_bytes())).ok();
-        if accepted.is_none() || accepted != expected.as_ref() {
-            return Err(PortsError::Unreachable(
-                "the gateway did not accept the WebSocket".to_owned(),
-            ));
-        }
-        let upgraded = response
-            .upgrade()
-            .await
-            .map_err(|error| PortsError::Unreachable(error.to_string()))?;
-        Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
+            .map_err(|error| match error {
+                UpgradeError::Unreachable(why) => PortsError::Unreachable(why),
+                UpgradeError::Status(status) => failure(status),
+            })
     }
+}
+
+/// Why a WebSocket upgrade through a gateway did not happen.
+#[derive(Debug)]
+pub(crate) enum UpgradeError {
+    Unreachable(String),
+    /// The gateway answered this instead of 101.
+    Status(u16),
+}
+
+/// Upgrade `url` to a WebSocket through `client`, which carries the agent's
+/// headers and TLS configuration — what a WebSocket library of its own would
+/// not have — within [`CONNECT_TIMEOUT`].
+pub(crate) async fn upgrade(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<WebSocketStream<reqwest::Upgraded>, UpgradeError> {
+    let key = generate_key();
+    let response = client
+        .get(url)
+        .version(reqwest::Version::HTTP_11)
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(SEC_WEBSOCKET_KEY, &key)
+        .send();
+    let response = tokio::time::timeout(CONNECT_TIMEOUT, response)
+        .await
+        .map_err(|_| UpgradeError::Unreachable("timed out".to_owned()))?
+        .map_err(|error| UpgradeError::Unreachable(error.to_string()))?;
+    let status = response.status().as_u16();
+    if status != 101 {
+        return Err(UpgradeError::Status(status));
+    }
+    let accepted = response.headers().get(SEC_WEBSOCKET_ACCEPT);
+    let expected = HeaderValue::from_str(&derive_accept_key(key.as_bytes())).ok();
+    if accepted.is_none() || accepted != expected.as_ref() {
+        return Err(UpgradeError::Unreachable(
+            "the gateway did not accept the WebSocket".to_owned(),
+        ));
+    }
+    let upgraded = response
+        .upgrade()
+        .await
+        .map_err(|error| UpgradeError::Unreachable(error.to_string()))?;
+    Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
 }
 
 /// What a status that is not the expected one means. 404 and 410 are a

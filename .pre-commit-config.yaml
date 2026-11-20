@@ -1,3 +1,5 @@
+# Vendored third-party files are kept byte for byte.
+exclude: ^crates/ukai-app/assets/vendor/
 repos:
   - repo: builtin
     hooks:

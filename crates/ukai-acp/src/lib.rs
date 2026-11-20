@@ -15,7 +15,8 @@
 //! schedules, and it keeps the knowledge of its repository.
 //!
 //! [`checkout`] is where any agent works, as the composer reaches it: the
-//! files to mention, and commands the user runs there.
+//! files to mention, and commands the user runs there; [`terminal`] is a
+//! shell there, for the terminal pane.
 
 pub mod checkout;
 mod fs;
@@ -30,6 +31,7 @@ pub mod review;
 pub mod schedules;
 mod secrets;
 mod session;
+pub mod terminal;
 pub mod updates;
 
 pub use checkout::Checkout;
