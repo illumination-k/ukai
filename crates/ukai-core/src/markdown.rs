@@ -322,6 +322,109 @@ fn url_len(text: &str) -> usize {
     }
 }
 
+/// A table as GitHub-flavored Markdown, header, alignment row, and body,
+/// for pasting into another chat or document. `children` are a
+/// [`Kind::Table`]'s. Inline styles, code, and links are written back as
+/// Markdown; `|` is escaped and line breaks become spaces, so each row stays
+/// one line.
+pub fn table_markdown(children: &[Node]) -> String {
+    let mut markdown = String::new();
+    for row in children {
+        let Node::Element {
+            kind,
+            children: cells,
+        } = row
+        else {
+            continue;
+        };
+        if !matches!(kind, Kind::TableHead | Kind::TableRow) {
+            continue;
+        }
+        markdown.push('|');
+        for cell in cells {
+            let mut text = String::new();
+            inline_markdown(std::slice::from_ref(cell), &mut text);
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            markdown.push(' ');
+            markdown.push_str(&text);
+            markdown.push_str(" |");
+        }
+        markdown.push('\n');
+        if *kind == Kind::TableHead {
+            markdown.push('|');
+            for cell in cells {
+                let align = match cell {
+                    Node::Element {
+                        kind: Kind::TableCell { align, .. },
+                        ..
+                    } => *align,
+                    _ => Align::None,
+                };
+                markdown.push_str(match align {
+                    Align::None => " --- |",
+                    Align::Left => " :-- |",
+                    Align::Center => " :-: |",
+                    Align::Right => " --: |",
+                });
+            }
+            markdown.push('\n');
+        }
+    }
+    markdown
+}
+
+/// `nodes`, which sit inside a table cell, written back as Markdown.
+fn inline_markdown(nodes: &[Node], out: &mut String) {
+    for node in nodes {
+        match node {
+            Node::Text(text) => out.push_str(&text.replace('|', "\\|")),
+            Node::Code(code) => {
+                // A fence longer than any run of backticks inside.
+                let longest = code.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+                let fence = "`".repeat(longest + 1);
+                let pad = if code.starts_with('`') || code.ends_with('`') {
+                    " "
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "{fence}{pad}{}{pad}{fence}",
+                    code.replace('|', "\\|")
+                ));
+            }
+            Node::CodeBlock { text, .. } => out.push_str(&text.replace('|', "\\|")),
+            Node::HardBreak => out.push(' '),
+            Node::Rule => {}
+            Node::Task(checked) => out.push_str(if *checked { "[x] " } else { "[ ] " }),
+            Node::Element { kind, children } => {
+                let wrap = |out: &mut String, mark: &str| {
+                    out.push_str(mark);
+                    inline_markdown(children, out);
+                    out.push_str(mark);
+                };
+                match kind {
+                    Kind::Emphasis => wrap(out, "*"),
+                    Kind::Strong => wrap(out, "**"),
+                    Kind::Strikethrough => wrap(out, "~~"),
+                    // A bare URL the parser linked goes back as it was.
+                    Kind::Link { url: Some(url) } if matches!(&children[..], [Node::Text(text)] if text == url) =>
+                    {
+                        out.push_str(url);
+                    }
+                    Kind::Link { url: Some(url) } => {
+                        out.push('[');
+                        inline_markdown(children, out);
+                        out.push_str("](");
+                        out.push_str(url);
+                        out.push(')');
+                    }
+                    _ => inline_markdown(children, out),
+                }
+            }
+        }
+    }
+}
+
 impl From<Alignment> for Align {
     fn from(alignment: Alignment) -> Self {
         match alignment {

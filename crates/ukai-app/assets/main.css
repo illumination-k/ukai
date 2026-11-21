@@ -1472,7 +1472,7 @@ button.new-tab {
   margin-bottom: 0;
 }
 
-.md :is(p, ul, ol, blockquote, pre, .code-block, .table-wrap, hr) {
+.md :is(p, ul, ol, blockquote, pre, .code-block, .table-block, hr) {
   margin: 0 0 10px;
 }
 
@@ -1547,7 +1547,7 @@ button.new-tab {
   background: var(--muted);
 }
 
-.md .code-block {
+.md :is(.code-block, .table-block) {
   position: relative;
 }
 
@@ -1555,7 +1555,7 @@ button.new-tab {
   margin: 0;
 }
 
-.md .code-block button.copy {
+.md :is(.code-block, .table-block) button.copy {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -1568,13 +1568,13 @@ button.new-tab {
   transition: opacity 0.15s;
 }
 
-.md .code-block:hover button.copy,
-.md .code-block button.copy.copied {
+.md :is(.code-block, .table-block):hover button.copy,
+.md :is(.code-block, .table-block) button.copy.copied {
   opacity: 1;
 }
 
-.md .code-block button.copy:hover,
-.md .code-block button.copy.copied {
+.md :is(.code-block, .table-block) button.copy:hover,
+.md :is(.code-block, .table-block) button.copy.copied {
   color: var(--fg);
 }
 
@@ -1595,6 +1595,12 @@ button.new-tab {
 .md .image-alt {
   color: var(--muted-fg);
   font-style: italic;
+}
+
+/* As wide as its table, so the copy button sits on the table's corner. */
+.md .table-block {
+  width: fit-content;
+  max-width: 100%;
 }
 
 .md .table-wrap {
