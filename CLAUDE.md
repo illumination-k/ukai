@@ -58,6 +58,13 @@ and the runtime image built as `ukai-runtime:e2e` (see the script); CI runs it
 on every change that reaches the cluster side. Extend it when a change crosses
 the gateway, `ukai-knowledge`, or the manifests.
 
+`mise run bench` runs the benchmarks (`divan`, in each crate's `benches/`;
+not part of `ci`). `crates/ukai-app/benches/panes.rs` measures splitting,
+moving, and resizing panes that show long transcripts: each should stay in
+microseconds whatever the transcripts' length, since panes are placed rather
+than remounted (`layout::tests` checks the same without timing). Run it
+before and after a change to how panes render.
+
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an
 in-process mock agent over `Channel::duplex`; extend the mock rather than
 reaching for a real agent in tests.

@@ -27,6 +27,8 @@ agent-client-protocol-http = "3.3"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 axum = "0.8"
 base64 = "0.23"
+# Benchmarks (`mise run bench`).
+divan = "0.1"
 clap = { version = "4.6", features = ["derive", "env"] }
 cpal = "0.18"
 dioxus = "0.7.10"

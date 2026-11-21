@@ -330,9 +330,7 @@ pub fn Workbench() -> Element {
     // never remounts it: remounting rebuilds its transcript and reloads
     // its web view.
     let mut area = use_signal(|| None::<Rc<MountedData>>);
-    let mut panes = frames.panes;
-    // In a fixed order, so that moving a pane does not move its element.
-    panes.sort_by_key(|(pane, _)| *pane);
+    let panes = frames.panes;
     let panes_class = if panes.len() > 1 {
         "panes split"
     } else {
@@ -371,14 +369,9 @@ pub fn Workbench() -> Element {
             div {
                 class: panes_class,
                 onmounted: move |event| area.set(Some(event.data())),
-                for (pane, frame) in panes {
-                    div {
-                        key: "{pane}",
-                        class: "pane-slot",
-                        style: placement(frame),
-                        PaneView { pane }
-                    }
-                }
+                PlacedPanes { panes, pane: |pane| rsx! {
+                    PaneView { pane }
+                } }
                 for boundary in frames.boundaries {
                     Divider { boundary, area }
                 }
@@ -480,6 +473,20 @@ fn TabBar() -> Element {
                 },
                 Svg { icon: Icon::Plus }
             }
+        }
+    }
+}
+
+/// Each of `panes` drawn by `pane`, placed at its frame. Keyed by pane id
+/// and kept in id order, so that a split, a move, or a resize changes where
+/// a pane's element is but never remounts what `pane` drew in it.
+#[component]
+pub fn PlacedPanes(panes: Vec<(PaneId, Frame)>, pane: Callback<PaneId, Element>) -> Element {
+    let mut panes = panes;
+    panes.sort_by_key(|(id, _)| *id);
+    rsx! {
+        for (id, frame) in panes {
+            div { key: "{id}", class: "pane-slot", style: placement(frame), {pane.call(id)} }
         }
     }
 }
@@ -985,5 +992,83 @@ fn Picker(pane: PaneId) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use dioxus::dioxus_core::NoOpMutations;
+    use ukai_core::Side;
+
+    use super::*;
+
+    /// How many times each pane's content was mounted.
+    type Mounts = Rc<RefCell<HashMap<PaneId, usize>>>;
+
+    #[component]
+    fn Probe(pane: PaneId) -> Element {
+        let mounts = use_context::<Mounts>();
+        use_hook(|| *mounts.borrow_mut().entry(pane).or_default() += 1);
+        rsx! { "{pane}" }
+    }
+
+    #[component]
+    fn Root() -> Element {
+        let layout = use_context::<Signal<Layout>>();
+        let panes = layout.read().active_tab().root.frames().panes;
+        rsx! {
+            PlacedPanes { panes, pane: |pane| rsx! {
+                Probe { pane }
+            } }
+        }
+    }
+
+    /// Splitting, moving, resizing, and closing panes leave every pane that
+    /// stays mounted once: a remount rebuilds an agent's transcript and
+    /// reloads a report's web view.
+    #[test]
+    fn rearranging_panes_never_remounts_one() {
+        let mounts = Mounts::default();
+        let mut dom = VirtualDom::new(Root);
+        let mut layout = dom.in_runtime(|| Signal::new_in_scope(Layout::default(), ScopeId::ROOT));
+        dom.provide_root_context(mounts.clone());
+        dom.provide_root_context(layout);
+        dom.rebuild_in_place();
+
+        let mut change = |dom: &mut VirtualDom, change: &dyn Fn(&mut Layout)| {
+            dom.in_runtime(|| change(&mut layout.write()));
+            dom.render_immediate(&mut NoOpMutations);
+        };
+        change(&mut dom, &|layout| {
+            layout.split(0, Direction::Horizontal);
+        });
+        change(&mut dom, &|layout| {
+            layout.split(1, Direction::Vertical);
+        });
+        change(&mut dom, &|layout| {
+            layout.split(0, Direction::Vertical);
+        });
+        change(&mut dom, &|layout| {
+            layout.resize(&[], 0, 0.3);
+        });
+        change(&mut dom, &|layout| {
+            layout.move_pane(0, 2, Side::Right);
+        });
+        change(&mut dom, &|layout| {
+            layout.swap_panes(1, 3);
+        });
+        change(&mut dom, &|layout| {
+            layout.close_pane(2);
+        });
+
+        let panes = dom.in_runtime(|| layout.peek().active_tab().root.panes());
+        assert_eq!(panes.len(), 3);
+        assert_eq!(
+            *mounts.borrow(),
+            HashMap::from([(0, 1), (1, 1), (2, 1), (3, 1)]),
+        );
     }
 }

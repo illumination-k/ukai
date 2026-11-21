@@ -32,5 +32,12 @@ ukai-voice = { workspace = true }
 uuid = { workspace = true }
 webbrowser = { workspace = true }
 
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "panes"
+harness = false
+
 [lints]
 workspace = true
