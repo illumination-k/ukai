@@ -145,7 +145,7 @@ fn element(kind: &Kind, children: &[Node]) -> Element {
                 div { class: "table-wrap",
                     table { {inner} }
                 }
-                CopyButton { text: markdown::table_tsv(children) }
+                CopyButton { text: markdown::table_markdown(children) }
             }
         },
         Kind::TableHead => rsx! {

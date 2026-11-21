@@ -152,16 +152,33 @@ fn tables_carry_alignment_per_cell() {
 }
 
 #[test]
-fn tables_copy_as_tab_separated_values() {
-    let [Node::Element { children, .. }] = &parse(
-        "| name | note |\n|---|---|\n| **a** `b` | [link](https://x.test) c<br>d |\n| tab\there | |\n",
-    )[..] else {
+fn tables_copy_as_markdown() {
+    let [Node::Element { children, .. }] = &parse(concat!(
+        "| name | note | n |\n",
+        "|:--|:-:|--:|\n",
+        "| **a** _b_ ~~c~~ | [link](https://x.test) https://y.test |  |\n",
+        "| `a\\|b` ``c`d`` | x \\| y |  |\n",
+    ))[..] else {
         panic!("not one table");
     };
     assert_eq!(
-        table_tsv(children),
-        "name\tnote\na b\tlink c<br>d\ntab here\t\n"
+        table_markdown(children),
+        concat!(
+            "| name | note | n |\n",
+            "| :-- | :-: | --: |\n",
+            "| **a** *b* ~~c~~ | [link](https://x.test) https://y.test |  |\n",
+            "| `a\\|b` ``c`d`` | x \\| y |  |\n",
+        )
     );
+}
+
+#[test]
+fn a_copied_table_parses_back_to_the_same_table() {
+    let source = "| a | b |\n|---|--:|\n| **x** `y\\|z` | [l](https://x.test) |\n";
+    let [Node::Element { children, .. }] = &parse(source)[..] else {
+        panic!("not one table");
+    };
+    assert_eq!(parse(&table_markdown(children)), parse(source));
 }
 
 #[test]
