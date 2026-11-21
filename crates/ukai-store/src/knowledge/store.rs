@@ -1,7 +1,7 @@
-//! The notes, in SurrealDB: what `ukai-knowledge` keeps, so what is learnt
+//! The notes, in SurrealDB: what `ukai-store` keeps, so what is learnt
 //! about a codebase outlives a session without being committed to it.
 //!
-//! Notes live in SurrealDB (namespace [`NAMESPACE`], database [`DATABASE`]),
+//! Notes live in SurrealDB (database [`DATABASE`]; see [`crate::db`]),
 //! a server of its own (`deploy/gateway`), reached over WebSocket. They are
 //! kept per scope: a project `gateway.toml` names, which agents on several
 //! repositories share, or else an agent's repository; the gateway says
@@ -22,10 +22,10 @@
 use serde_json::{Value, json};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
-use surrealdb::opt::auth::Root;
 use ukai_core::knowledge::{Editor, Note, NoteSpec, NoteSummary, NoteWrite, Provenance, Revision};
 
-pub const NAMESPACE: &str = "ukai";
+pub use crate::db::StoreConfig;
+
 pub const DATABASE: &str = "knowledge";
 
 /// Applied on every connection; each statement leaves what exists alone.
@@ -172,24 +172,6 @@ pub enum KnowledgeError {
     Unreadable(#[from] serde_json::Error),
 }
 
-/// Where the store is.
-#[derive(Clone)]
-pub struct StoreConfig {
-    /// `ws://host:port`, or `mem://` for one that lives with the process.
-    pub url: String,
-    /// The root user and password, from a Secret. Never logged.
-    pub credentials: Option<(String, String)>,
-}
-
-impl std::fmt::Debug for StoreConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StoreConfig")
-            .field("url", &self.url)
-            .field("credentials", &self.credentials.as_ref().map(|_| "…"))
-            .finish()
-    }
-}
-
 /// One write or delete, as [`Knowledge::change`] makes it.
 struct Change<'a> {
     scope: &'a str,
@@ -211,16 +193,7 @@ impl Knowledge {
     /// Connect, sign in, and make sure the schema is there. A WebSocket
     /// connection reconnects by itself once made.
     pub async fn connect(config: &StoreConfig) -> Result<Self, KnowledgeError> {
-        let db = surrealdb::engine::any::connect(config.url.as_str()).await?;
-        if let Some((username, password)) = &config.credentials {
-            db.signin(Root {
-                username: username.clone(),
-                password: password.clone(),
-            })
-            .await?;
-        }
-        db.use_ns(NAMESPACE).use_db(DATABASE).await?;
-        db.query(SCHEMA).await?.check()?;
+        let db = crate::db::connect(config, DATABASE, SCHEMA).await?;
         Ok(Self { db })
     }
 

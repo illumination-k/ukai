@@ -2,7 +2,7 @@
 # has the same ignores and why.
 [advisories]
 ignore = [
-  # Through surrealdb's embedded engine (`kv-mem`), which ukai-knowledge's
+  # Through surrealdb's embedded engine (`kv-mem`), which ukai-store's
   # tests alone use; the service links none of it.
   "RUSTSEC-2023-0071", # rsa
   "RUSTSEC-2026-0387", # crypto-bigint

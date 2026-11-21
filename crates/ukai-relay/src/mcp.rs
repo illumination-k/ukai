@@ -22,6 +22,13 @@
 //! answers the user in an annotation's thread, and `read_review` reads it
 //! back (`crate::review`, `ukai_core::annotation`).
 //!
+//! In a gateway's pod, `publish_report` lets the agent say that this
+//! session wrote a report for the user, so the user finds it under the
+//! session rather than among every report the checkout holds. The gateway
+//! keeps that in `ukai-store`; the relay tells this server which session it
+//! serves ([`record_session`]), since the agent starts it before naming the
+//! session.
+//!
 //! In a gateway's pod it also hands the agent the knowledge the gateway
 //! keeps for the project (`ukai_acp::knowledge`): a project `gateway.toml`
 //! names, whose repositories share it, or else the agent's repository: the notes so far in
@@ -36,12 +43,14 @@
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use ukai_acp::knowledge::{
     Editor, KnowledgeEndpoint, KnowledgeError, Note, NoteSpec, NoteSummary, NoteWrite,
 };
+use ukai_acp::reports::{PublishEndpoint, PublishError};
 use ukai_acp::review::{Author, Priority, Review};
 use ukai_config::Reports;
 use ukai_core::annotation;
@@ -55,6 +64,7 @@ pub const SERVER_NAME: &str = "ukai";
 pub const SUBCOMMAND: &str = "mcp";
 
 const LIST_REPORTS: &str = "list_reports";
+const PUBLISH_REPORT: &str = "publish_report";
 const OPEN_PREVIEW: &str = "open_preview";
 const LIST_KNOWLEDGE: &str = "list_knowledge";
 const READ_KNOWLEDGE: &str = "read_knowledge";
@@ -117,6 +127,60 @@ impl Notes for KnowledgeEndpoint {
 }
 
 /// What one server remembers across the messages of its session.
+/// Publishing a report for a session: the gateway in a pod, a fake in tests.
+pub trait Publisher {
+    fn publish<'a>(
+        &'a self,
+        session: &'a str,
+        path: &'a str,
+        title: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PublishError>> + 'a>>;
+}
+
+impl Publisher for PublishEndpoint {
+    fn publish<'a>(
+        &'a self,
+        session: &'a str,
+        path: &'a str,
+        title: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PublishError>> + 'a>> {
+        Box::pin(PublishEndpoint::publish(self, session, path, title))
+    }
+}
+
+/// What `publish_report` needs: where to publish, and how to tell which
+/// session this server serves.
+pub struct Publishing {
+    pub publisher: Box<dyn Publisher>,
+    /// Where the relay records which session each key is.
+    pub sessions: PathBuf,
+    /// This server's key, from [`crate::hub::SESSION_KEY_ENV`].
+    pub key: Option<String>,
+}
+
+/// Record that the MCP servers given `key` serve `session`, for them to
+/// read from `file`.
+pub fn record_session(file: &Path, key: &str, session: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut line = serde_json::to_vec(&json!({ "key": key, "session": session }))?;
+    line.push(b'\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)?
+        .write_all(&line)
+}
+
+/// The session the servers given `key` serve, as last recorded in `file`.
+pub fn session_of(file: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line.get("key").and_then(Value::as_str) == Some(key))
+        .and_then(|line| line.get("session")?.as_str().map(str::to_owned))
+}
+
 pub struct Session {
     /// Notes written or deleted so far, against [`SESSION_CHANGES`].
     changes: std::cell::Cell<usize>,
@@ -128,6 +192,8 @@ pub struct Session {
     /// Where the agent's review of its changes is kept, for the relay to
     /// send with the diff; without it the review tools are not offered.
     review: Option<PathBuf>,
+    /// Where `publish_report` publishes; without it the tool is not offered.
+    publishing: Option<Publishing>,
 }
 
 impl Default for Session {
@@ -143,7 +209,15 @@ impl Session {
             head,
             previews: None,
             review: None,
+            publishing: None,
         }
+    }
+
+    /// Offer `publish_report`.
+    #[must_use]
+    pub fn with_publishing(mut self, publishing: Publishing) -> Self {
+        self.publishing = Some(publishing);
+        self
     }
 
     /// Offer `open_preview`, recording into `file`.
@@ -193,13 +267,16 @@ pub struct Gateway {
 /// serves the knowledge kept there; the token goes in the environment, not
 /// the arguments, so it stays out of `ps`. With `previews`, the agent can
 /// ask for its servers to be shown, recorded in that file; with `review`, it
-/// can review its changes, kept in that file.
+/// can review its changes, kept in that file. With `sessions` and a
+/// gateway, it can publish reports for its session, which it finds in that
+/// file.
 pub fn server_entry(
     program: &Path,
     root: &Path,
     gateway: Option<&Gateway>,
     previews: Option<&Path>,
     review: Option<&Path>,
+    sessions: Option<&Path>,
 ) -> Value {
     let mut args = vec![
         json!(SUBCOMMAND),
@@ -211,6 +288,9 @@ pub fn server_entry(
     }
     if let Some(review) = review {
         args.extend([json!("--review"), json!(review.to_string_lossy())]);
+    }
+    if let Some(sessions) = sessions {
+        args.extend([json!("--sessions"), json!(sessions.to_string_lossy())]);
     }
     let mut env = Vec::new();
     if let Some(gateway) = gateway {
@@ -234,6 +314,7 @@ pub async fn serve(
     notes: Option<KnowledgeEndpoint>,
     previews: Option<PathBuf>,
     review: Option<PathBuf>,
+    publishing: Option<Publishing>,
 ) -> io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -243,6 +324,9 @@ pub async fn serve(
     }
     if let Some(review) = review {
         session = session.with_review(review);
+    }
+    if let Some(publishing) = publishing {
+        session = session.with_publishing(publishing);
     }
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -300,7 +384,7 @@ pub async fn handle<N: Notes>(
                     "protocolVersion": version,
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": instructions(root, known.as_ref(), session.previews.is_some())
+                    "instructions": instructions(root, known.as_ref(), session.previews.is_some(), session.publishing.is_some())
                         + &session.review.as_ref().map(|_| review_instructions(root)).unwrap_or_default()
                 }),
             )
@@ -308,7 +392,7 @@ pub async fn handle<N: Notes>(
         "ping" => result(id, json!({})),
         "tools/list" => result(
             id,
-            json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some()) }),
+            json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some(), session.publishing.is_some()) }),
         ),
         "tools/call" => {
             let name = message.pointer("/params/name").and_then(Value::as_str);
@@ -316,16 +400,19 @@ pub async fn handle<N: Notes>(
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(Value::Null);
-            let outcome = match (name, notes, &session.previews) {
-                (Some(LIST_REPORTS), _, _) => list_reports(root),
-                (Some(OPEN_PREVIEW), _, Some(previews)) => open_preview(previews, &arguments),
-                (Some(tool @ (REVIEW_DIFF | REPLY_ANNOTATION | READ_REVIEW)), _, _)
+            let outcome = match (name, notes, &session.previews, &session.publishing) {
+                (Some(LIST_REPORTS), ..) => list_reports(root),
+                (Some(PUBLISH_REPORT), _, _, Some(publishing)) => {
+                    publish_report(root, publishing, &arguments).await
+                }
+                (Some(OPEN_PREVIEW), _, Some(previews), _) => open_preview(previews, &arguments),
+                (Some(tool @ (REVIEW_DIFF | REPLY_ANNOTATION | READ_REVIEW)), ..)
                     if session.review.is_some() =>
                 {
                     let file = session.review.as_deref().unwrap_or(Path::new(""));
                     call_review(root, file, tool, &arguments)
                 }
-                (Some(tool), Some(notes), _) => {
+                (Some(tool), Some(notes), ..) => {
                     match call_knowledge(root, notes, session, tool, &arguments).await {
                         Some(outcome) => outcome,
                         None => return Some(error(id, -32602, "unknown tool")),
@@ -349,7 +436,7 @@ pub async fn handle<N: Notes>(
 /// The tools on offer: the knowledge ones only with a gateway to keep it,
 /// `open_preview` only with a relay to list the previews, and the review
 /// ones only with a relay to keep the review.
-fn tools(knowledge: bool, previews: bool, review: bool) -> Vec<Value> {
+fn tools(knowledge: bool, previews: bool, review: bool, publish: bool) -> Vec<Value> {
     let name = json!({
         "type": "string",
         "description": "The note's name: lowercase letters, digits, and `-`, like `release-process`."
@@ -360,6 +447,27 @@ fn tools(knowledge: bool, previews: bool, review: bool) -> Vec<Value> {
         "inputSchema": { "type": "object", "properties": {} },
         "annotations": { "readOnlyHint": true }
     })];
+    if publish {
+        tools.push(json!({
+            "name": PUBLISH_REPORT,
+            "description": "Tell ukai that this session wrote or rewrote a report, so the user finds it under this session in the sidebar. Call it each time you write or rewrite a report for the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The report's path relative to the checkout, as `list_reports` shows it, like `reports/run.html`."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "What the report is, in a few words, for the sidebar."
+                    }
+                },
+                "required": ["path"]
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+        }));
+    }
     if previews {
         tools.push(json!({
             "name": OPEN_PREVIEW,
@@ -769,6 +877,7 @@ pub fn instructions(
     root: &Path,
     known: Option<&Result<Vec<NoteSummary>, KnowledgeError>>,
     previews: bool,
+    publish: bool,
 ) -> String {
     let mut text = String::from(
         "The user is following this session in ukai, a desktop client for ACP agents. \
@@ -794,6 +903,14 @@ pub fn instructions(
     text.push_str(&format!(
         "\nThe `{LIST_REPORTS}` tool lists the reports the user can open right now."
     ));
+    if publish {
+        text.push_str(&format!(
+            " Each time you write or rewrite a report for the user, call `{PUBLISH_REPORT}` \
+             with its path and a short title: the user finds the reports of this session \
+             under it, while one nobody published shows only among every report of the \
+             checkout, which other sessions write too."
+        ));
+    }
     if previews {
         text.push_str(&format!(
             "\n\nPreviews: the user cannot reach the ports of this machine. When you start a \
@@ -1227,6 +1344,62 @@ fn show_review(review: &Review) -> String {
         }
     }
     text
+}
+
+/// Publish a report for this server's session, once it is a report the
+/// user can open.
+async fn publish_report(
+    root: &Path,
+    publishing: &Publishing,
+    arguments: &Value,
+) -> Result<String, String> {
+    let given = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "Give the report's `path`, like `reports/run.html`.".to_owned())?;
+    // An agent may well name the file as it wrote it.
+    let path = Path::new(given).strip_prefix(root).map_or_else(
+        |_| given.trim_start_matches("./").to_owned(),
+        |relative| relative.to_string_lossy().into_owned(),
+    );
+    let title = arguments.get("title").and_then(Value::as_str);
+    let config = ukai_config::load_layered(None, root)
+        .map_err(|error| format!("`ukai.toml` cannot be read: {error}"))?;
+    let tree = ReportTree::open(root, &config.reports).map_err(|error| error.to_string())?;
+    if !tree
+        .list()
+        .iter()
+        .any(|listed| listed.path.to_string_lossy() == path)
+    {
+        return Err(format!(
+            "`{path}` is not a report the user can open: `{LIST_REPORTS}` lists those. Write \
+             it into a report directory first."
+        ));
+    }
+    let key = publishing.key.as_deref().ok_or_else(|| {
+        "This server was not started for a session, so it cannot publish.".to_owned()
+    })?;
+    let session = session_of(&publishing.sessions, key).ok_or_else(|| {
+        "ukai cannot tell which session this is yet; try again in a moment.".to_owned()
+    })?;
+    let problems = ukai_core::publication::problems(&session, &path, title);
+    if !problems.is_empty() {
+        return Err(problems
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    publishing
+        .publisher
+        .publish(&session, &path, title)
+        .await
+        .map_err(|error| format!("Not published: {error}"))?;
+    Ok(format!(
+        "Published `{path}`: the user finds it under this session in ukai."
+    ))
 }
 
 fn list_reports(root: &Path) -> Result<String, String> {

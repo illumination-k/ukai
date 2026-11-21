@@ -4,7 +4,7 @@ syntax = "proto3";
 
 package ukai.knowledge.v1;
 
-// The notes as `ukai-knowledge` keeps them. Only the gateway calls it, with
+// The notes as `ukai-store` keeps them. Only the gateway calls it, with
 // the token it shares with it: the gateway is what tells who is asking and
 // which scope they may use, and this service trusts the `Caller` it says.
 service KnowledgeStore {

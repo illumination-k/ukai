@@ -70,6 +70,10 @@ enum Mode {
         /// The file the relay keeps the agent's review of its changes in.
         #[arg(long)]
         review: Option<PathBuf>,
+        /// The file the relay records which session each server serves in,
+        /// for publishing reports through the gateway.
+        #[arg(long)]
+        sessions: Option<PathBuf>,
     },
 }
 
@@ -115,8 +119,27 @@ async fn serve(cli: Cli) -> ExitCode {
         gateway,
         previews,
         review,
+        sessions,
     }) = cli.mode
     {
+        let publishing = match (&gateway, &token, sessions) {
+            (Some(gateway), Some(token), Some(sessions)) => {
+                match ukai_acp::reports::PublishEndpoint::for_workspace(gateway, token) {
+                    Ok(endpoint) => Some(ukai_relay::mcp::Publishing {
+                        publisher: Box::new(endpoint),
+                        sessions,
+                        key: std::env::var(ukai_relay::hub::SESSION_KEY_ENV)
+                            .ok()
+                            .filter(|key| !key.is_empty()),
+                    }),
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot publish reports through the gateway");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let notes = match (gateway, &token) {
             (Some(gateway), Some(token)) => {
                 match KnowledgeEndpoint::for_workspace(&gateway, token) {
@@ -129,7 +152,7 @@ async fn serve(cli: Cli) -> ExitCode {
             }
             _ => None,
         };
-        return match ukai_relay::mcp::serve(&root, notes, previews, review).await {
+        return match ukai_relay::mcp::serve(&root, notes, previews, review, publishing).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "mcp server failed");
@@ -199,7 +222,7 @@ mod tests {
     fn mcp_needs_no_agent() {
         let cli = parse(&["mcp", "--root", "/workspace"]).unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None }) if root == std::path::Path::new("/workspace"))
+            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None, sessions: None }) if root == std::path::Path::new("/workspace"))
         );
         let cli =
             parse(&["mcp", "--gateway", "http://ukai-gateway"]).unwrap_or_else(|e| panic!("{e}"));

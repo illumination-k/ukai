@@ -210,10 +210,12 @@ impl AgentPods {
     }
 }
 
-/// Paths an agent pod may ask: its own knowledge, which it asks with its
-/// relay's token, and the health check.
+/// Paths an agent pod may ask: its own knowledge and publishing its own
+/// reports, which it asks with its relay's token, and the health check.
 fn for_pods(path: &str) -> bool {
-    path == "/health" || path.starts_with("/ukai.gateway.v1.WorkspaceKnowledge/")
+    path == "/health"
+        || path.starts_with("/ukai.gateway.v1.WorkspaceKnowledge/")
+        || path.starts_with("/ukai.gateway.v1.WorkspaceReports/")
 }
 
 /// Refuse what an agent pod asks of a person's side.
@@ -287,10 +289,12 @@ mod tests {
     #[rstest]
     #[case::health("/health", true)]
     #[case::own_knowledge("/ukai.gateway.v1.WorkspaceKnowledge/Put", true)]
+    #[case::own_reports("/ukai.gateway.v1.WorkspaceReports/Publish", true)]
     #[case::persons_knowledge("/ukai.gateway.v1.Knowledge/Approve", false)]
     #[case::schedules("/ukai.gateway.v1.Schedules/Create", false)]
     #[case::acp("/agents/a/acp", false)]
     #[case::lookalike("/ukai.gateway.v1.WorkspaceKnowledgeX/Put", false)]
+    #[case::reports_lookalike("/ukai.gateway.v1.WorkspaceReportsX/Publish", false)]
     fn only_a_pods_own_paths_are_open_to_pods(#[case] path: &str, #[case] open: bool) {
         assert_eq!(for_pods(path), open);
     }

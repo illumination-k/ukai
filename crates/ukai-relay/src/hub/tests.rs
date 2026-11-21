@@ -398,13 +398,74 @@ fn session_setup_gets_the_relays_mcp_servers(#[case] method: &str, #[case] param
     hub.connect(A);
     match hub.from_client(A, req(1, method, params)).as_slice() {
         [Output::Agent(message)] => {
-            assert_eq!(
-                message["params"]["mcpServers"],
-                json!([relay_server("ukai")])
-            );
+            let mut expected = relay_server("ukai");
+            expected["env"] = json!([{ "name": SESSION_KEY_ENV, "value": "k1" }]);
+            assert_eq!(message["params"]["mcpServers"], json!([expected]));
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// The key a setup sent to the agent gave the relay's servers.
+fn key_of(outputs: &[Output]) -> String {
+    match outputs {
+        [Output::Agent(message)] => message["params"]["mcpServers"][0]["env"][0]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn each_setup_gives_the_relays_servers_a_key_and_names_its_session() {
+    let (mut hub, init) = Hub::new(None, vec![relay_server("ukai")]);
+    hub.from_agent(result(json!(agent_id(&init)), json!({})));
+    hub.connect(A);
+    let created = hub.from_client(A, req(1, "session/new", json!({ "cwd": "/w" })));
+    let new_key = key_of(&created);
+    assert_eq!(
+        created.first().and_then(|o| match o {
+            Output::Agent(m) => Some(m["params"]["mcpServers"][0]["env"][0]["name"].clone()),
+            _ => None,
+        }),
+        Some(json!(SESSION_KEY_ENV))
+    );
+    let answered = hub.from_agent(result(
+        json!(agent_id(&created)),
+        json!({ "sessionId": SID }),
+    ));
+    assert!(answered.contains(&Output::SessionKey {
+        key: new_key.clone(),
+        session: SID.into()
+    }));
+    // The relay restarted under a client that loads another session.
+    let loaded = hub.from_client(
+        A,
+        req(2, "session/load", json!({ "sessionId": "s2", "cwd": "/w" })),
+    );
+    let load_key = key_of(&loaded);
+    assert_ne!(load_key, new_key);
+    let answered = hub.from_agent(result(json!(agent_id(&loaded)), json!({})));
+    assert!(answered.contains(&Output::SessionKey {
+        key: load_key,
+        session: "s2".into()
+    }));
+}
+
+#[test]
+fn a_failed_setup_names_no_session() {
+    let (mut hub, init) = Hub::new(None, vec![relay_server("ukai")]);
+    hub.from_agent(result(json!(agent_id(&init)), json!({})));
+    hub.connect(A);
+    let created = hub.from_client(A, req(1, "session/new", json!({ "cwd": "/w" })));
+    let failed = hub.from_agent(error(json!(agent_id(&created)), -32603, "no"));
+    assert!(
+        !failed
+            .iter()
+            .any(|output| matches!(output, Output::SessionKey { .. })),
+        "{failed:?}"
+    );
 }
 
 #[test]
@@ -426,10 +487,11 @@ fn the_relays_mcp_servers_join_the_clients_and_replace_a_namesake() {
         ),
     );
     match sent.as_slice() {
-        [Output::Agent(message)] => assert_eq!(
-            message["params"]["mcpServers"],
-            json!([theirs, relay_server("ukai")])
-        ),
+        [Output::Agent(message)] => {
+            let mut ours = relay_server("ukai");
+            ours["env"] = json!([{ "name": SESSION_KEY_ENV, "value": "k1" }]);
+            assert_eq!(message["params"]["mcpServers"], json!([theirs, ours]));
+        }
         other => panic!("{other:?}"),
     }
 }

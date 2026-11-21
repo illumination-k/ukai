@@ -3,7 +3,7 @@ use tonic::Code;
 use ukai_proto::knowledge::v1::knowledge_store_server::KnowledgeStore;
 
 use super::*;
-use crate::store::StoreConfig;
+use crate::db::StoreConfig;
 
 const SCOPE: &str = "plekti";
 

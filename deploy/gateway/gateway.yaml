@@ -86,13 +86,13 @@ spec:
                   name: ukai-gateway
                   key: token
                   optional: true
-            # ukai-knowledge (knowledge.yaml) and the token it answers.
-            - name: UKAI_KNOWLEDGE_URL
-              value: http://ukai-knowledge:50051
-            - name: UKAI_KNOWLEDGE_TOKEN
+            # ukai-store (store.yaml) and the token it answers.
+            - name: UKAI_STORE_URL
+              value: http://ukai-store:50051
+            - name: UKAI_STORE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: ukai-knowledge
+                  name: ukai-store
                   key: token
                   optional: true
             # The copy of the workspaces' reports (rustfs.yaml), or any S3

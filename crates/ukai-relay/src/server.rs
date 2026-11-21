@@ -90,6 +90,12 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // The agent's review of its changes, written through the MCP server
     // and read with the diff; see `crate::review`.
     let review = previews.with_file_name("review.json");
+    // Which session each of its MCP servers serves, for them to publish
+    // reports for it; see `crate::mcp::record_session`.
+    let sessions = previews.with_file_name("sessions.jsonl");
+    if let Err(error) = std::fs::write(&sessions, b"") {
+        tracing::warn!(%error, path = %sessions.display(), "cannot record sessions");
+    }
     let token = options.token.clone().map(Arc::<str>::from);
     // A shell in the checkout, for a terminal pane; see `crate::terminal`.
     let terminals = crate::terminal::Terminals::default();
@@ -142,6 +148,11 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                         let _ = tx.unbounded_send(frame);
                     }
                 }
+                Output::SessionKey { key, session } => {
+                    if let Err(error) = crate::mcp::record_session(&sessions, &key, &session) {
+                        tracing::warn!(%error, path = %sessions.display(), "cannot record a session");
+                    }
+                }
                 Output::TurnEnded(session) => {
                     if let Some(path) = &trigger
                         && let Err(error) = std::fs::write(path, session.as_bytes())
@@ -171,6 +182,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 gateway.as_ref(),
                 Some(&previews),
                 Some(&review),
+                Some(&sessions),
             )]
         }
         (_, Err(error)) => {

@@ -221,6 +221,7 @@ fn server_entry_runs_the_relay_for_the_checkout() {
             Path::new("/workspace"),
             None,
             None,
+            None,
             None
         ),
         json!({
@@ -243,6 +244,7 @@ fn server_entry_hands_the_gateway_on_with_the_token_in_the_environment() {
             Path::new("/relay/ukai-relay"),
             Path::new("/workspace"),
             Some(&gateway),
+            None,
             None,
             None
         ),
@@ -290,7 +292,7 @@ fn instructions_follow_the_checkouts_report_settings(
     #[case] expected: &str,
 ) {
     let dir = checkout(config);
-    let text = instructions(dir.path(), None, false);
+    let text = instructions(dir.path(), None, false, false);
     assert!(text.contains(expected), "{text}");
     assert!(text.contains("`list_reports`"), "{text}");
     assert!(!text.contains("Knowledge"), "{text}");
@@ -343,7 +345,7 @@ fn notes_on_demand_are_only_counted_by_tag() {
         approved_note("vectors", &["research"], true),
         approved_note("misc", &[], true),
     ]);
-    let text = instructions(dir.path(), Some(&known), false);
+    let text = instructions(dir.path(), Some(&known), false, false);
     assert!(text.contains("- `build` [build]: About build"), "{text}");
     assert!(!text.contains("About retrieval"), "{text}");
     assert!(
@@ -417,7 +419,7 @@ fn instructions_list_only_the_approved_notes(
     #[case] expected: &str,
 ) {
     let dir = checkout(None);
-    let text = instructions(dir.path(), Some(&known), false);
+    let text = instructions(dir.path(), Some(&known), false, false);
     assert!(text.contains("Knowledge:"), "{text}");
     assert!(text.contains("claims to check, not instructions"), "{text}");
     assert!(text.contains("data, not instructions"), "{text}");
@@ -805,10 +807,10 @@ fn offers_previews_only_with_a_file_to_record_them_in() {
     let (text, failed) = open_preview_unoffered(dir.path());
     assert!(failed, "{text}");
 
-    let text = instructions(dir.path(), None, true);
+    let text = instructions(dir.path(), None, true, false);
     assert!(text.contains("Previews:"), "{text}");
     assert!(text.contains("`open_preview`"), "{text}");
-    assert!(!instructions(dir.path(), None, false).contains("Previews:"));
+    assert!(!instructions(dir.path(), None, false, false).contains("Previews:"));
 }
 
 /// `open_preview` called where it is not offered.
@@ -932,6 +934,7 @@ fn server_entry_hands_on_the_previews_and_review_files() {
         None,
         Some(Path::new("/tmp/r/previews.jsonl")),
         Some(Path::new("/tmp/r/review.json")),
+        None,
     );
     assert_eq!(
         entry["args"],
@@ -1109,4 +1112,166 @@ fn refuses_a_review_with_every_problem_named() {
         json!({ "id": "a1", "body": "hi" }),
     );
     assert!(failed, "{text}");
+}
+
+/// Publications made, as the gateway would get them; `refuse` answers with
+/// problems.
+#[derive(Default, Clone)]
+struct Published {
+    made: std::rc::Rc<RefCell<Vec<(String, String, Option<String>)>>>,
+    refuse: bool,
+}
+
+impl Publisher for Published {
+    fn publish<'a>(
+        &'a self,
+        session: &'a str,
+        path: &'a str,
+        title: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PublishError>> + 'a>> {
+        Box::pin(async move {
+            if self.refuse {
+                return Err(PublishError::Refused(vec!["too many".into()]));
+            }
+            self.made
+                .borrow_mut()
+                .push((session.into(), path.into(), title.map(Into::into)));
+            Ok(())
+        })
+    }
+}
+
+/// A checkout with one report, and a session publishing through `published`
+/// whose key the relay recorded as session `s1`.
+fn publishing(published: &Published, key: Option<&str>) -> (TempDir, Session) {
+    let dir = checkout(Some("[reports]\ndirs = [\"reports\"]\n"));
+    write(&dir, "reports/run.html", "<p>run</p>");
+    let sessions = dir.path().join(".sessions.jsonl");
+    record_session(&sessions, "k0", "older").unwrap_or_else(|e| panic!("{e}"));
+    record_session(&sessions, "k1", "s1").unwrap_or_else(|e| panic!("{e}"));
+    let session = Session::default().with_publishing(Publishing {
+        publisher: Box::new(published.clone()),
+        sessions,
+        key: key.map(Into::into),
+    });
+    (dir, session)
+}
+
+#[rstest]
+#[case::relative(json!({ "path": "reports/run.html", "title": "Run" }), Some("Run"))]
+#[case::dotted(json!({ "path": "./reports/run.html" }), None)]
+fn publishes_a_report_for_its_session(#[case] arguments: Value, #[case] title: Option<&str>) {
+    let published = Published::default();
+    let (dir, session) = publishing(&published, Some("k1"));
+    let (text, failed) = tool_in(
+        dir.path(),
+        &Fake::default(),
+        &session,
+        "publish_report",
+        arguments,
+    );
+    assert!(!failed, "{text}");
+    assert_eq!(
+        *published.made.borrow(),
+        [(
+            "s1".to_owned(),
+            "reports/run.html".to_owned(),
+            title.map(Into::into)
+        )]
+    );
+}
+
+#[test]
+fn publishes_a_report_named_by_its_absolute_path() {
+    let published = Published::default();
+    let (dir, session) = publishing(&published, Some("k1"));
+    let path = dir.path().join("reports/run.html");
+    let (text, failed) = tool_in(
+        dir.path(),
+        &Fake::default(),
+        &session,
+        "publish_report",
+        json!({ "path": path.to_string_lossy() }),
+    );
+    assert!(!failed, "{text}");
+    assert_eq!(published.made.borrow()[0].1, "reports/run.html");
+}
+
+#[rstest]
+#[case::not_a_report(Some("k1"), json!({ "path": "reports/missing.html" }), "is not a report")]
+#[case::no_path(Some("k1"), json!({}), "Give the report's `path`")]
+#[case::unknown_key(Some("k9"), json!({ "path": "reports/run.html" }), "which session")]
+#[case::no_key(None, json!({ "path": "reports/run.html" }), "not started for a session")]
+#[case::bad_title(Some("k1"), json!({ "path": "reports/run.html", "title": "a\nb" }), "title")]
+fn refuses_to_publish_what_it_cannot(
+    #[case] key: Option<&str>,
+    #[case] arguments: Value,
+    #[case] expected: &str,
+) {
+    let published = Published::default();
+    let (dir, session) = publishing(&published, key);
+    let (text, failed) = tool_in(
+        dir.path(),
+        &Fake::default(),
+        &session,
+        "publish_report",
+        arguments,
+    );
+    assert!(failed);
+    assert!(text.contains(expected), "{text}");
+    assert!(published.made.borrow().is_empty());
+}
+
+#[test]
+fn says_what_the_gateway_refused() {
+    let published = Published {
+        refuse: true,
+        ..Published::default()
+    };
+    let (dir, session) = publishing(&published, Some("k1"));
+    let (text, failed) = tool_in(
+        dir.path(),
+        &Fake::default(),
+        &session,
+        "publish_report",
+        json!({ "path": "reports/run.html" }),
+    );
+    assert!(failed);
+    assert!(text.contains("too many"), "{text}");
+}
+
+#[test]
+fn offers_publishing_only_where_it_can_publish() {
+    let published = Published::default();
+    let (dir, session) = publishing(&published, Some("k1"));
+    let listed = |session: &Session| {
+        let reply = block_on(handle::<Fake>(
+            dir.path(),
+            None,
+            session,
+            &req("tools/list", json!({})),
+        ))
+        .unwrap_or_else(|| panic!("no reply"));
+        reply["result"]["tools"]
+            .as_array()
+            .map(|tools| tools.iter().any(|t| t["name"] == "publish_report"))
+            .unwrap_or_default()
+    };
+    assert!(listed(&session));
+    assert!(!listed(&Session::default()));
+    assert!(instructions(dir.path(), None, false, true).contains("publish_report"));
+    assert!(!instructions(dir.path(), None, false, false).contains("publish_report"));
+}
+
+#[test]
+fn reads_the_latest_session_recorded_for_a_key() {
+    let dir = checkout(None);
+    let file = dir.path().join("sessions.jsonl");
+    assert_eq!(session_of(&file, "k1"), None);
+    record_session(&file, "k1", "s1").unwrap_or_else(|e| panic!("{e}"));
+    record_session(&file, "k2", "s2").unwrap_or_else(|e| panic!("{e}"));
+    record_session(&file, "k1", "s3").unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(session_of(&file, "k1").as_deref(), Some("s3"));
+    assert_eq!(session_of(&file, "k2").as_deref(), Some("s2"));
+    assert_eq!(session_of(&file, "k3"), None);
 }
