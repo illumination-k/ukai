@@ -28,6 +28,35 @@ pub fn place(agent: &str, workspace: Option<&PaneWorkspace>) -> ReportSource {
     }
 }
 
+/// The workspace a pane works in or shows, with its project: an agent's,
+/// and that of the changes, terminal, report, or browser it holds. None for
+/// what belongs to no workspace (an empty pane, a schedule, a note).
+pub fn pane_place(content: &PaneContent) -> Option<(ProjectId, ReportSource)> {
+    match content {
+        PaneContent::Agent {
+            project,
+            agent,
+            workspace,
+            ..
+        } => Some((project.clone(), place(agent, workspace.as_ref()))),
+        PaneContent::Report {
+            project, source, ..
+        }
+        | PaneContent::Browser {
+            project, source, ..
+        }
+        | PaneContent::Diff {
+            project,
+            place: source,
+        }
+        | PaneContent::Terminal {
+            project,
+            place: source,
+        } => Some((project.clone(), source.clone())),
+        PaneContent::Empty | PaneContent::Schedule { .. } | PaneContent::Note { .. } => None,
+    }
+}
+
 /// An agent pane as the sidebar lists it under its workspace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenAgent {
@@ -329,6 +358,53 @@ mod tests {
         );
         assert_eq!(tree.gateways, ["cloud", "pods"]);
         assert_eq!(tree.agent_count(), 6);
+    }
+
+    #[test]
+    fn names_the_workspace_a_pane_is_in() {
+        let mut projects = Projects::default();
+        let project = projects.add(Path::new("/work/ukai"));
+        let agent = |agent: &str, workspace| PaneContent::Agent {
+            project: project.clone(),
+            agent: agent.to_owned(),
+            session: None,
+            workspace,
+        };
+        let at = |place| Some((project.clone(), place));
+        assert_eq!(pane_place(&agent("local", None)), at(ReportSource::Project));
+        // A shared workspace is named alike whichever pane is in it.
+        assert_eq!(
+            pane_place(&agent("cloud", shared("a"))),
+            at(agent_place("cloud", None))
+        );
+        assert_eq!(
+            pane_place(&agent("cloud", pod("c"))),
+            at(agent_place("cloud", pod("c")))
+        );
+        assert_eq!(
+            pane_place(&PaneContent::Terminal {
+                project: project.clone(),
+                place: agent_place("cloud", pod("c")),
+            }),
+            at(agent_place("cloud", pod("c")))
+        );
+        assert_eq!(
+            pane_place(&PaneContent::Report {
+                project: project.clone(),
+                path: "reports/a.html".into(),
+                source: ReportSource::Project,
+            }),
+            at(ReportSource::Project)
+        );
+        assert_eq!(pane_place(&PaneContent::Empty), None);
+        assert_eq!(
+            pane_place(&PaneContent::Note {
+                project: project.clone(),
+                agent: "cloud".to_owned(),
+                note: None,
+            }),
+            None
+        );
     }
 
     #[test]
