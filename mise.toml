@@ -57,9 +57,6 @@ depends = ["aqua:cargo-bins/cargo-binstall"]
 [env]
 GGML_NATIVE = "OFF"
 GGML_CCACHE = "OFF"
-# The pinned `dx`, by path: the rust tool puts `~/.cargo/bin` on PATH, and a
-# `cargo install`ed `dx` there would shadow this one.
-DX = { value = "{{ tools['cargo:dioxus-cli'].path }}/bin/dx", tools = true }
 
 [hooks]
 postinstall = "if [ -z \"${CI:-}\" ]; then prek install -f; fi"
@@ -119,12 +116,16 @@ description = "Run the prek (pre-commit) hooks over every tracked file"
 run = "prek run --all-files"
 
 # ---- rust --------------------------------------------------------------------
+# `dx` is the pinned one, by path (`mise where`): the rust tool puts
+# `~/.cargo/bin` on PATH, and a `cargo install`ed `dx` there would shadow it.
+# Not an [env] template, which fails wherever dioxus-cli is not installed
+# (the lint workflows install only the tools they run).
 
 [tasks."fmt:rust"]
 description = "Format Rust code with cargo fmt and dx fmt (rsx! blocks)"
 run = [
   "cargo fmt --all",
-  "\"$DX\" fmt --package ukai-app",
+  "\"$(mise where cargo:dioxus-cli)/bin/dx\" fmt --package ukai-app",
 ]
 
 [tasks."lint:rust"]
@@ -132,7 +133,7 @@ description = "Lint Rust with clippy, fmt check, cargo-deny, cargo-audit"
 run = [
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   "cargo fmt --all --check",
-  "\"$DX\" fmt --check --package ukai-app",
+  "\"$(mise where cargo:dioxus-cli)/bin/dx\" fmt --check --package ukai-app",
   "cargo deny check",
   "cargo audit",
 ]
@@ -150,8 +151,8 @@ run = "cargo test --doc --locked --all-features --workspace"
 
 [tasks.dev]
 description = "Run the desktop app with hot reload (dx serve)"
-run = '"$DX" serve --package ukai-app --platform desktop'
+run = '"$(mise where cargo:dioxus-cli)/bin/dx" serve --package ukai-app --platform desktop'
 
 [tasks.bundle]
 description = "Build a release bundle of the desktop app (dx bundle)"
-run = '"$DX" bundle --package ukai-app --platform desktop --release'
+run = '"$(mise where cargo:dioxus-cli)/bin/dx" bundle --package ukai-app --platform desktop --release'
