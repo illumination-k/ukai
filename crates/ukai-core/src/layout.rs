@@ -61,7 +61,7 @@ pub enum Node {
     Split {
         direction: Direction,
         children: Vec<Node>,
-        /// Relative size of each child; rendered as flex weights.
+        /// Relative size of each child; shares of the split ([`Node::frames`]).
         sizes: Vec<f32>,
     },
 }
@@ -539,20 +539,240 @@ impl Layout {
     }
 }
 
-/// Where children `index` and `index + 1` of a split with `sizes` lie, for
-/// dragging the boundary between them: the offset of the first from the
-/// split's start and the length of both together, in a split `extent` long
-/// with a divider `gap` long between each two children. Then
-/// `(pointer - offset) / length` is the share [`Layout::resize`] takes.
-pub fn boundary_span(sizes: &[f32], index: usize, extent: f64, gap: f64) -> Option<(f64, f64)> {
-    if index + 1 >= sizes.len() {
-        return None;
+/// A rectangle of a tab's pane area, each coordinate a fraction of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Frame {
+    /// The whole pane area.
+    pub const FULL: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+
+    /// Where the frame starts along `direction`, and how long it is.
+    fn along(&self, direction: Direction) -> (f64, f64) {
+        match direction {
+            Direction::Horizontal => (self.x, self.width),
+            Direction::Vertical => (self.y, self.height),
+        }
     }
-    let total: f64 = sizes.iter().map(|s| f64::from(*s)).sum();
-    let space = (extent - gap * (sizes.len() - 1) as f64).max(0.0);
-    let length = |sizes: &[f32]| sizes.iter().map(|s| f64::from(*s)).sum::<f64>() / total * space;
-    let offset = length(&sizes[..index]) + gap * index as f64;
-    Some((offset, length(&sizes[index..index + 2]) + gap))
+}
+
+/// The boundary between children `index` and `index + 1` of the split at
+/// `path`, as the pane area shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Boundary {
+    pub path: Vec<usize>,
+    pub index: usize,
+    pub direction: Direction,
+    /// The line the boundary is drawn on: zero wide (or high) along
+    /// `direction`, across the whole split the other way.
+    pub line: Frame,
+    /// Where the two children beside it start along `direction`, and how
+    /// long they are together. A pointer at `start + share * length` puts
+    /// the boundary at the share [`Layout::resize`] takes.
+    pub span: (f64, f64),
+}
+
+/// Where each pane of a tree and each boundary between them lie in the
+/// pane area. Panes are placed rather than nested, so that a split, a move,
+/// or a resize changes where a pane is drawn but never what draws it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Frames {
+    /// In display order.
+    pub panes: Vec<(PaneId, Frame)>,
+    pub boundaries: Vec<Boundary>,
+}
+
+/// A pane where its tab places it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placed {
+    pub pane: PaneId,
+    pub frame: Frame,
+    /// Whether its tab is the one shown.
+    pub shown: bool,
+}
+
+impl Layout {
+    /// Every pane of every tab, in pane id order. A tab that is not shown
+    /// keeps its panes, hidden, so that switching tabs remounts nothing.
+    pub fn placed(&self) -> Vec<Placed> {
+        let mut placed: Vec<Placed> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(index, tab)| {
+                let shown = index == self.active;
+                tab.root
+                    .frames()
+                    .panes
+                    .into_iter()
+                    .map(move |(pane, frame)| Placed { pane, frame, shown })
+            })
+            .collect();
+        placed.sort_by_key(|placed| placed.pane);
+        placed
+    }
+
+    /// [`Self::placed`], leaving out the panes of the tabs not `kept`
+    /// ([`Recent::kept`]).
+    pub fn placed_kept(&self, kept: &[bool]) -> Vec<Placed> {
+        let mut placed = self.placed();
+        placed.retain(|placed| {
+            self.tabs
+                .iter()
+                .position(|tab| tab.root.contains(placed.pane))
+                .is_some_and(|tab| kept.get(tab).copied().unwrap_or(false))
+        });
+        placed
+    }
+}
+
+/// The tabs shown most recently, newest first, each known by its panes:
+/// tab indices shift as tabs close and move, while a tab's panes stay with
+/// it. Which tabs stay mounted while not shown ([`Layout::placed_kept`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Recent(Vec<Vec<PaneId>>);
+
+/// How many tabs shown are remembered; past it the oldest are forgotten.
+const RECENT_LIMIT: usize = 32;
+
+impl Recent {
+    /// Note that `layout`'s active tab is shown. `false` when nothing
+    /// changed: it already was the newest, and no tab's panes changed.
+    pub fn show(&mut self, layout: &Layout) -> bool {
+        let mut order = vec![layout.active];
+        for seen in &self.0 {
+            if let Some(tab) = Self::tab_of(layout, seen, |tab| order.contains(&tab)) {
+                order.push(tab);
+            }
+        }
+        order.truncate(RECENT_LIMIT);
+        // Each remembered by the panes it holds now, which a pane moving in
+        // or out of it changes.
+        let next: Vec<Vec<PaneId>> = order
+            .into_iter()
+            .map(|tab| layout.tabs[tab].root.panes())
+            .collect();
+        let changed = next != self.0;
+        self.0 = next;
+        changed
+    }
+
+    /// The tab of `layout` that `panes`, remembered of one tab, stand for
+    /// now: the first holding one of them that is not `taken` already. A
+    /// pane that moved to a tab already counted leaves its old tab to the
+    /// panes that stayed.
+    fn tab_of(layout: &Layout, panes: &[PaneId], taken: impl Fn(usize) -> bool) -> Option<usize> {
+        panes.iter().find_map(|pane| {
+            layout
+                .tabs
+                .iter()
+                .position(|tab| tab.root.contains(*pane))
+                .filter(|tab| !taken(*tab))
+        })
+    }
+
+    /// For each of `layout`'s tabs, whether it stays mounted: the active tab
+    /// and those shown most recently, `keep` in all.
+    pub fn kept(&self, layout: &Layout, keep: usize) -> Vec<bool> {
+        let mut kept = vec![false; layout.tabs.len()];
+        kept[layout.active] = true;
+        let mut count = 1;
+        for seen in &self.0 {
+            if count >= keep {
+                break;
+            }
+            if let Some(tab) = Self::tab_of(layout, seen, |tab| kept[tab]) {
+                kept[tab] = true;
+                count += 1;
+            }
+        }
+        kept
+    }
+}
+
+impl Node {
+    /// Lay the tree out over the whole pane area.
+    pub fn frames(&self) -> Frames {
+        let mut frames = Frames::default();
+        self.place(Frame::FULL, &mut Vec::new(), &mut frames);
+        frames
+    }
+
+    fn place(&self, frame: Frame, path: &mut Vec<usize>, out: &mut Frames) {
+        let Node::Split {
+            direction,
+            children,
+            sizes,
+        } = self
+        else {
+            if let Node::Pane(id) = self {
+                out.panes.push((*id, frame));
+            }
+            return;
+        };
+        let direction = *direction;
+        let total: f64 = sizes.iter().map(|s| f64::from(*s)).sum();
+        let (origin, extent) = frame.along(direction);
+        let length = |size: f32| {
+            if total > 0.0 {
+                f64::from(size) / total * extent
+            } else {
+                extent / children.len().max(1) as f64
+            }
+        };
+        let mut at = origin;
+        for (index, child) in children.iter().enumerate() {
+            let size = sizes.get(index).copied().unwrap_or(0.0);
+            let extent = length(size);
+            let child_frame = match direction {
+                Direction::Horizontal => Frame {
+                    x: at,
+                    width: extent,
+                    ..frame
+                },
+                Direction::Vertical => Frame {
+                    y: at,
+                    height: extent,
+                    ..frame
+                },
+            };
+            path.push(index);
+            child.place(child_frame, path, out);
+            path.pop();
+            at += extent;
+            if let Some(next) = sizes.get(index + 1).filter(|_| index + 1 < children.len()) {
+                let line = match direction {
+                    Direction::Horizontal => Frame {
+                        x: at,
+                        width: 0.0,
+                        ..frame
+                    },
+                    Direction::Vertical => Frame {
+                        y: at,
+                        height: 0.0,
+                        ..frame
+                    },
+                };
+                out.boundaries.push(Boundary {
+                    path: path.clone(),
+                    index,
+                    direction,
+                    line,
+                    span: (at - extent, extent + length(*next)),
+                });
+            }
+        }
+    }
 }
 
 /// `index + step` modulo `len` (which is at least 1).

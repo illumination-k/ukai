@@ -2,6 +2,7 @@
 //! [`ukai_core::Layout`]. Each pane belongs to a project, so one tab can show
 //! agents of several projects side by side.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -13,8 +14,8 @@ use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::{
-    Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource, Side,
-    boundary_span,
+    Boundary, Direction, Frame, Layout, PaneContent, PaneId, Placed, ProjectId, Projects, Recent,
+    ReportSource, Side,
 };
 
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect, session_title};
@@ -29,10 +30,6 @@ use crate::report_pane::{ReportView, delete_report, download_report, pick_report
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
 use crate::terminal_pane::{TerminalPane, open_terminal_in};
-
-/// The width of the divider between two children of a split, in CSS pixels;
-/// matches `.divider` in `main.css`.
-const DIVIDER: f64 = 1.0;
 
 /// How far the pointer goes with a pane header held before it is a drag
 /// rather than a click, in CSS pixels.
@@ -328,7 +325,19 @@ fn tab_state(sessions: Sessions, panes: &[PaneId]) -> Option<&'static str> {
 pub fn Workbench() -> Element {
     let app = use_context::<AppSignals>();
     let mut drag = app.drag;
-    let root = app.layout.read().active_tab().root.clone();
+    let panes = use_kept_panes(app.layout);
+    let (boundaries, split) = {
+        let layout = app.layout.read();
+        let frames = layout.active_tab().root.frames();
+        (frames.boundaries, frames.panes.len() > 1)
+    };
+    // The panes of the tabs kept are placed in this one element rather than
+    // nested in their splits, so that a split, a move, or a switch between
+    // those tabs changes where a pane is drawn, or whether it shows, but
+    // never remounts it: remounting rebuilds its transcript and reloads its
+    // web view.
+    let mut area = use_signal(|| None::<Rc<MountedData>>);
+    let panes_class = if split { "panes split" } else { "panes" };
     let (class, overlay) = match &*drag.read() {
         None => ("workbench", None),
         Some(Drag::Boundary { direction, .. }) => (
@@ -359,8 +368,18 @@ pub fn Workbench() -> Element {
                 }
             },
             TabBar {}
-            div { class: "panes",
-                NodeView { node: root, path: Vec::new() }
+            div {
+                class: panes_class,
+                onmounted: move |event| area.set(Some(event.data())),
+                PlacedPanes {
+                    panes,
+                    pane: |pane| rsx! {
+                        PaneView { pane }
+                    },
+                }
+                for boundary in boundaries {
+                    Divider { boundary, area }
+                }
             }
             if let Some(overlay) = overlay {
                 div { class: overlay }
@@ -463,67 +482,105 @@ fn TabBar() -> Element {
     }
 }
 
-/// A node of the active tab's tree at `path`, child indices from its root.
+/// How many tabs stay mounted: the one shown and those shown just before
+/// it. A tab past them is dropped until it shows again, rebuilt then, so
+/// that many tabs open do not keep all their transcripts and web views.
+pub const KEPT_TABS: usize = 5;
+
+/// The panes to mount: those of the [`KEPT_TABS`] tabs shown most recently.
+pub fn use_kept_panes(layout: Signal<Layout>) -> Vec<Placed> {
+    // Not a signal: noting the tab shown is bookkeeping for this render, and
+    // noting it again changes nothing.
+    let recent = use_hook(|| Rc::new(RefCell::new(Recent::default())));
+    let layout = layout.read();
+    let mut recent = recent.borrow_mut();
+    recent.show(&layout);
+    layout.placed_kept(&recent.kept(&layout, KEPT_TABS))
+}
+
+/// Each of `panes` ([`use_kept_panes`]: the kept tabs') drawn by `pane`, placed
+/// at its frame. Keyed by pane id and kept in id order, so that a split, a
+/// move, a resize, or a tab switch changes where a pane's element is, or
+/// whether it shows, but never remounts what `pane` drew in it.
 #[component]
-fn NodeView(node: Node, path: Vec<usize>) -> Element {
-    let mut host = use_signal(|| None::<Rc<MountedData>>);
-    match node {
-        Node::Pane(pane) => rsx! {
-            PaneView { key: "{pane}", pane }
-        },
-        Node::Split {
-            direction,
-            children,
-            sizes,
-        } => {
-            let class = match direction {
-                Direction::Horizontal => "split horizontal",
-                Direction::Vertical => "split vertical",
-            };
-            let last = children.len() - 1;
-            rsx! {
-                div {
-                    class,
-                    onmounted: move |event| host.set(Some(event.data())),
-                    for (index, (child, size)) in children.into_iter().zip(sizes.iter().copied()).enumerate() {
-                        div { class: "split-child", style: "flex: {size} 1 0",
-                            NodeView {
-                                node: child,
-                                path: path.iter().copied().chain([index]).collect::<Vec<_>>(),
-                            }
-                        }
-                        if index < last {
-                            Divider {
-                                path: path.clone(),
-                                index,
-                                direction,
-                                sizes: sizes.clone(),
-                                host,
-                            }
-                        }
-                    }
-                }
-            }
+pub fn PlacedPanes(panes: Vec<Placed>, pane: Callback<PaneId, Element>) -> Element {
+    rsx! {
+        for Placed { pane: id, frame, shown } in panes {
+            PaneSlot { key: "{id}", frame, shown, {pane.call(id)} }
         }
     }
 }
 
-/// The boundary after child `index` of the split at `path`: drag it to
-/// resize the two children beside it, double-click it to make them equal.
+/// Whether the pane drawn in a slot is on the tab shown, provided to what
+/// it draws: a native web view does not hide with its element, so it has to
+/// be hidden itself.
+#[derive(Clone, Copy)]
+pub struct PaneShown(pub ReadSignal<bool>);
+
+/// One pane's place: where it goes, hidden while its tab is not shown.
 #[component]
-fn Divider(
-    path: Vec<usize>,
-    index: usize,
-    direction: Direction,
-    sizes: Vec<f32>,
-    host: Signal<Option<Rc<MountedData>>>,
-) -> Element {
+fn PaneSlot(frame: Frame, shown: ReadSignal<bool>, children: Element) -> Element {
+    use_context_provider(|| PaneShown(shown));
+    rsx! {
+        div {
+            class: if shown() { "pane-slot" } else { "pane-slot hidden" },
+            style: placement(frame),
+            {children}
+        }
+    }
+}
+
+/// Where `frame` of the pane area is, as CSS.
+fn placement(frame: Frame) -> String {
+    let percent = |fraction: f64| fraction * 100.0;
+    format!(
+        "left: {}%; top: {}%; width: {}%; height: {}%;",
+        percent(frame.x),
+        percent(frame.y),
+        percent(frame.width),
+        percent(frame.height),
+    )
+}
+
+/// A boundary between two children of a split: drag it to resize them,
+/// double-click it to make them equal. `area` is the pane area it is laid
+/// over.
+#[component]
+fn Divider(boundary: Boundary, area: Signal<Option<Rc<MountedData>>>) -> Element {
     let app = use_context::<AppSignals>();
     let mut drag = app.drag;
     let mut layout = app.layout;
+    let class = match boundary.direction {
+        Direction::Horizontal => "divider horizontal",
+        Direction::Vertical => "divider vertical",
+    };
+    // Across the split only: its thickness is the stylesheet's.
+    let line = boundary.line;
+    let style = match boundary.direction {
+        Direction::Horizontal => format!(
+            "left: {}%; top: {}%; height: {}%;",
+            line.x * 100.0,
+            line.y * 100.0,
+            line.height * 100.0,
+        ),
+        Direction::Vertical => format!(
+            "left: {}%; top: {}%; width: {}%;",
+            line.x * 100.0,
+            line.y * 100.0,
+            line.width * 100.0,
+        ),
+    };
+    let Boundary {
+        path,
+        index,
+        direction,
+        span: (start, length),
+        ..
+    } = boundary;
     rsx! {
         div {
-            class: "divider",
+            class,
+            style,
             onmousedown: {
                 let path = path.clone();
                 move |event: MouseEvent| {
@@ -533,11 +590,10 @@ fn Divider(
                     // Keep the press from selecting text or focusing a pane.
                     event.prevent_default();
                     event.stop_propagation();
-                    let Some(element) = host.peek().clone() else {
+                    let Some(element) = area.peek().clone() else {
                         return;
                     };
                     let path = path.clone();
-                    let sizes = sizes.clone();
                     spawn(async move {
                         let Ok(rect) = element.get_client_rect().await else {
                             return;
@@ -546,22 +602,15 @@ fn Divider(
                             Direction::Horizontal => (rect.origin.x, rect.size.width),
                             Direction::Vertical => (rect.origin.y, rect.size.height),
                         };
-                        if let Some((offset, length)) = boundary_span(
-                            &sizes,
-                            index,
-                            extent,
-                            DIVIDER,
-                        ) {
-                            drag.set(
-                                Some(Drag::Boundary {
-                                    path,
-                                    index,
-                                    direction,
-                                    start: origin + offset,
-                                    length,
-                                }),
-                            );
-                        }
+                        drag.set(
+                            Some(Drag::Boundary {
+                                path,
+                                index,
+                                direction,
+                                start: origin + start * extent,
+                                length: length * extent,
+                            }),
+                        );
                     });
                 }
             },
@@ -982,5 +1031,134 @@ fn Picker(pane: PaneId) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use dioxus::dioxus_core::NoOpMutations;
+    use ukai_core::Side;
+
+    use super::*;
+
+    /// How many times each pane's content was mounted.
+    type Mounts = Rc<RefCell<HashMap<PaneId, usize>>>;
+
+    #[component]
+    fn Probe(pane: PaneId) -> Element {
+        let mounts = use_context::<Mounts>();
+        use_hook(|| *mounts.borrow_mut().entry(pane).or_default() += 1);
+        rsx! { "{pane}" }
+    }
+
+    #[component]
+    fn Root() -> Element {
+        let layout = use_context::<Signal<Layout>>();
+        let panes = use_kept_panes(layout);
+        rsx! {
+            PlacedPanes {
+                panes,
+                pane: |pane| rsx! {
+                    Probe { pane }
+                },
+            }
+        }
+    }
+
+    /// Splitting, moving, resizing, and closing panes, switching tabs, and
+    /// moving a pane to another tab leave every pane mounted once: a
+    /// remount rebuilds an agent's transcript and reloads a report's web
+    /// view.
+    #[test]
+    fn rearranging_panes_never_remounts_one() {
+        let mounts = Mounts::default();
+        let mut dom = VirtualDom::new(Root);
+        let mut layout = dom.in_runtime(|| Signal::new_in_scope(Layout::default(), ScopeId::ROOT));
+        dom.provide_root_context(mounts.clone());
+        dom.provide_root_context(layout);
+        dom.rebuild_in_place();
+
+        let mut change = |dom: &mut VirtualDom, change: &dyn Fn(&mut Layout)| {
+            dom.in_runtime(|| change(&mut layout.write()));
+            settle(dom);
+        };
+        change(&mut dom, &|layout| {
+            layout.split(0, Direction::Horizontal);
+        });
+        change(&mut dom, &|layout| {
+            layout.split(1, Direction::Vertical);
+        });
+        change(&mut dom, &|layout| {
+            layout.split(0, Direction::Vertical);
+        });
+        change(&mut dom, &|layout| {
+            layout.resize(&[], 0, 0.3);
+        });
+        change(&mut dom, &|layout| {
+            layout.move_pane(0, 2, Side::Right);
+        });
+        change(&mut dom, &|layout| {
+            layout.swap_panes(1, 3);
+        });
+        change(&mut dom, &|layout| {
+            layout.close_pane(2);
+        });
+        change(&mut dom, &|layout| {
+            layout.new_tab();
+        });
+        change(&mut dom, &|layout| {
+            layout.select_tab(0);
+        });
+        change(&mut dom, &|layout| {
+            layout.move_to_tab(1, Some(1));
+        });
+        change(&mut dom, &|layout| {
+            layout.select_tab(0);
+        });
+
+        let panes = dom.in_runtime(|| layout.peek().placed().len());
+        assert_eq!(panes, 4);
+        assert_eq!(
+            *mounts.borrow(),
+            HashMap::from([(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]),
+        );
+    }
+
+    fn settle(dom: &mut VirtualDom) {
+        dom.render_immediate(&mut NoOpMutations);
+    }
+
+    /// Only the [`KEPT_TABS`] tabs shown last stay mounted: going back to
+    /// one of them remounts nothing, going back to an older one rebuilds it.
+    #[test]
+    fn only_the_tabs_shown_last_stay_mounted() {
+        let mounts = Mounts::default();
+        let mut dom = VirtualDom::new(Root);
+        let mut layout = dom.in_runtime(|| Signal::new_in_scope(Layout::default(), ScopeId::ROOT));
+        dom.provide_root_context(mounts.clone());
+        dom.provide_root_context(layout);
+        dom.rebuild_in_place();
+        settle(&mut dom);
+
+        // Tab `i` holds pane `i`.
+        let tabs = KEPT_TABS + 2;
+        for _ in 1..tabs {
+            dom.in_runtime(|| layout.write().new_tab());
+            settle(&mut dom);
+        }
+        let mut show = |dom: &mut VirtualDom, tab: usize| {
+            dom.in_runtime(|| layout.write().select_tab(tab));
+            settle(dom);
+        };
+        // Among the last kept: nothing is rebuilt.
+        show(&mut dom, tabs - KEPT_TABS);
+        assert!(mounts.borrow().values().all(|count| *count == 1));
+        // The oldest was dropped, so it is rebuilt.
+        show(&mut dom, 0);
+        assert_eq!(mounts.borrow()[&0], 2);
+        assert_eq!(mounts.borrow()[&(tabs as PaneId - 1)], 1);
     }
 }

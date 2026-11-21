@@ -141,6 +141,10 @@ run = [
 description = "Run Rust tests with cargo-nextest"
 run = "cargo nextest run --locked --workspace --all-features --no-tests=pass"
 
+[tasks.bench]
+description = "Run the benchmarks (divan); not part of `ci`, timings vary by machine"
+run = "cargo bench --locked -p ukai-app"
+
 [tasks."test:rust:doc"]
 description = "Run Rust doctests (cargo-nextest does not run them)"
 run = "cargo test --doc --locked --all-features --workspace"

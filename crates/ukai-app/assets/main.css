@@ -800,46 +800,43 @@ button.new-tab {
 
 /* ---- panes ------------------------------------------------------------ */
 
+/* Each pane is placed over the area by `placement` in layout.rs rather than
+   nested in its splits, so that a split never remounts a pane. */
 .panes {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
-
-/* Panes touch; the divider is the only separation. */
-.split {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-}
-
-.split.vertical {
-  flex-direction: column;
-}
-
-.split-child {
-  display: flex;
-  flex: 1 1 0;
-  min-width: 0;
-  min-height: 0;
-}
-
-/* 1px wide (`DIVIDER` in layout.rs), with a wider grip laid over the panes. */
-.divider {
   position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane-slot {
+  position: absolute;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* A pane of a tab that is not shown stays mounted, out of sight. */
+.pane-slot.hidden {
+  display: none;
+}
+
+/* Panes touch; the divider is the only separation: a 1px line on the
+   boundary, with a wider grip laid over the panes. */
+.divider {
+  position: absolute;
   z-index: 2;
-  flex: none;
   background: var(--divider);
 }
 
-.split.horizontal > .divider {
+.divider.horizontal {
   width: 1px;
+  margin-left: -1px;
   cursor: col-resize;
 }
 
-.split.vertical > .divider {
+.divider.vertical {
   height: 1px;
+  margin-top: -1px;
   cursor: row-resize;
 }
 
@@ -849,11 +846,11 @@ button.new-tab {
   content: "";
 }
 
-.split.horizontal > .divider::after {
+.divider.horizontal::after {
   inset: 0 -3px;
 }
 
-.split.vertical > .divider::after {
+.divider.vertical::after {
   inset: -3px 0;
 }
 
@@ -1001,11 +998,11 @@ button.new-tab {
 }
 
 /* Only a split tab needs to say which pane has focus. */
-.split .pane.focused > header {
+.panes.split .pane.focused > header {
   box-shadow: inset 0 -2px 0 var(--fg);
 }
 
-.split .pane:not(.focused) {
+.panes.split .pane:not(.focused) {
   opacity: 0.92;
 }
 

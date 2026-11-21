@@ -58,6 +58,17 @@ and the runtime image built as `ukai-runtime:e2e` (see the script); CI runs it
 on every change that reaches the cluster side. Extend it when a change crosses
 the gateway, `ukai-knowledge`, or the manifests.
 
+`mise run bench` runs the benchmarks (`divan`, in each crate's `benches/`;
+not part of `ci`). `crates/ukai-app/benches/panes.rs` measures splitting,
+moving, and resizing panes that show long transcripts, and switching tabs:
+each should stay in microseconds whatever the transcripts' length, since
+panes are placed rather than remounted (`layout::tests` checks the same
+without timing), and each reports what it allocates. `benches/memory.rs`
+reports the heap the virtual DOM keeps for mounted tabs (`alloc` less
+`dealloc`): the tabs shown last (`KEPT_TABS`) stay mounted, so it grows
+with their transcripts, not just the shown one's. Run both before and
+after a change to how panes or messages render.
+
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an
 in-process mock agent over `Channel::duplex`; extend the mock rather than
 reaching for a real agent in tests.

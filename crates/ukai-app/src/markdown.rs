@@ -40,11 +40,7 @@ const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 pub fn Markdown(source: String) -> Element {
     let nodes = markdown::parse(&source);
     rsx! {
-        div { class: "md",
-            for (index, node) in nodes.iter().enumerate() {
-                Fragment { key: "{index}", {render(node)} }
-            }
-        }
+        div { class: "md", {nodes.iter().map(render)} }
     }
 }
 
@@ -77,9 +73,7 @@ fn render(node: &Node) -> Element {
 
 fn element(kind: &Kind, children: &[Node]) -> Element {
     let inner = rsx! {
-        for (index, child) in children.iter().enumerate() {
-            Fragment { key: "{index}", {render(child)} }
-        }
+        {children.iter().map(render)}
     };
     match kind {
         Kind::Paragraph => rsx! {

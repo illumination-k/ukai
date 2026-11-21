@@ -3,8 +3,9 @@
 //!
 //! The view is native, so it sits above the app's DOM: [`use_child_view`]
 //! keeps it over its host element by polling the element's position, hides
-//! it while something of the DOM is drawn over the pane (`covered`), and
-//! drops it on unmount (tab change, split, close).
+//! it while something of the DOM is drawn over the pane (`covered`) or the
+//! pane's tab is not shown ([`PaneShown`]), and drops it on unmount (close,
+//! or a tab no longer among those kept mounted).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,8 +16,13 @@ use dioxus::desktop::wry::dpi::{LogicalPosition, LogicalSize};
 use dioxus::desktop::wry::{Rect, WebView};
 use dioxus::prelude::*;
 
+use crate::layout::PaneShown;
+
 /// How often the view follows its host's position.
 const POLL: Duration = Duration::from_millis(150);
+/// How often to look for the host before the view is first built, so that
+/// a new pane's view appears with the pane rather than a poll later.
+const FIRST_POLL: Duration = Duration::from_millis(16);
 
 /// The web view once built, shared with whatever else drives it.
 pub type View = Rc<RefCell<Option<WebView>>>;
@@ -41,15 +47,17 @@ pub fn use_child_view(
     let host = use_signal(|| None::<Rc<MountedData>>);
     let mut failure = use_signal(|| None::<String>);
     let build = use_hook(|| Rc::new(build));
+    let shown = try_use_context::<PaneShown>();
+    let hidden = use_memo(move || covered() || shown.is_some_and(|PaneShown(shown)| !shown()));
 
-    // Hide at once; the poll below shows the view again once uncovered.
+    // Hide or show at once, where the view was last placed; the poll below
+    // follows the host from there.
     use_effect({
         let view = view.clone();
         move || {
-            if covered()
-                && let Some(webview) = view.borrow().as_ref()
-            {
-                let _ = webview.set_visible(false);
+            let hidden = hidden();
+            if let Some(webview) = view.borrow().as_ref() {
+                let _ = webview.set_visible(!hidden);
             }
         }
     });
@@ -70,12 +78,18 @@ pub fn use_child_view(
                 let window = dioxus::desktop::window();
                 let mut placed = None;
                 loop {
+                    // A view of a tab not shown is built once it shows;
+                    // until then there is nothing to place.
+                    if view.borrow().is_none() && *hidden.peek() {
+                        tokio::time::sleep(FIRST_POLL).await;
+                        continue;
+                    }
                     let element = host.peek().clone();
                     if let Some(element) = element
                         && let Ok(rect) = element.get_client_rect().await
                     {
                         let window_size = window.window.inner_size();
-                        let hidden = *covered.peek();
+                        let hidden = *hidden.peek();
                         let key = (
                             rect.origin.x,
                             rect.origin.y,
@@ -98,6 +112,8 @@ pub fn use_child_view(
                                     let _ = webview.set_bounds(bounds);
                                     let _ = webview.set_visible(visible);
                                 }
+                                // Not laid out yet: build once it is.
+                                None if !visible => placed = None,
                                 None => match build(bounds, &window.window) {
                                     Ok(webview) => {
                                         let _ = webview.set_visible(visible);
@@ -112,7 +128,12 @@ pub fn use_child_view(
                             }
                         }
                     }
-                    tokio::time::sleep(POLL).await;
+                    let wait = if view.borrow().is_some() {
+                        POLL
+                    } else {
+                        FIRST_POLL
+                    };
+                    tokio::time::sleep(wait).await;
                 }
             }
         }
