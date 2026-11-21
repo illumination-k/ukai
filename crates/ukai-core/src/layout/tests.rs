@@ -249,6 +249,80 @@ fn every_tab_is_placed_and_only_the_active_one_shown() {
     assert_eq!(placed[2].frame, Frame::FULL);
 }
 
+/// `tabs` tabs of one pane each, every one shown in turn; tab `i` holds
+/// pane `i` and the last is active.
+fn tabs_shown(tabs: usize) -> (Layout, Recent) {
+    let mut layout = Layout::default();
+    let mut recent = Recent::default();
+    recent.show(&layout);
+    for _ in 1..tabs {
+        layout.new_tab();
+        recent.show(&layout);
+    }
+    (layout, recent)
+}
+
+#[test]
+fn the_tabs_shown_last_are_kept() {
+    let (mut layout, mut recent) = tabs_shown(6);
+    assert_eq!(
+        recent.kept(&layout, 3),
+        vec![false, false, false, true, true, true]
+    );
+    layout.select_tab(0);
+    assert!(recent.show(&layout));
+    assert!(!recent.show(&layout));
+    assert_eq!(
+        recent.kept(&layout, 3),
+        vec![true, false, false, false, true, true]
+    );
+}
+
+#[test]
+fn the_active_tab_is_kept_before_it_is_noted() {
+    let (mut layout, recent) = tabs_shown(4);
+    layout.select_tab(0);
+    assert_eq!(recent.kept(&layout, 2), vec![true, false, false, true]);
+}
+
+#[test]
+fn kept_tabs_follow_their_panes_when_tabs_close() {
+    let (mut layout, mut recent) = tabs_shown(4);
+    layout.select_tab(1);
+    recent.show(&layout);
+    // Tab 0 closes, so tabs 1..=3 shift down one.
+    assert_eq!(layout.close_tab(0), vec![0]);
+    recent.show(&layout);
+    assert_eq!(recent.kept(&layout, 2), vec![true, false, true]);
+}
+
+#[test]
+fn a_pane_moving_to_the_shown_tab_leaves_its_tab_kept() {
+    let (mut layout, mut recent) = tabs_shown(3);
+    // Tab 0 holds panes 0 and 3, and is shown last but one.
+    layout.select_tab(0);
+    layout.split(0, H);
+    recent.show(&layout);
+    layout.select_tab(2);
+    recent.show(&layout);
+    // Pane 0 goes to tab 2, which stays shown.
+    assert!(layout.move_to_tab(0, Some(2)));
+    recent.show(&layout);
+    assert_eq!(layout.active(), 2);
+    assert_eq!(recent.kept(&layout, 2), vec![true, false, true]);
+}
+
+#[test]
+fn placed_kept_leaves_out_the_tabs_not_kept() {
+    let (layout, recent) = tabs_shown(3);
+    let panes: Vec<_> = layout
+        .placed_kept(&recent.kept(&layout, 2))
+        .iter()
+        .map(|placed| (placed.pane, placed.shown))
+        .collect();
+    assert_eq!(panes, vec![(1, false), (2, true)]);
+}
+
 #[test]
 fn a_boundary_spans_only_its_two_children() {
     let frames = sized(H, vec![p(0), p(1), p(2)], vec![1.0, 1.0, 2.0]).frames();
@@ -474,6 +548,7 @@ proptest! {
     #[test]
     fn operations_keep_invariants(ops in prop::collection::vec(op(), 0..60)) {
         let mut layout = Layout::default();
+        let mut recent = Recent::default();
         for op in ops {
             match op {
                 Op::NewTab => { layout.new_tab(); }
@@ -512,8 +587,23 @@ proptest! {
             }
             check_invariants(&layout)?;
             check_frames(&layout.active_tab().root)?;
+            // Before and after noting the tab shown, as the app renders.
+            check_kept(&layout, &recent)?;
+            recent.show(&layout);
+            check_kept(&layout, &recent)?;
         }
     }
+}
+
+/// The active tab is always kept, and no more than asked for.
+fn check_kept(layout: &Layout, recent: &Recent) -> Result<(), TestCaseError> {
+    for keep in 1..4 {
+        let kept = recent.kept(layout, keep);
+        prop_assert_eq!(kept.len(), layout.tabs().len());
+        prop_assert!(kept[layout.active()]);
+        prop_assert!(kept.iter().filter(|kept| **kept).count() <= keep);
+    }
+    Ok(())
 }
 
 /// Frames tile the pane area: one per pane in display order, inside it,

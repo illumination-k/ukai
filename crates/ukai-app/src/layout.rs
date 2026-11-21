@@ -2,6 +2,7 @@
 //! [`ukai_core::Layout`]. Each pane belongs to a project, so one tab can show
 //! agents of several projects side by side.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -13,7 +14,7 @@ use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::{
-    Boundary, Direction, Frame, Layout, PaneContent, PaneId, Placed, ProjectId, Projects,
+    Boundary, Direction, Frame, Layout, PaneContent, PaneId, Placed, ProjectId, Projects, Recent,
     ReportSource, Side,
 };
 
@@ -324,15 +325,17 @@ fn tab_state(sessions: Sessions, panes: &[PaneId]) -> Option<&'static str> {
 pub fn Workbench() -> Element {
     let app = use_context::<AppSignals>();
     let mut drag = app.drag;
-    let (panes, boundaries, split) = {
+    let panes = use_kept_panes(app.layout);
+    let (boundaries, split) = {
         let layout = app.layout.read();
         let frames = layout.active_tab().root.frames();
-        (layout.placed(), frames.boundaries, frames.panes.len() > 1)
+        (frames.boundaries, frames.panes.len() > 1)
     };
-    // Every pane of every tab is placed in this one element rather than
-    // nested in its splits, so that a split, a move, or a tab switch changes
-    // where a pane is drawn, or whether it shows, but never remounts it:
-    // remounting rebuilds its transcript and reloads its web view.
+    // The panes of the tabs kept are placed in this one element rather than
+    // nested in their splits, so that a split, a move, or a switch between
+    // those tabs changes where a pane is drawn, or whether it shows, but
+    // never remounts it: remounting rebuilds its transcript and reloads its
+    // web view.
     let mut area = use_signal(|| None::<Rc<MountedData>>);
     let panes_class = if split { "panes split" } else { "panes" };
     let (class, overlay) = match &*drag.read() {
@@ -476,7 +479,23 @@ fn TabBar() -> Element {
     }
 }
 
-/// Each of `panes` ([`Layout::placed`]: every tab's) drawn by `pane`, placed
+/// How many tabs stay mounted: the one shown and those shown just before
+/// it. A tab past them is dropped until it shows again, rebuilt then, so
+/// that many tabs open do not keep all their transcripts and web views.
+pub const KEPT_TABS: usize = 5;
+
+/// The panes to mount: those of the [`KEPT_TABS`] tabs shown most recently.
+pub fn use_kept_panes(layout: Signal<Layout>) -> Vec<Placed> {
+    // Not a signal: noting the tab shown is bookkeeping for this render, and
+    // noting it again changes nothing.
+    let recent = use_hook(|| Rc::new(RefCell::new(Recent::default())));
+    let layout = layout.read();
+    let mut recent = recent.borrow_mut();
+    recent.show(&layout);
+    layout.placed_kept(&recent.kept(&layout, KEPT_TABS))
+}
+
+/// Each of `panes` ([`use_kept_panes`]: the kept tabs') drawn by `pane`, placed
 /// at its frame. Keyed by pane id and kept in id order, so that a split, a
 /// move, a resize, or a tab switch changes where a pane's element is, or
 /// whether it shows, but never remounts what `pane` drew in it.
@@ -1035,7 +1054,7 @@ mod tests {
     #[component]
     fn Root() -> Element {
         let layout = use_context::<Signal<Layout>>();
-        let panes = layout.read().placed();
+        let panes = use_kept_panes(layout);
         rsx! {
             PlacedPanes { panes, pane: |pane| rsx! {
                 Probe { pane }
@@ -1058,7 +1077,7 @@ mod tests {
 
         let mut change = |dom: &mut VirtualDom, change: &dyn Fn(&mut Layout)| {
             dom.in_runtime(|| change(&mut layout.write()));
-            dom.render_immediate(&mut NoOpMutations);
+            settle(dom);
         };
         change(&mut dom, &|layout| {
             layout.split(0, Direction::Horizontal);
@@ -1100,5 +1119,40 @@ mod tests {
             *mounts.borrow(),
             HashMap::from([(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]),
         );
+    }
+
+    fn settle(dom: &mut VirtualDom) {
+        dom.render_immediate(&mut NoOpMutations);
+    }
+
+    /// Only the [`KEPT_TABS`] tabs shown last stay mounted: going back to
+    /// one of them remounts nothing, going back to an older one rebuilds it.
+    #[test]
+    fn only_the_tabs_shown_last_stay_mounted() {
+        let mounts = Mounts::default();
+        let mut dom = VirtualDom::new(Root);
+        let mut layout = dom.in_runtime(|| Signal::new_in_scope(Layout::default(), ScopeId::ROOT));
+        dom.provide_root_context(mounts.clone());
+        dom.provide_root_context(layout);
+        dom.rebuild_in_place();
+        settle(&mut dom);
+
+        // Tab `i` holds pane `i`.
+        let tabs = KEPT_TABS + 2;
+        for _ in 1..tabs {
+            dom.in_runtime(|| layout.write().new_tab());
+            settle(&mut dom);
+        }
+        let mut show = |dom: &mut VirtualDom, tab: usize| {
+            dom.in_runtime(|| layout.write().select_tab(tab));
+            settle(dom);
+        };
+        // Among the last kept: nothing is rebuilt.
+        show(&mut dom, tabs - KEPT_TABS);
+        assert!(mounts.borrow().values().all(|count| *count == 1));
+        // The oldest was dropped, so it is rebuilt.
+        show(&mut dom, 0);
+        assert_eq!(mounts.borrow()[&0], 2);
+        assert_eq!(mounts.borrow()[&(tabs as PaneId - 1)], 1);
     }
 }

@@ -65,8 +65,8 @@ each should stay in microseconds whatever the transcripts' length, since
 panes are placed rather than remounted (`layout::tests` checks the same
 without timing), and each reports what it allocates. `benches/memory.rs`
 reports the heap the virtual DOM keeps for mounted tabs (`alloc` less
-`dealloc`): every tab stays mounted, so it grows with all the transcripts
-open, not just the shown one. Run both before and after a change to how
+`dealloc`): the tabs shown last (`KEPT_TABS`) stay mounted, so it grows
+with their transcripts, not just the shown one's. Run both before and after a change to how
 panes or messages render.
 
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an

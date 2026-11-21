@@ -2,18 +2,20 @@
 //! mounted, and what keeping the tabs not shown mounted costs, since
 //! switching tabs hides panes rather than dropping them.
 //!
-//! Each bench mounts a workbench of `TABS` tabs of four panes, the last one
-//! shown, and returns it: divan drops it after counting, so `alloc` less
-//! `dealloc` in a row is what the mounted workbench keeps. `tabs_mounted`
-//! is the app; `shown_tab_only` mounts the shown tab alone, as the app did
-//! before, and the difference is the price of keeping the others. Only the
+//! Each bench mounts a workbench of `TABS` tabs of four panes, every tab
+//! shown in turn and the last one shown now, and returns it: divan drops it
+//! after counting, so `alloc` less `dealloc` in a row is what the mounted
+//! workbench keeps. `kept_tabs` is the app, which keeps the tabs shown last
+//! (`KEPT_TABS`) mounted; `all_tabs` keeps every tab, and `shown_tab_only`
+//! none but the one shown, for comparison. Only the
 //! Rust side is counted, the virtual DOM; the web view's own DOM for the
 //! same elements is not.
 //!
 //! `mise run bench`, or `cargo bench -p ukai-app --bench memory`.
 
+use dioxus::dioxus_core::NoOpMutations;
 use dioxus::prelude::*;
-use ukai_app::bench::{Markdown, PlacedPanes};
+use ukai_app::bench::{Markdown, PlacedPanes, use_kept_panes};
 use ukai_core::{Direction, Layout, PaneId};
 
 use crate::common::MESSAGE;
@@ -32,9 +34,14 @@ const PANES: usize = 4;
 /// Messages in each pane's transcript.
 const MESSAGES: [usize; 3] = [0, 20, 100];
 
-/// Whether the tabs not shown are mounted, as the app does, or dropped.
+/// Which tabs not shown stay mounted.
 #[derive(Clone, Copy)]
-struct Hidden(bool);
+enum Hidden {
+    /// The tabs shown last, as the app keeps them.
+    Kept,
+    All,
+    None,
+}
 
 #[component]
 fn Transcript(pane: PaneId) -> Element {
@@ -51,11 +58,16 @@ fn Transcript(pane: PaneId) -> Element {
 #[component]
 fn Root() -> Element {
     let layout = use_context::<Signal<Layout>>();
-    let Hidden(mounted) = use_context::<Hidden>();
-    let mut panes = layout.read().placed();
-    if !mounted {
-        panes.retain(|placed| placed.shown);
-    }
+    let kept = use_kept_panes(layout);
+    let panes = match use_context::<Hidden>() {
+        Hidden::Kept => kept,
+        Hidden::All => layout.read().placed(),
+        Hidden::None => {
+            let mut panes = layout.read().placed();
+            panes.retain(|placed| placed.shown);
+            panes
+        }
+    };
     rsx! {
         PlacedPanes { panes, pane: |pane| rsx! {
             Transcript { pane }
@@ -63,7 +75,7 @@ fn Root() -> Element {
     }
 }
 
-/// `tabs` tabs of [`PANES`] panes each, the last one shown.
+/// `tabs` tabs of [`PANES`] panes each, the first one shown.
 fn layout(tabs: usize) -> Layout {
     let mut layout = Layout::default();
     for tab in 0..tabs {
@@ -78,23 +90,37 @@ fn layout(tabs: usize) -> Layout {
     layout
 }
 
-/// The workbench rendered, kept for divan to drop after counting.
+/// The workbench rendered with each tab shown in turn, the last one now,
+/// kept for divan to drop after counting.
 fn mount(tabs: usize, messages: usize, hidden: Hidden) -> VirtualDom {
     let mut dom = VirtualDom::new(Root);
-    let signal = dom.in_runtime(|| Signal::new_in_scope(layout(tabs), ScopeId::ROOT));
+    let mut signal = dom.in_runtime(|| {
+        let mut layout = layout(tabs);
+        layout.select_tab(0);
+        Signal::new_in_scope(layout, ScopeId::ROOT)
+    });
     dom.provide_root_context(messages);
     dom.provide_root_context(hidden);
     dom.provide_root_context(signal);
     dom.rebuild_in_place();
+    for tab in 1..tabs {
+        dom.in_runtime(|| signal.write().select_tab(tab));
+        dom.render_immediate(&mut NoOpMutations);
+    }
     dom
 }
 
 #[divan::bench(consts = [1, 4, 16], args = MESSAGES)]
-fn tabs_mounted<const TABS: usize>(bencher: divan::Bencher, messages: usize) {
-    bencher.bench_local(|| mount(TABS, messages, Hidden(true)));
+fn kept_tabs<const TABS: usize>(bencher: divan::Bencher, messages: usize) {
+    bencher.bench_local(|| mount(TABS, messages, Hidden::Kept));
+}
+
+#[divan::bench(consts = [1, 4, 16], args = MESSAGES)]
+fn all_tabs<const TABS: usize>(bencher: divan::Bencher, messages: usize) {
+    bencher.bench_local(|| mount(TABS, messages, Hidden::All));
 }
 
 #[divan::bench(consts = [1, 4, 16], args = MESSAGES)]
 fn shown_tab_only<const TABS: usize>(bencher: divan::Bencher, messages: usize) {
-    bencher.bench_local(|| mount(TABS, messages, Hidden(false)));
+    bencher.bench_local(|| mount(TABS, messages, Hidden::None));
 }

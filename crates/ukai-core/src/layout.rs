@@ -621,6 +621,83 @@ impl Layout {
         placed.sort_by_key(|placed| placed.pane);
         placed
     }
+
+    /// [`Self::placed`], leaving out the panes of the tabs not `kept`
+    /// ([`Recent::kept`]).
+    pub fn placed_kept(&self, kept: &[bool]) -> Vec<Placed> {
+        let mut placed = self.placed();
+        placed.retain(|placed| {
+            self.tabs
+                .iter()
+                .position(|tab| tab.root.contains(placed.pane))
+                .is_some_and(|tab| kept.get(tab).copied().unwrap_or(false))
+        });
+        placed
+    }
+}
+
+/// The tabs shown most recently, newest first, each known by its panes:
+/// tab indices shift as tabs close and move, while a tab's panes stay with
+/// it. Which tabs stay mounted while not shown ([`Layout::placed_kept`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Recent(Vec<Vec<PaneId>>);
+
+/// How many tabs shown are remembered; past it the oldest are forgotten.
+const RECENT_LIMIT: usize = 32;
+
+impl Recent {
+    /// Note that `layout`'s active tab is shown. `false` when nothing
+    /// changed: it already was the newest, and no tab's panes changed.
+    pub fn show(&mut self, layout: &Layout) -> bool {
+        let mut order = vec![layout.active];
+        for seen in &self.0 {
+            if let Some(tab) = Self::tab_of(layout, seen, |tab| order.contains(&tab)) {
+                order.push(tab);
+            }
+        }
+        order.truncate(RECENT_LIMIT);
+        // Each remembered by the panes it holds now, which a pane moving in
+        // or out of it changes.
+        let next: Vec<Vec<PaneId>> = order
+            .into_iter()
+            .map(|tab| layout.tabs[tab].root.panes())
+            .collect();
+        let changed = next != self.0;
+        self.0 = next;
+        changed
+    }
+
+    /// The tab of `layout` that `panes`, remembered of one tab, stand for
+    /// now: the first holding one of them that is not `taken` already. A
+    /// pane that moved to a tab already counted leaves its old tab to the
+    /// panes that stayed.
+    fn tab_of(layout: &Layout, panes: &[PaneId], taken: impl Fn(usize) -> bool) -> Option<usize> {
+        panes.iter().find_map(|pane| {
+            layout
+                .tabs
+                .iter()
+                .position(|tab| tab.root.contains(*pane))
+                .filter(|tab| !taken(*tab))
+        })
+    }
+
+    /// For each of `layout`'s tabs, whether it stays mounted: the active tab
+    /// and those shown most recently, `keep` in all.
+    pub fn kept(&self, layout: &Layout, keep: usize) -> Vec<bool> {
+        let mut kept = vec![false; layout.tabs.len()];
+        kept[layout.active] = true;
+        let mut count = 1;
+        for seen in &self.0 {
+            if count >= keep {
+                break;
+            }
+            if let Some(tab) = Self::tab_of(layout, seen, |tab| kept[tab]) {
+                kept[tab] = true;
+                count += 1;
+            }
+        }
+        kept
+    }
 }
 
 impl Node {

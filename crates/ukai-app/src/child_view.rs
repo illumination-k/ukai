@@ -4,7 +4,8 @@
 //! The view is native, so it sits above the app's DOM: [`use_child_view`]
 //! keeps it over its host element by polling the element's position, hides
 //! it while something of the DOM is drawn over the pane (`covered`) or the
-//! pane's tab is not shown ([`PaneShown`]), and drops it on unmount (close).
+//! pane's tab is not shown ([`PaneShown`]), and drops it on unmount (close,
+//! or a tab no longer among those kept mounted).
 
 use std::cell::RefCell;
 use std::rc::Rc;

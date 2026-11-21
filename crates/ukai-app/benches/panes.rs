@@ -12,7 +12,7 @@
 
 use dioxus::dioxus_core::NoOpMutations;
 use dioxus::prelude::*;
-use ukai_app::bench::{Markdown, PlacedPanes};
+use ukai_app::bench::{Markdown, PlacedPanes, use_kept_panes};
 use ukai_core::{Direction, Layout, PaneId, Side};
 
 use crate::common::MESSAGE;
@@ -53,7 +53,7 @@ fn Transcript(pane: PaneId) -> Element {
 #[component]
 fn Root() -> Element {
     let layout = use_context::<Signal<Layout>>();
-    let panes = layout.read().placed();
+    let panes = use_kept_panes(layout);
     rsx! {
         PlacedPanes { panes, pane: |pane| rsx! {
             Transcript { pane }

@@ -30,7 +30,7 @@ mod voice;
 /// What `benches/` measure; not an API.
 #[doc(hidden)]
 pub mod bench {
-    pub use crate::layout::PlacedPanes;
+    pub use crate::layout::{KEPT_TABS, PlacedPanes, use_kept_panes};
     pub use crate::markdown::Markdown;
 }
 
