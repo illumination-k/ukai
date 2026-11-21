@@ -58,6 +58,34 @@ impl Api {
     }
 }
 
+/// Send `request` to a workspace's relay and read its JSON answer. With
+/// `problem`, what the relay says is wrong (422) goes back through it as it
+/// is; any other failure is logged as `failure` and is UNAVAILABLE.
+async fn ask_relay<R: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    agent: &str,
+    failure: &'static str,
+    problem: Option<fn(String) -> Status>,
+) -> Result<R, Status> {
+    let unavailable = |error: reqwest::Error| {
+        tracing::warn!(%agent, %error, "{failure}");
+        Status::unavailable(failure)
+    };
+    let response = request.send().await.map_err(unavailable)?;
+    if let Some(problem) = problem
+        && response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    {
+        let text = response.text().await.map_err(unavailable)?;
+        return Err(problem(text));
+    }
+    response
+        .error_for_status()
+        .map_err(unavailable)?
+        .json::<R>()
+        .await
+        .map_err(unavailable)
+}
+
 #[tonic::async_trait]
 impl gw::agents_server::Agents for Api {
     async fn list(
@@ -123,23 +151,17 @@ impl gw::ports_server::Ports for Api {
         let request = request.into_inner();
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
-        let listing = async {
+        let listing: PortListing = ask_relay(
             self.gateway
                 .http
                 .get(relay.ports_url())
                 .bearer_auth(&relay.token)
-                .timeout(LIST_TIMEOUT)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<PortListing>()
-                .await
-        }
-        .await
-        .map_err(|error| {
-            tracing::warn!(agent = %request.agent, %error, "cannot list the workspace's ports");
-            Status::unavailable("cannot list the workspace's ports")
-        })?;
+                .timeout(LIST_TIMEOUT),
+            &request.agent,
+            "cannot list the workspace's ports",
+            None,
+        )
+        .await?;
         Ok(Response::new(listing.into()))
     }
 }
@@ -154,23 +176,17 @@ impl gw::files_server::Files for Api {
         let request = request.into_inner();
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
-        let listing = async {
+        let listing: FileListing = ask_relay(
             self.gateway
                 .http
                 .get(relay.files_url())
                 .bearer_auth(&relay.token)
-                .timeout(LIST_TIMEOUT)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<FileListing>()
-                .await
-        }
-        .await
-        .map_err(|error| {
-            tracing::warn!(agent = %request.agent, %error, "cannot list the workspace's files");
-            Status::unavailable("cannot list the workspace's files")
-        })?;
+                .timeout(LIST_TIMEOUT),
+            &request.agent,
+            "cannot list the workspace's files",
+            None,
+        )
+        .await?;
         Ok(Response::new(listing.into()))
     }
 
@@ -183,31 +199,19 @@ impl gw::files_server::Files for Api {
         let base: DiffBase = request.base().into();
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
-        let unavailable = |error: reqwest::Error| {
-            tracing::warn!(agent = %request.agent, %error, "cannot diff the workspace's checkout");
-            Status::unavailable("cannot diff the workspace's checkout")
-        };
-        let response = self
-            .gateway
-            .http
-            .get(relay.diff_url(base))
-            .bearer_auth(&relay.token)
-            // A few git commands, which a large checkout makes slow.
-            .timeout(RUN_TIMEOUT)
-            .send()
-            .await
-            .map_err(unavailable)?;
-        // What the relay says is wrong with the checkout goes back as it is.
-        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let problem = response.text().await.map_err(unavailable)?;
-            return Err(Status::aborted(problem));
-        }
-        let diff = response
-            .error_for_status()
-            .map_err(unavailable)?
-            .json::<CheckoutDiff>()
-            .await
-            .map_err(unavailable)?;
+        let diff: CheckoutDiff = ask_relay(
+            self.gateway
+                .http
+                .get(relay.diff_url(base))
+                .bearer_auth(&relay.token)
+                // A few git commands, which a large checkout makes slow.
+                .timeout(RUN_TIMEOUT),
+            &request.agent,
+            "cannot diff the workspace's checkout",
+            // What is wrong with the checkout.
+            Some(Status::aborted),
+        )
+        .await?;
         Ok(Response::new(diff.into()))
     }
 
@@ -219,35 +223,22 @@ impl gw::files_server::Files for Api {
         let request = request.into_inner();
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
-        let unavailable = |error: reqwest::Error| {
-            tracing::warn!(agent = %request.agent, %error, "cannot answer the agent's review");
-            Status::unavailable("cannot answer the agent's review")
-        };
-        let response = self
-            .gateway
-            .http
-            .post(relay.review_url())
-            .bearer_auth(&relay.token)
-            .json(&AnnotateRequest {
-                id: request.id.clone(),
-                reply: request.reply.clone(),
-                resolved: request.resolved,
-            })
-            .timeout(LIST_TIMEOUT)
-            .send()
-            .await
-            .map_err(unavailable)?;
-        // What the relay says is wrong goes back as it is.
-        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let problem = response.text().await.map_err(unavailable)?;
-            return Err(Status::aborted(problem));
-        }
-        let review = response
-            .error_for_status()
-            .map_err(unavailable)?
-            .json::<Review>()
-            .await
-            .map_err(unavailable)?;
+        let review: Review = ask_relay(
+            self.gateway
+                .http
+                .post(relay.review_url())
+                .bearer_auth(&relay.token)
+                .json(&AnnotateRequest {
+                    id: request.id,
+                    reply: request.reply,
+                    resolved: request.resolved,
+                })
+                .timeout(LIST_TIMEOUT),
+            &request.agent,
+            "cannot answer the agent's review",
+            Some(Status::aborted),
+        )
+        .await?;
         Ok(Response::new(review.into()))
     }
 
@@ -265,31 +256,19 @@ impl gw::files_server::Files for Api {
         }
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
-        let unavailable = |error: reqwest::Error| {
-            tracing::warn!(agent = %request.agent, %error, "cannot upload to the workspace");
-            Status::unavailable("cannot upload the file to the workspace")
-        };
-        let response = self
-            .gateway
-            .http
-            .post(relay.upload_url(&request.name))
-            .bearer_auth(&relay.token)
-            .body(request.content)
-            .timeout(RUN_TIMEOUT)
-            .send()
-            .await
-            .map_err(unavailable)?;
-        // What the relay says is wrong with the file goes back as it is.
-        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let problem = response.text().await.map_err(unavailable)?;
-            return Err(Status::invalid_argument(problem));
-        }
-        let uploaded = response
-            .error_for_status()
-            .map_err(unavailable)?
-            .json::<Uploaded>()
-            .await
-            .map_err(unavailable)?;
+        let uploaded: Uploaded = ask_relay(
+            self.gateway
+                .http
+                .post(relay.upload_url(&request.name))
+                .bearer_auth(&relay.token)
+                .body(request.content)
+                .timeout(RUN_TIMEOUT),
+            &request.agent,
+            "cannot upload the file to the workspace",
+            // What is wrong with the file.
+            Some(Status::invalid_argument),
+        )
+        .await?;
         Ok(Response::new(gw::Uploaded {
             path: uploaded.path,
         }))
@@ -310,7 +289,7 @@ impl gw::commands_server::Commands for Api {
         let plan = self.plan(&request.agent, request.workspace)?;
         let relay = self.running_relay(&plan).await?;
         tracing::info!(agent = %request.agent, job = %plan.job_name(), "running a command for the user");
-        let output = async {
+        let output: CommandOutput = ask_relay(
             self.gateway
                 .http
                 .post(relay.run_url())
@@ -320,18 +299,12 @@ impl gw::commands_server::Commands for Api {
                 })
                 // The relay stops the command itself; this is for a relay
                 // that does not answer at all.
-                .timeout(RUN_TIMEOUT + LIST_TIMEOUT)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<CommandOutput>()
-                .await
-        }
-        .await
-        .map_err(|error| {
-            tracing::warn!(agent = %request.agent, %error, "cannot run a command in the workspace");
-            Status::unavailable("cannot run the command in the workspace")
-        })?;
+                .timeout(RUN_TIMEOUT + LIST_TIMEOUT),
+            &request.agent,
+            "cannot run the command in the workspace",
+            None,
+        )
+        .await?;
         Ok(Response::new(output.into()))
     }
 }

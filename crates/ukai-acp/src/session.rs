@@ -10,6 +10,7 @@
 //! command loop until the user answers.
 
 use std::collections::{HashMap, VecDeque};
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -20,13 +21,14 @@ use agent_client_protocol::schema::v1::{
     AvailableCommandInput, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
     EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
-    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PlanEntryStatus,
-    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, TextResourceContents, ToolCallContent,
-    ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, PlanEntryStatus, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
+    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    TextResourceContents, ToolCallContent, ToolCallStatus, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
@@ -660,7 +662,7 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
                 None => Ok(()),
             };
         };
-        let mut next = if link.reached {
+        let next = if link.reached {
             reconnect.connected();
             let running = events.running();
             match &error {
@@ -674,59 +676,118 @@ async fn run_session<T: ConnectTo<Client> + 'static>(
             }
             reconnect.failed(Instant::now(), crate::reconnect::spread())
         };
-        'wait: loop {
-            match next {
-                Next::GiveUp { attempts } => {
-                    for command in link.pending.drain(..) {
-                        if matches!(
-                            command,
-                            SessionCommand::Prompt(_) | SessionCommand::Steer(_)
-                        ) {
-                            let _ = events.send(SessionEvent::PromptFailed {
-                                message: "not sent: the agent could not be reached".to_owned(),
-                            });
-                        }
+        if let ControlFlow::Break(ended) = wait_to_redial(
+            next,
+            &mut reconnect,
+            &mut link,
+            &events,
+            &mut commands,
+            error,
+        )
+        .await
+        {
+            return ended;
+        }
+        transport = redial();
+    }
+}
+
+/// Wait until the session should dial the agent again, as `next` and then
+/// `reconnect` say, keeping the commands that arrive meanwhile in
+/// `link.pending`. `Break` ends the session with its result.
+async fn wait_to_redial(
+    mut next: Next,
+    reconnect: &mut Reconnect,
+    link: &mut Link,
+    events: &Events,
+    commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    error: Option<agent_client_protocol::Error>,
+) -> ControlFlow<Result<(), agent_client_protocol::Error>> {
+    loop {
+        match next {
+            Next::GiveUp { attempts } => {
+                for command in link.pending.drain(..) {
+                    if matches!(
+                        command,
+                        SessionCommand::Prompt(_) | SessionCommand::Steer(_)
+                    ) {
+                        let _ = events.send(SessionEvent::PromptFailed {
+                            message: "not sent: the agent could not be reached".to_owned(),
+                        });
                     }
-                    let reason = error.map_or_else(
-                        || "the agent closed the connection".to_owned(),
-                        |error| error.to_string(),
-                    );
-                    return Err(agent_client_protocol::util::internal_error(format!(
+                }
+                let reason = error.map_or_else(
+                    || "the agent closed the connection".to_owned(),
+                    |error| error.to_string(),
+                );
+                return ControlFlow::Break(Err(agent_client_protocol::util::internal_error(
+                    format!(
                         "lost the connection and could not reconnect in {attempts} attempts: {reason}"
-                    )));
-                }
-                Next::WhenNeeded => {
-                    let _ = events.send(SessionEvent::Detached);
-                    loop {
-                        match commands.recv().await {
-                            None => return Ok(()),
-                            Some(command) if command.needs_agent() => {
-                                link.pending.push_back(command);
-                                break;
-                            }
-                            // Nothing is running or waiting on an answer.
-                            Some(_) => {}
+                    ),
+                )));
+            }
+            Next::WhenNeeded => {
+                let _ = events.send(SessionEvent::Detached);
+                loop {
+                    match commands.recv().await {
+                        None => return ControlFlow::Break(Ok(())),
+                        Some(command) if command.needs_agent() => {
+                            link.pending.push_back(command);
+                            break;
                         }
+                        // Nothing is running or waiting on an answer.
+                        Some(_) => {}
                     }
-                    next = reconnect.needed(Instant::now());
                 }
-                Next::Attempt { attempt, after } => {
-                    let _ = events.send(SessionEvent::Reconnecting { attempt });
-                    let wake = tokio::time::sleep(after);
-                    tokio::pin!(wake);
-                    loop {
-                        tokio::select! {
-                            () = &mut wake => break 'wait,
-                            command = commands.recv() => match command {
-                                None => return Ok(()),
-                                Some(command) => link.pending.push_back(command),
-                            },
-                        }
+                next = reconnect.needed(Instant::now());
+            }
+            Next::Attempt { attempt, after } => {
+                let _ = events.send(SessionEvent::Reconnecting { attempt });
+                let wake = tokio::time::sleep(after);
+                tokio::pin!(wake);
+                loop {
+                    tokio::select! {
+                        () = &mut wake => return ControlFlow::Continue(()),
+                        command = commands.recv() => match command {
+                            None => return ControlFlow::Break(Ok(())),
+                            Some(command) => link.pending.push_back(command),
+                        },
                     }
                 }
             }
         }
-        transport = redial();
+    }
+}
+
+/// What a connection's notification handlers and its setup share.
+#[derive(Debug)]
+struct Handshake {
+    /// History is being replayed by `session/load`.
+    replaying: AtomicBool,
+    /// When setup last showed it is moving, for [`progressing`].
+    last_progress: Mutex<Instant>,
+    /// [`SessionEvent::Ready`] has been sent. A reattached session's turn
+    /// state can arrive before the load response completes setup; it is held
+    /// until then so the UI sees them in order.
+    ready: AtomicBool,
+    /// The turn state that arrived before `Ready`.
+    running_before_ready: AtomicBool,
+}
+
+impl Handshake {
+    fn new() -> Self {
+        Self {
+            replaying: AtomicBool::new(false),
+            last_progress: Mutex::new(Instant::now()),
+            ready: AtomicBool::new(false),
+            running_before_ready: AtomicBool::new(false),
+        }
+    }
+
+    fn progressed(&self) {
+        if let Ok(mut last) = self.last_progress.lock() {
+            *last = Instant::now();
+        }
     }
 }
 
@@ -739,21 +800,10 @@ async fn connect<T: ConnectTo<Client> + 'static>(
     commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ended, agent_client_protocol::Error> {
     link.reached = false;
-    let (park_tx, mut park_rx) = mpsc::unbounded_channel::<Parked>();
+    let (park_tx, park_rx) = mpsc::unbounded_channel::<Parked>();
     let next_permission = link.next_permission.clone();
-    let cwd = link.cwd.clone();
     let fs_root = link.fs_root.clone();
-    let restore = match &link.session {
-        Some(session) => Some(session.0.to_string()),
-        None => link.restore.clone(),
-    };
-    let update_check = link.update_check.clone();
-    let replaying = Arc::new(AtomicBool::new(false));
-    let last_progress = Arc::new(Mutex::new(Instant::now()));
-    // A reattached session's turn state can arrive before the load response
-    // completes setup; it is held until `Ready` so the UI sees them in order.
-    let ready = Arc::new(AtomicBool::new(false));
-    let running_before_ready = Arc::new(AtomicBool::new(false));
+    let handshake = Arc::new(Handshake::new());
 
     Client
         .builder()
@@ -761,9 +811,9 @@ async fn connect<T: ConnectTo<Client> + 'static>(
         .on_receive_notification(
             {
                 let events = events.clone();
-                let replaying = replaying.clone();
+                let handshake = handshake.clone();
                 async move |notification: SessionNotification, _cx| {
-                    let replaying = replaying.load(Ordering::SeqCst);
+                    let replaying = handshake.replaying.load(Ordering::SeqCst);
                     if let Some(event) = translate_update(notification.update, replaying) {
                         let _ = events.send(event);
                     }
@@ -775,29 +825,9 @@ async fn connect<T: ConnectTo<Client> + 'static>(
         .on_receive_notification(
             {
                 let events = events.clone();
-                let last_progress = last_progress.clone();
-                let ready = ready.clone();
-                let running_before_ready = running_before_ready.clone();
+                let handshake = handshake.clone();
                 async move |message: UntypedMessage, _cx| {
-                    // Any of ukai's own notifications (progress, heartbeats)
-                    // shows that setup is still moving.
-                    if message.method().starts_with("_ukai/")
-                        && let Ok(mut last) = last_progress.lock()
-                    {
-                        *last = Instant::now();
-                    }
-                    match translate_extension(&message) {
-                        Some(
-                            event @ (SessionEvent::TurnRunning | SessionEvent::TurnEnded { .. }),
-                        ) if !ready.load(Ordering::SeqCst) => {
-                            let running = matches!(event, SessionEvent::TurnRunning);
-                            running_before_ready.store(running, Ordering::SeqCst);
-                        }
-                        Some(event) => {
-                            let _ = events.send(event);
-                        }
-                        None => {}
-                    }
+                    on_extension(&message, &handshake, &events);
                     Ok(())
                 }
             },
@@ -808,20 +838,7 @@ async fn connect<T: ConnectTo<Client> + 'static>(
                 let events = events.clone();
                 async move |request: RequestPermissionRequest, responder, _cx| {
                     let id = next_permission.fetch_add(1, Ordering::Relaxed);
-                    let fields = request.tool_call.fields;
-                    let title = fields
-                        .title
-                        .unwrap_or_else(|| request.tool_call.tool_call_id.0.to_string());
-                    let options = request
-                        .options
-                        .into_iter()
-                        .map(|option| PermissionChoice {
-                            id: option.option_id.0.to_string(),
-                            name: option.name,
-                            kind: serde_label(&option.kind),
-                        })
-                        .collect();
-                    let _ = events.send(SessionEvent::PermissionRequested { id, title, options });
+                    let _ = events.send(permission_requested(id, request));
                     // If the command loop is gone the responder drops unanswered,
                     // which is fine: the connection is closing anyway.
                     let _ = park_tx.send((id, responder));
@@ -867,275 +884,381 @@ async fn connect<T: ConnectTo<Client> + 'static>(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async |cx: ConnectionTo<Agent>| {
-            let offer_fs = fs_root.is_some();
-            let capabilities = ClientCapabilities::new()
-                .fs(FileSystemCapabilities::new()
-                    .read_text_file(offer_fs)
-                    .write_text_file(offer_fs))
-                .session(
-                    ClientSessionCapabilities::new().config_options(
-                        SessionConfigOptionsCapabilities::new()
-                            .boolean(BooleanConfigOptionCapabilities::new()),
-                    ),
-                );
-            let init = progressing(
-                &last_progress,
-                cx.send_request(
-                    InitializeRequest::new(ProtocolVersion::V1)
-                        .client_capabilities(capabilities)
-                        .client_info(Implementation::new("ukai", env!("CARGO_PKG_VERSION"))),
-                )
-                .block_task(),
+            let restore = match &link.session {
+                Some(session) => Some(session.0.to_string()),
+                None => link.restore.clone(),
+            };
+            let init =
+                progressing(&handshake.last_progress, initialize(&cx, fs_root.is_some())).await?;
+            if restore.is_none()
+                && let Some(ended) =
+                    offer_update(&cx, &init, link.update_check.as_ref(), events, commands).await
+            {
+                return Ok(ended);
+            }
+            // The time spent deciding is not the agent's.
+            handshake.progressed();
+            link.can_load = init.agent_capabilities.load_session;
+            let (session_id, restore, config) = progressing(
+                &handshake.last_progress,
+                open_session(&cx, restore.as_deref(), &init, &link.cwd, &handshake),
             )
             .await?;
-            let update = match (&update_check, &init.agent_info, &restore) {
-                (Some(check), Some(info), None) => check.check(&info.name, &info.version).await,
-                _ => None,
-            };
-            match update {
-                Some(update) if update_check.as_ref().is_some_and(|c| c.missed(&update)) => {
-                    let _ = events.send(SessionEvent::UpdateMissed(update));
-                }
-                Some(update) => {
-                    let _ = events.send(SessionEvent::UpdateAvailable(update));
-                    loop {
-                        tokio::select! {
-                            command = commands.recv() => match command {
-                                None => return Ok(Ended::Handle),
-                                Some(SessionCommand::Proceed) => break,
-                                // Nothing else means anything before the session exists.
-                                Some(_) => {}
-                            },
-                            () = cx.incoming_closed() => return Ok(Ended::Lost),
-                        }
-                    }
-                    // The time spent deciding is not the agent's.
-                    if let Ok(mut last) = last_progress.lock() {
-                        *last = Instant::now();
-                    }
-                }
-                None => {}
-            }
-            let can_load = init.agent_capabilities.load_session;
-            link.can_load = can_load;
-            let can_resume = init
-                .agent_capabilities
-                .session_capabilities
-                .resume
-                .is_some();
-            let setup = async {
-                let restored = match &restore {
-                    Some(id) if can_load => {
-                        // History arrives as session/update notifications before
-                        // the response; user turns are only forwarded meanwhile.
-                        replaying.store(true, Ordering::SeqCst);
-                        let loaded = cx
-                            .send_request(LoadSessionRequest::new(id.clone(), cwd.clone()))
-                            .block_task()
-                            .await;
-                        replaying.store(false, Ordering::SeqCst);
-                        Some(loaded.map(|loaded| {
-                            (
-                                SessionId::new(id.clone()),
-                                RestoreOutcome::Replayed,
-                                loaded.config_options,
-                            )
-                        }))
-                    }
-                    Some(id) if can_resume => Some(
-                        cx.send_request(ResumeSessionRequest::new(id.clone(), cwd.clone()))
-                            .block_task()
-                            .await
-                            .map(|resumed| {
-                                (
-                                    SessionId::new(id.clone()),
-                                    RestoreOutcome::Resumed,
-                                    resumed.config_options,
-                                )
-                            }),
-                    ),
-                    _ => None,
-                };
-                let outcome = match restored {
-                    Some(Ok(restored)) => return Ok(restored),
-                    // The agent no longer keeps it, e.g. its pod's disk is new.
-                    Some(Err(e))
-                        if e.code == agent_client_protocol::ErrorCode::ResourceNotFound =>
-                    {
-                        RestoreOutcome::Missing
-                    }
-                    Some(Err(e)) => return Err(e),
-                    None if restore.is_some() => RestoreOutcome::Unsupported,
-                    None => RestoreOutcome::Fresh,
-                };
-                let session = cx
-                    .send_request(NewSessionRequest::new(cwd.clone()))
-                    .block_task()
-                    .await?;
-                Ok((session.session_id, outcome, session.config_options))
-            };
-            let (session_id, restore, config) = progressing(&last_progress, setup).await?;
-            let prompt = &init.agent_capabilities.prompt_capabilities;
             // A turn that ran before the connection dropped may have ended
             // since; the agent says when one is still running.
             events.turn_unknown();
             link.session = Some(session_id.clone());
             link.reached = true;
-            let _ = events.send(SessionEvent::Ready {
-                agent: init.agent_info.map(|info| info.title.unwrap_or(info.name)),
-                session_id: session_id.0.to_string(),
-                restore,
-                prompt: PromptCaps {
-                    image: prompt.image,
-                    embedded_context: prompt.embedded_context,
-                    steering: init
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.get("steering")?.get("supported")?.as_bool())
-                        .unwrap_or(false),
-                },
-                config: config_options(config.unwrap_or_default()),
-                list_sessions: init.agent_capabilities.session_capabilities.list.is_some(),
-            });
-            ready.store(true, Ordering::SeqCst);
-            if running_before_ready.load(Ordering::SeqCst) {
+            let _ = events.send(ready(init, &session_id, restore, config));
+            handshake.ready.store(true, Ordering::SeqCst);
+            if handshake.running_before_ready.load(Ordering::SeqCst) {
                 let _ = events.send(SessionEvent::TurnRunning);
             }
-
-            let mut parked: HashMap<PermissionId, Responder<RequestPermissionResponse>> =
-                HashMap::new();
-            // Steers that reached the agent after their turn ended, to send as turns.
-            let (late_tx, mut late_rx) = mpsc::unbounded_channel::<Vec<ContentBlock>>();
-            loop {
-                // What arrived while no connection was up goes first.
-                let command = match link.pending.pop_front() {
-                    Some(command) => Some(command),
-                    None => tokio::select! {
-                        Some(blocks) = late_rx.recv() => {
-                            let _ = events.send(SessionEvent::TurnRunning);
-                            send_prompt(&cx, &session_id, blocks, events)?;
-                            continue;
-                        }
-                        Some((id, responder)) = park_rx.recv() => {
-                            parked.insert(id, responder);
-                            continue;
-                        }
-                        command = commands.recv() => command,
-                        () = cx.incoming_closed() => return Ok(Ended::Lost),
-                    },
-                };
-                // A permission request parked an instant ago must be
-                // visible to the command that answers it.
-                while let Ok((id, responder)) = park_rx.try_recv() {
-                    parked.insert(id, responder);
-                }
-                match command {
-                    None => return Ok(Ended::Handle),
-                    Some(SessionCommand::Prompt(prompt)) => {
-                        send_prompt(&cx, &session_id, prompt.into_blocks(), events)?;
-                    }
-                    Some(SessionCommand::Steer(prompt)) => {
-                        let blocks = prompt.into_blocks();
-                        let params = serde_json::json!({
-                            "sessionId": session_id,
-                            "prompt": blocks,
-                            // Hand the message back rather than have the
-                            // agent start a turn this client would not see end.
-                            "_meta": { "steering": { "idleBehavior": "promptRequired" } },
-                        });
-                        let events = events.clone();
-                        let late = late_tx.clone();
-                        cx.send_request(UntypedMessage::new(STEER_METHOD, params)?)
-                            .on_receiving_result(async move |result| {
-                                match result {
-                                    Ok(response) if response["outcome"] == "promptRequired" => {
-                                        let _ = late.send(blocks);
-                                    }
-                                    Ok(_) => {}
-                                    // Recorded or not, the reconnect's replay shows it.
-                                    Err(error)
-                                        if agent_client_protocol::is_incoming_transport_closed(
-                                            &error,
-                                        ) => {}
-                                    Err(error) => {
-                                        let _ = events.send(SessionEvent::SteerFailed {
-                                            message: error.to_string(),
-                                        });
-                                    }
-                                }
-                                Ok(())
-                            })?;
-                    }
-                    Some(SessionCommand::Cancel) => {
-                        cx.send_notification(CancelNotification::new(session_id.clone()))?;
-                        for (_, responder) in parked.drain() {
-                            responder.respond(RequestPermissionResponse::new(
-                                RequestPermissionOutcome::Cancelled,
-                            ))?;
-                        }
-                    }
-                    Some(SessionCommand::SetConfig { id, value }) => {
-                        let events = events.clone();
-                        let value = match value {
-                            ConfigInput::Select(value) => SessionConfigOptionValue::value_id(value),
-                            ConfigInput::Toggle(on) => SessionConfigOptionValue::boolean(on),
-                        };
-                        cx.send_request(SetSessionConfigOptionRequest::new(
-                            session_id.clone(),
-                            id,
-                            value,
-                        ))
-                        .on_receiving_result(async move |result| {
-                            let event = match result {
-                                Ok(response) => SessionEvent::ConfigChanged {
-                                    options: config_options(response.config_options),
-                                },
-                                // The reconnect's `Ready` carries the settings as they are.
-                                Err(error)
-                                    if agent_client_protocol::is_incoming_transport_closed(
-                                        &error,
-                                    ) =>
-                                {
-                                    return Ok(());
-                                }
-                                Err(error) => SessionEvent::ConfigFailed {
-                                    message: error.to_string(),
-                                },
-                            };
-                            let _ = events.send(event);
-                            Ok(())
-                        })?;
-                    }
-                    Some(SessionCommand::ListSessions) => {
-                        let events = events.clone();
-                        let request = list_sessions(cx.clone(), cwd.clone());
-                        cx.spawn(async move {
-                            let event = match request.await {
-                                Ok(sessions) => SessionEvent::Sessions { sessions },
-                                Err(error) => SessionEvent::SessionsFailed {
-                                    message: error.to_string(),
-                                },
-                            };
-                            let _ = events.send(event);
-                            Ok(())
-                        })?;
-                    }
-                    Some(SessionCommand::Proceed) => {}
-                    Some(SessionCommand::ResolvePermission { id, option }) => {
-                        if let Some(responder) = parked.remove(&id) {
-                            let outcome = match option {
-                                Some(option) => RequestPermissionOutcome::Selected(
-                                    SelectedPermissionOutcome::new(option),
-                                ),
-                                None => RequestPermissionOutcome::Cancelled,
-                            };
-                            responder.respond(RequestPermissionResponse::new(outcome))?;
-                        }
-                    }
-                }
-            }
+            serve(&cx, &session_id, link, events, commands, park_rx).await
         })
         .await
+}
+
+/// Handle one of ukai's own notifications (progress, heartbeats, turn state).
+fn on_extension(message: &UntypedMessage, handshake: &Handshake, events: &Events) {
+    // Any of them shows that setup is still moving.
+    if message.method().starts_with("_ukai/") {
+        handshake.progressed();
+    }
+    match translate_extension(message) {
+        Some(event @ (SessionEvent::TurnRunning | SessionEvent::TurnEnded { .. }))
+            if !handshake.ready.load(Ordering::SeqCst) =>
+        {
+            let running = matches!(event, SessionEvent::TurnRunning);
+            handshake
+                .running_before_ready
+                .store(running, Ordering::SeqCst);
+        }
+        Some(event) => {
+            let _ = events.send(event);
+        }
+        None => {}
+    }
+}
+
+/// What the UI is told of a permission request it is to answer as `id`.
+fn permission_requested(id: PermissionId, request: RequestPermissionRequest) -> SessionEvent {
+    let title = request
+        .tool_call
+        .fields
+        .title
+        .unwrap_or_else(|| request.tool_call.tool_call_id.0.to_string());
+    let options = request
+        .options
+        .into_iter()
+        .map(|option| PermissionChoice {
+            id: option.option_id.0.to_string(),
+            name: option.name,
+            kind: serde_label(&option.kind),
+        })
+        .collect();
+    SessionEvent::PermissionRequested { id, title, options }
+}
+
+/// `initialize`, offering `fs/*` when the session has a root for it.
+async fn initialize(
+    cx: &ConnectionTo<Agent>,
+    offer_fs: bool,
+) -> Result<InitializeResponse, agent_client_protocol::Error> {
+    let capabilities = ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(offer_fs)
+            .write_text_file(offer_fs))
+        .session(ClientSessionCapabilities::new().config_options(
+            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
+        ));
+    cx.send_request(
+        InitializeRequest::new(ProtocolVersion::V1)
+            .client_capabilities(capabilities)
+            .client_info(Implementation::new("ukai", env!("CARGO_PKG_VERSION"))),
+    )
+    .block_task()
+    .await
+}
+
+/// Before a new session is created, tell the UI when the agent is behind its
+/// latest release and wait for [`SessionCommand::Proceed`]. `Some` when the
+/// handle or the connection went meanwhile.
+async fn offer_update(
+    cx: &ConnectionTo<Agent>,
+    init: &InitializeResponse,
+    update_check: Option<&UpdateCheck>,
+    events: &Events,
+    commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+) -> Option<Ended> {
+    let (check, info) = update_check.zip(init.agent_info.as_ref())?;
+    let update = check.check(&info.name, &info.version).await?;
+    if check.missed(&update) {
+        let _ = events.send(SessionEvent::UpdateMissed(update));
+        return None;
+    }
+    let _ = events.send(SessionEvent::UpdateAvailable(update));
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                None => return Some(Ended::Handle),
+                Some(SessionCommand::Proceed) => return None,
+                // Nothing else means anything before the session exists.
+                Some(_) => {}
+            },
+            () = cx.incoming_closed() => return Some(Ended::Lost),
+        }
+    }
+}
+
+/// The session a connection serves, how `restore` went, and its settings.
+type Opened = (SessionId, RestoreOutcome, Option<Vec<SessionConfigOption>>);
+
+/// Load or resume `restore` when the agent can, else start a new session.
+async fn open_session(
+    cx: &ConnectionTo<Agent>,
+    restore: Option<&str>,
+    init: &InitializeResponse,
+    cwd: &std::path::Path,
+    handshake: &Handshake,
+) -> Result<Opened, agent_client_protocol::Error> {
+    let capabilities = &init.agent_capabilities;
+    let restored = match restore {
+        Some(id) if capabilities.load_session => {
+            // History arrives as session/update notifications before
+            // the response; user turns are only forwarded meanwhile.
+            handshake.replaying.store(true, Ordering::SeqCst);
+            let loaded = cx
+                .send_request(LoadSessionRequest::new(id.to_owned(), cwd.to_owned()))
+                .block_task()
+                .await;
+            handshake.replaying.store(false, Ordering::SeqCst);
+            Some(loaded.map(|loaded| {
+                (
+                    SessionId::new(id.to_owned()),
+                    RestoreOutcome::Replayed,
+                    loaded.config_options,
+                )
+            }))
+        }
+        Some(id) if capabilities.session_capabilities.resume.is_some() => Some(
+            cx.send_request(ResumeSessionRequest::new(id.to_owned(), cwd.to_owned()))
+                .block_task()
+                .await
+                .map(|resumed| {
+                    (
+                        SessionId::new(id.to_owned()),
+                        RestoreOutcome::Resumed,
+                        resumed.config_options,
+                    )
+                }),
+        ),
+        _ => None,
+    };
+    let outcome = match restored {
+        Some(Ok(restored)) => return Ok(restored),
+        // The agent no longer keeps it, e.g. its pod's disk is new.
+        Some(Err(e)) if e.code == agent_client_protocol::ErrorCode::ResourceNotFound => {
+            RestoreOutcome::Missing
+        }
+        Some(Err(e)) => return Err(e),
+        None if restore.is_some() => RestoreOutcome::Unsupported,
+        None => RestoreOutcome::Fresh,
+    };
+    let session = cx
+        .send_request(NewSessionRequest::new(cwd.to_owned()))
+        .block_task()
+        .await?;
+    Ok((session.session_id, outcome, session.config_options))
+}
+
+/// [`SessionEvent::Ready`] for the session a connection set up.
+fn ready(
+    init: InitializeResponse,
+    session_id: &SessionId,
+    restore: RestoreOutcome,
+    config: Option<Vec<SessionConfigOption>>,
+) -> SessionEvent {
+    let capabilities = init.agent_capabilities;
+    let prompt = capabilities.prompt_capabilities;
+    SessionEvent::Ready {
+        agent: init.agent_info.map(|info| info.title.unwrap_or(info.name)),
+        session_id: session_id.0.to_string(),
+        restore,
+        prompt: PromptCaps {
+            image: prompt.image,
+            embedded_context: prompt.embedded_context,
+            steering: init
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("steering")?.get("supported")?.as_bool())
+                .unwrap_or(false),
+        },
+        config: config_options(config.unwrap_or_default()),
+        list_sessions: capabilities.session_capabilities.list.is_some(),
+    }
+}
+
+/// Pass commands to the agent until the connection or the handle goes.
+async fn serve(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    link: &mut Link,
+    events: &Events,
+    commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    mut park_rx: mpsc::UnboundedReceiver<Parked>,
+) -> Result<Ended, agent_client_protocol::Error> {
+    let mut parked: HashMap<PermissionId, Responder<RequestPermissionResponse>> = HashMap::new();
+    // Steers that reached the agent after their turn ended, to send as turns.
+    let (late_tx, mut late_rx) = mpsc::unbounded_channel::<Vec<ContentBlock>>();
+    loop {
+        // What arrived while no connection was up goes first.
+        let command = match link.pending.pop_front() {
+            Some(command) => Some(command),
+            None => tokio::select! {
+                Some(blocks) = late_rx.recv() => {
+                    let _ = events.send(SessionEvent::TurnRunning);
+                    send_prompt(cx, session_id, blocks, events)?;
+                    continue;
+                }
+                Some((id, responder)) = park_rx.recv() => {
+                    parked.insert(id, responder);
+                    continue;
+                }
+                command = commands.recv() => command,
+                () = cx.incoming_closed() => return Ok(Ended::Lost),
+            },
+        };
+        // A permission request parked an instant ago must be
+        // visible to the command that answers it.
+        while let Ok((id, responder)) = park_rx.try_recv() {
+            parked.insert(id, responder);
+        }
+        match command {
+            None => return Ok(Ended::Handle),
+            Some(SessionCommand::Prompt(prompt)) => {
+                send_prompt(cx, session_id, prompt.into_blocks(), events)?;
+            }
+            Some(SessionCommand::Steer(prompt)) => {
+                steer(
+                    cx,
+                    session_id,
+                    prompt.into_blocks(),
+                    events,
+                    late_tx.clone(),
+                )?;
+            }
+            Some(SessionCommand::Cancel) => {
+                cx.send_notification(CancelNotification::new(session_id.clone()))?;
+                for (_, responder) in parked.drain() {
+                    responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ))?;
+                }
+            }
+            Some(SessionCommand::SetConfig { id, value }) => {
+                set_config(cx, session_id, id, value, events)?;
+            }
+            Some(SessionCommand::ListSessions) => {
+                let events = events.clone();
+                let request = list_sessions(cx.clone(), link.cwd.clone());
+                cx.spawn(async move {
+                    let event = match request.await {
+                        Ok(sessions) => SessionEvent::Sessions { sessions },
+                        Err(error) => SessionEvent::SessionsFailed {
+                            message: error.to_string(),
+                        },
+                    };
+                    let _ = events.send(event);
+                    Ok(())
+                })?;
+            }
+            Some(SessionCommand::Proceed) => {}
+            Some(SessionCommand::ResolvePermission { id, option }) => {
+                if let Some(responder) = parked.remove(&id) {
+                    let outcome = match option {
+                        Some(option) => RequestPermissionOutcome::Selected(
+                            SelectedPermissionOutcome::new(option),
+                        ),
+                        None => RequestPermissionOutcome::Cancelled,
+                    };
+                    responder.respond(RequestPermissionResponse::new(outcome))?;
+                }
+            }
+        }
+    }
+}
+
+/// Send `blocks` into the running turn. When the turn ended before they
+/// reached the agent, they come back on `late` to be sent as a turn.
+fn steer(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    blocks: Vec<ContentBlock>,
+    events: &Events,
+    late: mpsc::UnboundedSender<Vec<ContentBlock>>,
+) -> Result<(), agent_client_protocol::Error> {
+    let params = serde_json::json!({
+        "sessionId": session_id,
+        "prompt": blocks,
+        // Hand the message back rather than have the
+        // agent start a turn this client would not see end.
+        "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+    });
+    let events = events.clone();
+    cx.send_request(UntypedMessage::new(STEER_METHOD, params)?)
+        .on_receiving_result(async move |result| {
+            match result {
+                Ok(response) if response["outcome"] == "promptRequired" => {
+                    let _ = late.send(blocks);
+                }
+                Ok(_) => {}
+                // Recorded or not, the reconnect's replay shows it.
+                Err(error) if agent_client_protocol::is_incoming_transport_closed(&error) => {}
+                Err(error) => {
+                    let _ = events.send(SessionEvent::SteerFailed {
+                        message: error.to_string(),
+                    });
+                }
+            }
+            Ok(())
+        })
+}
+
+/// Change one of the session's settings, reporting the settings it leaves.
+fn set_config(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    id: String,
+    value: ConfigInput,
+    events: &Events,
+) -> Result<(), agent_client_protocol::Error> {
+    let events = events.clone();
+    let value = match value {
+        ConfigInput::Select(value) => SessionConfigOptionValue::value_id(value),
+        ConfigInput::Toggle(on) => SessionConfigOptionValue::boolean(on),
+    };
+    cx.send_request(SetSessionConfigOptionRequest::new(
+        session_id.clone(),
+        id,
+        value,
+    ))
+    .on_receiving_result(async move |result| {
+        let event = match result {
+            Ok(response) => SessionEvent::ConfigChanged {
+                options: config_options(response.config_options),
+            },
+            // The reconnect's `Ready` carries the settings as they are.
+            Err(error) if agent_client_protocol::is_incoming_transport_closed(&error) => {
+                return Ok(());
+            }
+            Err(error) => SessionEvent::ConfigFailed {
+                message: error.to_string(),
+            },
+        };
+        let _ = events.send(event);
+        Ok(())
+    })
 }
 
 /// Pages of `session/list` to follow before giving up on the rest.
