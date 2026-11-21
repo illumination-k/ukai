@@ -39,5 +39,9 @@ divan = { workspace = true }
 name = "panes"
 harness = false
 
+[[bench]]
+name = "memory"
+harness = false
+
 [lints]
 workspace = true

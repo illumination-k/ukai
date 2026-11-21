@@ -62,8 +62,12 @@ the gateway, `ukai-knowledge`, or the manifests.
 not part of `ci`). `crates/ukai-app/benches/panes.rs` measures splitting,
 moving, and resizing panes that show long transcripts, and switching tabs:
 each should stay in microseconds whatever the transcripts' length, since
-panes are placed rather than remounted (`layout::tests` checks the same without timing). Run it
-before and after a change to how panes render.
+panes are placed rather than remounted (`layout::tests` checks the same
+without timing), and each reports what it allocates. `benches/memory.rs`
+reports the heap the virtual DOM keeps for mounted tabs (`alloc` less
+`dealloc`): every tab stays mounted, so it grows with all the transcripts
+open, not just the shown one. Run both before and after a change to how
+panes or messages render.
 
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an
 in-process mock agent over `Channel::duplex`; extend the mock rather than
