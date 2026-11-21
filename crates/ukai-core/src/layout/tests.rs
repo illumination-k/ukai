@@ -238,6 +238,18 @@ fn frames_follow_sizes_and_nesting() {
 }
 
 #[test]
+fn every_tab_is_placed_and_only_the_active_one_shown() {
+    let mut layout = Layout::default();
+    layout.split(0, H);
+    layout.new_tab();
+    let placed = layout.placed();
+    let shown: Vec<_> = placed.iter().map(|p| (p.pane, p.shown)).collect();
+    assert_eq!(shown, vec![(0, false), (1, false), (2, true)]);
+    assert_eq!(placed[1].frame, frame(0.5, 0.0, 0.5, 1.0));
+    assert_eq!(placed[2].frame, Frame::FULL);
+}
+
+#[test]
 fn a_boundary_spans_only_its_two_children() {
     let frames = sized(H, vec![p(0), p(1), p(2)], vec![1.0, 1.0, 2.0]).frames();
     let spans: Vec<_> = frames

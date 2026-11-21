@@ -592,6 +592,37 @@ pub struct Frames {
     pub boundaries: Vec<Boundary>,
 }
 
+/// A pane where its tab places it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placed {
+    pub pane: PaneId,
+    pub frame: Frame,
+    /// Whether its tab is the one shown.
+    pub shown: bool,
+}
+
+impl Layout {
+    /// Every pane of every tab, in pane id order. A tab that is not shown
+    /// keeps its panes, hidden, so that switching tabs remounts nothing.
+    pub fn placed(&self) -> Vec<Placed> {
+        let mut placed: Vec<Placed> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(index, tab)| {
+                let shown = index == self.active;
+                tab.root
+                    .frames()
+                    .panes
+                    .into_iter()
+                    .map(move |(pane, frame)| Placed { pane, frame, shown })
+            })
+            .collect();
+        placed.sort_by_key(|placed| placed.pane);
+        placed
+    }
+}
+
 impl Node {
     /// Lay the tree out over the whole pane area.
     pub fn frames(&self) -> Frames {

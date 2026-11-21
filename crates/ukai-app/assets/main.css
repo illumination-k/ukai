@@ -815,6 +815,11 @@ button.new-tab {
   min-height: 0;
 }
 
+/* A pane of a tab that is not shown stays mounted, out of sight. */
+.pane-slot.hidden {
+  display: none;
+}
+
 /* Panes touch; the divider is the only separation: a 1px line on the
    boundary, with a wider grip laid over the panes. */
 .divider {

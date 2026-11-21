@@ -29,7 +29,8 @@ pub mod terminal;
 mod transcript;
 
 pub use layout::{
-    Boundary, Direction, Frame, Frames, Layout, Node, PaneContent, PaneId, ReportSource, Side, Tab,
+    Boundary, Direction, Frame, Frames, Layout, Node, PaneContent, PaneId, Placed, ReportSource,
+    Side, Tab,
 };
 pub use project::{Project, ProjectId, Projects};
 pub use transcript::{

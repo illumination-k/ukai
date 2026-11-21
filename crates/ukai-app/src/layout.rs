@@ -13,8 +13,8 @@ use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::{
-    Boundary, Direction, Frame, Layout, PaneContent, PaneId, ProjectId, Projects, ReportSource,
-    Side,
+    Boundary, Direction, Frame, Layout, PaneContent, PaneId, Placed, ProjectId, Projects,
+    ReportSource, Side,
 };
 
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect, session_title};
@@ -324,18 +324,17 @@ fn tab_state(sessions: Sessions, panes: &[PaneId]) -> Option<&'static str> {
 pub fn Workbench() -> Element {
     let app = use_context::<AppSignals>();
     let mut drag = app.drag;
-    let frames = app.layout.read().active_tab().root.frames();
-    // Every pane is placed in this one element rather than nested in its
-    // splits, so that a split or a move changes where a pane is drawn but
-    // never remounts it: remounting rebuilds its transcript and reloads
-    // its web view.
-    let mut area = use_signal(|| None::<Rc<MountedData>>);
-    let panes = frames.panes;
-    let panes_class = if panes.len() > 1 {
-        "panes split"
-    } else {
-        "panes"
+    let (panes, boundaries, split) = {
+        let layout = app.layout.read();
+        let frames = layout.active_tab().root.frames();
+        (layout.placed(), frames.boundaries, frames.panes.len() > 1)
     };
+    // Every pane of every tab is placed in this one element rather than
+    // nested in its splits, so that a split, a move, or a tab switch changes
+    // where a pane is drawn, or whether it shows, but never remounts it:
+    // remounting rebuilds its transcript and reloads its web view.
+    let mut area = use_signal(|| None::<Rc<MountedData>>);
+    let panes_class = if split { "panes split" } else { "panes" };
     let (class, overlay) = match &*drag.read() {
         None => ("workbench", None),
         Some(Drag::Boundary { direction, .. }) => (
@@ -372,7 +371,7 @@ pub fn Workbench() -> Element {
                 PlacedPanes { panes, pane: |pane| rsx! {
                     PaneView { pane }
                 } }
-                for boundary in frames.boundaries {
+                for boundary in boundaries {
                     Divider { boundary, area }
                 }
             }
@@ -477,16 +476,34 @@ fn TabBar() -> Element {
     }
 }
 
-/// Each of `panes` drawn by `pane`, placed at its frame. Keyed by pane id
-/// and kept in id order, so that a split, a move, or a resize changes where
-/// a pane's element is but never remounts what `pane` drew in it.
+/// Each of `panes` ([`Layout::placed`]: every tab's) drawn by `pane`, placed
+/// at its frame. Keyed by pane id and kept in id order, so that a split, a
+/// move, a resize, or a tab switch changes where a pane's element is, or
+/// whether it shows, but never remounts what `pane` drew in it.
 #[component]
-pub fn PlacedPanes(panes: Vec<(PaneId, Frame)>, pane: Callback<PaneId, Element>) -> Element {
-    let mut panes = panes;
-    panes.sort_by_key(|(id, _)| *id);
+pub fn PlacedPanes(panes: Vec<Placed>, pane: Callback<PaneId, Element>) -> Element {
     rsx! {
-        for (id, frame) in panes {
-            div { key: "{id}", class: "pane-slot", style: placement(frame), {pane.call(id)} }
+        for Placed { pane: id, frame, shown } in panes {
+            PaneSlot { key: "{id}", frame, shown, {pane.call(id)} }
+        }
+    }
+}
+
+/// Whether the pane drawn in a slot is on the tab shown, provided to what
+/// it draws: a native web view does not hide with its element, so it has to
+/// be hidden itself.
+#[derive(Clone, Copy)]
+pub struct PaneShown(pub ReadSignal<bool>);
+
+/// One pane's place: where it goes, hidden while its tab is not shown.
+#[component]
+fn PaneSlot(frame: Frame, shown: ReadSignal<bool>, children: Element) -> Element {
+    use_context_provider(|| PaneShown(shown));
+    rsx! {
+        div {
+            class: if shown() { "pane-slot" } else { "pane-slot hidden" },
+            style: placement(frame),
+            {children}
         }
     }
 }
@@ -1018,7 +1035,7 @@ mod tests {
     #[component]
     fn Root() -> Element {
         let layout = use_context::<Signal<Layout>>();
-        let panes = layout.read().active_tab().root.frames().panes;
+        let panes = layout.read().placed();
         rsx! {
             PlacedPanes { panes, pane: |pane| rsx! {
                 Probe { pane }
@@ -1026,9 +1043,10 @@ mod tests {
         }
     }
 
-    /// Splitting, moving, resizing, and closing panes leave every pane that
-    /// stays mounted once: a remount rebuilds an agent's transcript and
-    /// reloads a report's web view.
+    /// Splitting, moving, resizing, and closing panes, switching tabs, and
+    /// moving a pane to another tab leave every pane mounted once: a
+    /// remount rebuilds an agent's transcript and reloads a report's web
+    /// view.
     #[test]
     fn rearranging_panes_never_remounts_one() {
         let mounts = Mounts::default();
@@ -1063,12 +1081,24 @@ mod tests {
         change(&mut dom, &|layout| {
             layout.close_pane(2);
         });
+        change(&mut dom, &|layout| {
+            layout.new_tab();
+        });
+        change(&mut dom, &|layout| {
+            layout.select_tab(0);
+        });
+        change(&mut dom, &|layout| {
+            layout.move_to_tab(1, Some(1));
+        });
+        change(&mut dom, &|layout| {
+            layout.select_tab(0);
+        });
 
-        let panes = dom.in_runtime(|| layout.peek().active_tab().root.panes());
-        assert_eq!(panes.len(), 3);
+        let panes = dom.in_runtime(|| layout.peek().placed().len());
+        assert_eq!(panes, 4);
         assert_eq!(
             *mounts.borrow(),
-            HashMap::from([(0, 1), (1, 1), (2, 1), (3, 1)]),
+            HashMap::from([(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]),
         );
     }
 }

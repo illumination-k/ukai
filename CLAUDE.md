@@ -60,9 +60,9 @@ the gateway, `ukai-knowledge`, or the manifests.
 
 `mise run bench` runs the benchmarks (`divan`, in each crate's `benches/`;
 not part of `ci`). `crates/ukai-app/benches/panes.rs` measures splitting,
-moving, and resizing panes that show long transcripts: each should stay in
-microseconds whatever the transcripts' length, since panes are placed rather
-than remounted (`layout::tests` checks the same without timing). Run it
+moving, and resizing panes that show long transcripts, and switching tabs:
+each should stay in microseconds whatever the transcripts' length, since
+panes are placed rather than remounted (`layout::tests` checks the same without timing). Run it
 before and after a change to how panes render.
 
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an

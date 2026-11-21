@@ -1,6 +1,7 @@
 //! What rearranging panes costs while they show long transcripts.
 //!
-//! A split, move, or resize should only re-place the panes: each costs about
+//! A split, move, resize, or tab switch should only re-place or hide the
+//! panes: each costs about
 //! the same however long the transcripts are. If it grows with them, panes
 //! are being remounted and their transcripts rebuilt again
 //! (`layout::tests::rearranging_panes_never_remounts_one` fails then too).
@@ -67,7 +68,7 @@ fn Transcript(pane: PaneId) -> Element {
 #[component]
 fn Root() -> Element {
     let layout = use_context::<Signal<Layout>>();
-    let panes = layout.read().active_tab().root.frames().panes;
+    let panes = layout.read().placed();
     rsx! {
         PlacedPanes { panes, pane: |pane| rsx! {
             Transcript { pane }
@@ -127,6 +128,22 @@ fn resize(bencher: divan::Bencher, messages: usize) {
             rearrange(dom, *layout, |layout| {
                 layout.resize(&[], 0, 0.3);
             });
+        });
+}
+
+/// Back to the tab of long transcripts from another.
+#[divan::bench(args = MESSAGES)]
+fn switch_tab(bencher: divan::Bencher, messages: usize) {
+    bencher
+        .with_inputs(|| {
+            let (mut dom, layout) = workbench(messages);
+            rearrange(&mut dom, layout, |layout| {
+                layout.new_tab();
+            });
+            (dom, layout)
+        })
+        .bench_local_refs(|(dom, layout)| {
+            rearrange(dom, *layout, |layout| layout.select_tab(0));
         });
 }
 
