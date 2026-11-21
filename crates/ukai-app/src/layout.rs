@@ -371,9 +371,12 @@ pub fn Workbench() -> Element {
             div {
                 class: panes_class,
                 onmounted: move |event| area.set(Some(event.data())),
-                PlacedPanes { panes, pane: |pane| rsx! {
-                    PaneView { pane }
-                } }
+                PlacedPanes {
+                    panes,
+                    pane: |pane| rsx! {
+                        PaneView { pane }
+                    },
+                }
                 for boundary in boundaries {
                     Divider { boundary, area }
                 }
@@ -1056,9 +1059,12 @@ mod tests {
         let layout = use_context::<Signal<Layout>>();
         let panes = use_kept_panes(layout);
         rsx! {
-            PlacedPanes { panes, pane: |pane| rsx! {
-                Probe { pane }
-            } }
+            PlacedPanes {
+                panes,
+                pane: |pane| rsx! {
+                    Probe { pane }
+                },
+            }
         }
     }
 

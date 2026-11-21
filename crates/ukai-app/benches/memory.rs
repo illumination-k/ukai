@@ -69,9 +69,12 @@ fn Root() -> Element {
         }
     };
     rsx! {
-        PlacedPanes { panes, pane: |pane| rsx! {
-            Transcript { pane }
-        } }
+        PlacedPanes {
+            panes,
+            pane: |pane| rsx! {
+                Transcript { pane }
+            },
+        }
     }
 }
 

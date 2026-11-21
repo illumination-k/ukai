@@ -40,9 +40,7 @@ const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 pub fn Markdown(source: String) -> Element {
     let nodes = markdown::parse(&source);
     rsx! {
-        div { class: "md",
-            {nodes.iter().map(render)}
-        }
+        div { class: "md", {nodes.iter().map(render)} }
     }
 }
 

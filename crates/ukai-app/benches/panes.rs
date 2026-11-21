@@ -55,9 +55,12 @@ fn Root() -> Element {
     let layout = use_context::<Signal<Layout>>();
     let panes = use_kept_panes(layout);
     rsx! {
-        PlacedPanes { panes, pane: |pane| rsx! {
-            Transcript { pane }
-        } }
+        PlacedPanes {
+            panes,
+            pane: |pane| rsx! {
+                Transcript { pane }
+            },
+        }
     }
 }
 
@@ -132,11 +135,19 @@ fn switch_tab(bencher: divan::Bencher, messages: usize) {
         });
 }
 
+/// One pane's transcript alone.
+#[component]
+fn OnePane() -> Element {
+    rsx! {
+        Transcript { pane: 0 }
+    }
+}
+
 /// For scale: what one remount of a pane costs, building its transcript.
 #[divan::bench(args = MESSAGES)]
 fn mount_transcript(bencher: divan::Bencher, messages: usize) {
     bencher.bench_local(|| {
-        let mut dom = VirtualDom::new(|| rsx! { Transcript { pane: 0 } });
+        let mut dom = VirtualDom::new(OnePane);
         dom.provide_root_context(messages);
         dom.rebuild_in_place();
         dom
