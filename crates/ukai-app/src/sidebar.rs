@@ -1,9 +1,9 @@
 //! The sidebar, in two columns under a dropdown of the open projects. The
 //! first lists the selected project's workspaces — this machine's checkout,
 //! and the gateway workspaces — each with its agent panes (click to focus),
-//! and then the knowledge and schedules of its gateway agents. Clicking a
-//! pane or a workspace opens the second column on what is in that
-//! workspace: its changes, reports, and ports. What goes where is
+//! and then the knowledge and schedules of its gateway agents. The second
+//! column shows what is in one workspace — its changes, reports, and ports:
+//! the focused pane's, following focus, or the one last clicked. What goes where is
 //! [`ukai_core::sidebar`]'s; this draws it.
 
 use std::collections::HashMap;
@@ -39,7 +39,26 @@ pub fn Sidebar() -> Element {
     let shortcuts = use_context::<Shortcuts>();
     let mut projects_signal = app.projects;
     let mut launching = use_signal(|| false);
-    let opened: Opened = use_signal(|| None);
+    let mut opened: Opened = use_signal(|| None);
+    // The workspace of the focused pane: the second column follows it, and
+    // the dropdown its project, whenever focus moves to another workspace.
+    let focused_place = use_memo(move || {
+        let layout = app.layout.read();
+        layout
+            .content(layout.focused())
+            .and_then(sidebar::pane_place)
+    });
+    use_effect(move || {
+        let Some((project, place)) = focused_place() else {
+            return;
+        };
+        let mut projects = projects_signal.write();
+        if projects.selected().map(|p| &p.id) != Some(&project) {
+            projects.select(&project);
+            launching.set(false);
+        }
+        opened.set(Some((project, place)));
+    });
     let (projects, selected): (Vec<(ProjectId, String, String)>, Option<ProjectId>) = {
         let projects = app.projects.read();
         (
@@ -56,11 +75,6 @@ pub fn Sidebar() -> Element {
             projects.selected().map(|project| project.id.clone()),
         )
     };
-    let root = selected
-        .as_ref()
-        .and_then(|id| projects.iter().find(|(known, _, _)| known == id))
-        .map(|(_, _, root)| root.clone())
-        .unwrap_or_default();
     let pick = {
         let paths = paths.clone();
         move || {
@@ -91,31 +105,13 @@ pub fn Sidebar() -> Element {
         nav { class,
             div { class: "sidebar-header",
                 if let Some(id) = selected.clone() {
-                    select {
-                        class: "project-select",
-                        title: "{root}",
-                        value: "{id}",
-                        onchange: move |event: FormEvent| {
-                            let chosen = event.value();
-                            let mut projects = projects_signal.write();
-                            let found = projects
-                                .iter()
-                                .find(|project| project.id.to_string() == chosen)
-                                .map(|project| project.id.clone());
-                            if let Some(found) = found {
-                                projects.select(&found);
-                                launching.set(false);
-                            }
+                    ProjectSelect {
+                        projects: projects.clone(),
+                        selected: id.clone(),
+                        onpick: move |chosen: ProjectId| {
+                            projects_signal.write().select(&chosen);
+                            launching.set(false);
                         },
-                        for (option_id, name, root) in projects.clone() {
-                            option {
-                                key: "{option_id}",
-                                value: "{option_id}",
-                                title: "{root}",
-                                selected: option_id == id,
-                                "{name}"
-                            }
-                        }
                     }
                     button {
                         class: if launching() { "icon open" } else { "icon" },
@@ -203,6 +199,102 @@ pub fn Sidebar() -> Element {
                         class: "footer-warning",
                         title: shortcuts.problems.join("\n"),
                         "⚠ keybindings"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The open projects as a button naming the selected one and a menu of the
+/// others, drawn like the app's other menus rather than as a native
+/// `select`, whose popup the web view leaves to the platform.
+#[component]
+fn ProjectSelect(
+    projects: Vec<(ProjectId, String, String)>,
+    selected: ProjectId,
+    onpick: EventHandler<ProjectId>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut highlighted = use_signal(|| 0usize);
+    let current = projects.iter().position(|(id, _, _)| *id == selected);
+    let (name, root) = current
+        .map(|at| (projects[at].1.clone(), projects[at].2.clone()))
+        .unwrap_or_default();
+    let mut pick = move |id: ProjectId| {
+        open.set(false);
+        onpick.call(id);
+    };
+    let on_key = {
+        let ids: Vec<ProjectId> = projects.iter().map(|(id, _, _)| id.clone()).collect();
+        move |event: KeyboardEvent| {
+            let len = ids.len().max(1) as isize;
+            let step = |delta: isize| (highlighted() as isize + delta).rem_euclid(len) as usize;
+            match event.key() {
+                Key::ArrowDown => highlighted.set(step(1)),
+                Key::ArrowUp => highlighted.set(step(-1)),
+                Key::Enter if !event.is_composing() => {
+                    if let Some(id) = ids.get(highlighted()) {
+                        pick(id.clone());
+                    }
+                }
+                Key::Escape | Key::Tab => open.set(false),
+                _ => return,
+            }
+            event.prevent_default();
+            event.stop_propagation();
+        }
+    };
+    rsx! {
+        div { class: "project-select",
+            button {
+                class: if open() { "project-trigger open" } else { "project-trigger" },
+                title: "{root}",
+                aria_haspopup: "listbox",
+                aria_expanded: open(),
+                onclick: move |_| {
+                    highlighted.set(current.unwrap_or(0));
+                    open.toggle();
+                },
+                span { class: "row-icon",
+                    Svg { icon: Icon::Folder, size: 12 }
+                }
+                span { class: "name", "{name}" }
+                span { class: "caret",
+                    Svg { icon: Icon::Chevron, size: 10 }
+                }
+            }
+            if open() {
+                div {
+                    class: "config-backdrop",
+                    onclick: move |_| open.set(false),
+                }
+                div {
+                    class: "config-menu project-menu",
+                    role: "listbox",
+                    aria_label: "Projects",
+                    tabindex: "-1",
+                    onmounted: move |event| async move {
+                        let _ = event.set_focus(true).await;
+                    },
+                    onkeydown: on_key,
+                    for (at, (id, name, root)) in projects.into_iter().enumerate() {
+                        div {
+                            key: "{id}",
+                            class: if at == highlighted() { "config-item highlighted" } else { "config-item" },
+                            role: "option",
+                            aria_selected: Some(at) == current,
+                            title: "{root}",
+                            onmouseenter: move |_| highlighted.set(at),
+                            onclick: move |_| pick(id.clone()),
+                            span { class: "check",
+                                if Some(at) == current {
+                                    Svg { icon: Icon::Check, size: 12 }
+                                }
+                            }
+                            span { class: "label", "{name}" }
+                            span { class: "description", "{root}" }
+                        }
                     }
                 }
             }
