@@ -13,6 +13,8 @@ jobs:
   lint:
     runs-on: ubuntu-slim
     timeout-minutes: 15
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
     permissions:
       contents: read
     steps:
@@ -20,7 +22,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # Only the tools this job runs: the full set builds cargo-audit from
+      # source. `mise run` would install the rest without the job's env,
+      # and a prefix of its own keeps this partial set out of other jobs' cache.
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          cache_key_prefix: mise-v1-lint-base
+          install_args: dprint shfmt shellcheck prek
 
       - name: Run pre-commit
         run: prek run --all-files

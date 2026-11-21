@@ -33,6 +33,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      # Line tables keep backtraces readable at a fraction of the size, so
+      # target/ (and the cache of it) stays small.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,10 +50,16 @@ jobs:
       - name: Install webview dependencies
         run: mise bootstrap packages apply --yes --update
 
+      # Saved from main only: a PR restores main's cache, and per-branch
+      # copies of target/ would push main's out of the 10 GB repository
+      # limit. Saved after a failed run too, so a red main still warms it.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
-      - name: Build
-        run: cargo build --locked --workspace --all-features
+      # No separate `cargo build`: clippy --all-targets checks every target,
+      # and nextest builds what the tests run.
 
       - name: Lint
         run: mise run lint:rust

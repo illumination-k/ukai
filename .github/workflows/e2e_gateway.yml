@@ -67,13 +67,17 @@ jobs:
           load: true
           push: false
           cache-from: type=gha,scope=e2e-gateway
-          cache-to: type=gha,scope=e2e-gateway,mode=max
+          # `min`: `max` also stores the build stage, whose layer holds the
+          # whole target/ (gigabytes) and pushes the Rust caches out.
+          cache-to: type=gha,scope=e2e-gateway,mode=min
 
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: e2e-gateway
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: E2E
         run: mise run e2e:gateway
