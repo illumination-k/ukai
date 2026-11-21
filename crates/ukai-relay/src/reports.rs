@@ -64,6 +64,7 @@ async fn listing(State(Root(root)): State<Root>) -> Response {
         .map(|listed| Entry {
             path: listed.path.to_string_lossy().into_owned(),
             modified: seconds(listed.modified),
+            published: Vec::new(),
         })
         .collect();
     axum::Json(Listing {

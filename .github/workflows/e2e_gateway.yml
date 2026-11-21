@@ -2,7 +2,7 @@ name: E2E Gateway
 
 # Deploys deploy/gateway, with the runtime image built from this commit, into
 # a kind cluster and checks it from outside (e2e/gateway/run.sh): knowledge
-# through the gateway and ukai-knowledge, their tokens, and the
+# through the gateway and ukai-store, their tokens, and the
 # NetworkPolicies.
 on:
   push:
@@ -12,7 +12,7 @@ on:
       - "crates/ukai-config/**"
       - "crates/ukai-core/**"
       - "crates/ukai-gateway/**"
-      - "crates/ukai-knowledge/**"
+      - "crates/ukai-store/**"
       - "crates/ukai-proto/**"
       - "crates/ukai-relay/**"
       - "Cargo.toml"
@@ -28,7 +28,7 @@ on:
       - "crates/ukai-config/**"
       - "crates/ukai-core/**"
       - "crates/ukai-gateway/**"
-      - "crates/ukai-knowledge/**"
+      - "crates/ukai-store/**"
       - "crates/ukai-proto/**"
       - "crates/ukai-relay/**"
       - "Cargo.toml"

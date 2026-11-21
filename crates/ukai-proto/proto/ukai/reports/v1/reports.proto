@@ -1,0 +1,55 @@
+// Reports: which session of a gateway agent published which report of its
+// workspace. See "セッションのレポート" in docs/design.md.
+syntax = "proto3";
+
+package ukai.reports.v1;
+
+// Which session published which report, as `ukai-store` keeps it. The
+// reports themselves stay in the workspace's checkout (and the gateway's
+// copy of it); this is only who published them. Only the gateway calls it,
+// with the token it shares with it, naming the workspace it found out.
+service ReportStore {
+  // Record that a session published a report, or published it again.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  // Every publication of a workspace's reports, newest first.
+  rpc List(ListRequest) returns (ListResponse);
+  // Forget every publication of a report the user deleted.
+  rpc Forget(ForgetRequest) returns (ForgetResponse);
+}
+
+message Publication {
+  // The ACP session that published it.
+  string session = 1;
+  // Relative to the workspace's checkout, e.g. `reports/run.html`.
+  string path = 2;
+  // What the agent called it, if anything.
+  optional string title = 3;
+  // When it was last published, in Unix seconds. Set by the store.
+  int64 published = 4;
+}
+
+message PublishRequest {
+  // The gateway's id of the workspace, from the pod's Job.
+  string workspace = 1;
+  Publication publication = 2;
+}
+
+message PublishResponse {
+  // Every reason the publication was refused; empty when it was recorded.
+  repeated string problems = 1;
+}
+
+message ListRequest {
+  string workspace = 1;
+}
+
+message ListResponse {
+  repeated Publication publications = 1;
+}
+
+message ForgetRequest {
+  string workspace = 1;
+  string path = 2;
+}
+
+message ForgetResponse {}

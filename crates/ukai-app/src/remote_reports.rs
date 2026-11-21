@@ -7,6 +7,10 @@
 //! sidebar shows, and the sidebar, the palette, and a report pane read what
 //! it found rather than each polling on their own.
 //!
+//! Each listing also says which sessions published its reports, so the
+//! sidebar can show the focused session's first (see
+//! `ukai_core::publication`).
+//!
 //! The unit is the *workspace*, not the pane: two panes sharing one
 //! (`workspace = "shared"`) see one listing, and a report stays readable
 //! after the pane that opened the agent is closed, as long as the pod is
@@ -19,6 +23,7 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use ukai_acp::reports::{ReportsEndpoint, ReportsError};
 use ukai_config::AgentSpec;
+use ukai_core::publication::Sessions;
 
 use crate::follow::{Endpoints, Workspace, followed, relist};
 use crate::projects::AppSignals;
@@ -29,13 +34,15 @@ const RELIST: Duration = Duration::from_secs(3);
 /// The last listing of a workspace.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Listing {
-    /// Project-relative paths, newest first.
-    Reports(Vec<PathBuf>),
+    /// Project-relative paths, newest first, and which sessions published
+    /// them.
+    Reports(Vec<PathBuf>, Sessions),
     /// The pod is not running, and these are what the gateway kept of them,
     /// as they were at `synced` (seconds since the epoch).
     Saved {
         paths: Vec<PathBuf>,
         synced: u64,
+        sessions: Sessions,
     },
     /// The pod is not running: the agent has to be opened again first.
     NotRunning,
@@ -90,14 +97,19 @@ pub fn Follow() -> Element {
 async fn read(endpoint: &ReportsEndpoint) -> Listing {
     match endpoint.list().await {
         Ok(listing) => {
+            let sessions = Sessions::of(&listing);
             let paths = listing
                 .reports
                 .into_iter()
                 .map(|e| PathBuf::from(e.path))
                 .collect();
             match listing.synced {
-                Some(synced) => Listing::Saved { paths, synced },
-                None => Listing::Reports(paths),
+                Some(synced) => Listing::Saved {
+                    paths,
+                    synced,
+                    sessions,
+                },
+                None => Listing::Reports(paths, sessions),
             }
         }
         Err(ReportsError::Gone) => Listing::NotRunning,

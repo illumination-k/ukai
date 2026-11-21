@@ -21,7 +21,7 @@ allow = [
   # whisper-rs / whisper-rs-sys (voice input). A public-domain dedication;
   # whisper.cpp itself is MIT.
   "Unlicense",
-  # surrealdb and its crates (ukai-knowledge's store client). It only
+  # surrealdb and its crates (ukai-store's store client). It only
   # restricts offering SurrealDB itself as a database service.
   "BUSL-1.1",
 ]
@@ -48,9 +48,9 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "zvariant via notify-rust -> zbus 5 (Linux notifications)" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names via notify-rust -> zbus 5 (Linux notifications)" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via notify-rust -> zbus 5 (Linux notifications)" },
-  # Only through surrealdb's embedded engine (`kv-mem`), which ukai-knowledge's
+  # Only through surrealdb's embedded engine (`kv-mem`), which ukai-store's
   # tests alone use; the service itself is a client and links none of it.
-  # Keep `cargo tree -p ukai-knowledge -e normal -i <crate>` empty for each.
+  # Keep `cargo tree -p ukai-store -e normal -i <crate>` empty for each.
   { id = "RUSTSEC-2025-0141", reason = "bincode via surrealmx (surrealdb kv-mem, tests only)" },
   { id = "RUSTSEC-2023-0071", reason = "rsa via jsonwebtoken (surrealdb-core, tests only)" },
   { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via jsonwebtoken (surrealdb-core, tests only)" },

@@ -1,5 +1,5 @@
 //! Comparing a presented token with the one expected, shared by the
-//! gateway and `ukai-knowledge`, so a fix to it reaches both.
+//! gateway and `ukai-store`, so a fix to it reaches both.
 
 /// Whether `presented` is `secret`, taking as long for every `presented` of
 /// the same length.

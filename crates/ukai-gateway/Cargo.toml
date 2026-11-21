@@ -27,7 +27,7 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "handshake"] }
 toml = { workspace = true }
-# Serves ukai.gateway.v1 (with gRPC-Web) and asks ukai-knowledge.
+# Serves ukai.gateway.v1 (with gRPC-Web) and asks ukai-store.
 tonic = { workspace = true }
 tonic-web = { workspace = true }
 tower = { workspace = true }

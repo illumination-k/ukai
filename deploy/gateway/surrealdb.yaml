@@ -1,6 +1,7 @@
-# SurrealDB, where ukai-knowledge (knowledge.yaml) keeps the notes about the
-# code the gateway's agents work on, outside its repositories. One replica on
-# a volume of its own; only ukai-knowledge talks to it.
+# SurrealDB, where ukai-store (store.yaml) keeps the notes about the
+# code the gateway's agents work on, outside its repositories, and which
+# session published which report. One replica on
+# a volume of its own; only ukai-store talks to it.
 #
 # Its root user comes from the Secret `ukai-surrealdb` (keys `user` and
 # `pass`), which this base does not create:
@@ -100,7 +101,7 @@ spec:
       port: 8000
       targetPort: surrealdb
 ---
-# ukai-knowledge alone; never an agent pod (see knowledge.yaml).
+# ukai-store alone; never an agent pod (see store.yaml).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -116,7 +117,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: ukai-knowledge
+              app.kubernetes.io/name: ukai-store
             matchExpressions:
               - key: ukai.dev/workspace
                 operator: DoesNotExist

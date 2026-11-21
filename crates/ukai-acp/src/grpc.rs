@@ -28,6 +28,27 @@ pub fn channel(client: reqwest::Client, root: String) -> Channel {
     GrpcWebClientService::new(Web { client, root })
 }
 
+/// What an agent pod uses: the gateway at `gateway` (e.g.
+/// `http://ukai-gateway`), asked with its relay's `token`, and that root.
+pub fn pod_channel(
+    gateway: &str,
+    token: &str,
+    timeout: std::time::Duration,
+) -> Result<(Channel, String), crate::ResolveError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| crate::ResolveError::InvalidHeader("authorization".to_owned()))?;
+    value.set_sensitive(true);
+    headers.insert(reqwest::header::AUTHORIZATION, value);
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(timeout)
+        .build()
+        .map_err(|error| crate::ResolveError::Client(error.to_string()))?;
+    let root = gateway.trim_end_matches('/').to_owned();
+    Ok((channel(client, root.clone()), root))
+}
+
 /// Sends a gRPC-Web request with reqwest.
 #[derive(Debug, Clone)]
 pub struct Web {

@@ -10299,25 +10299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ukai-knowledge"
-version = "0.0.0"
-dependencies = [
- "rstest",
- "serde_json",
- "surrealdb",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "tonic",
- "tonic-health",
- "tracing",
- "tracing-subscriber",
- "ukai-acp",
- "ukai-core",
- "ukai-proto",
-]
-
-[[package]]
 name = "ukai-proto"
 version = "0.0.0"
 dependencies = [
@@ -10349,6 +10330,26 @@ dependencies = [
  "ukai-acp",
  "ukai-config",
  "ukai-core",
+]
+
+[[package]]
+name = "ukai-store"
+version = "0.0.0"
+dependencies = [
+ "rstest",
+ "serde",
+ "serde_json",
+ "surrealdb",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tonic",
+ "tonic-health",
+ "tracing",
+ "tracing-subscriber",
+ "ukai-acp",
+ "ukai-core",
+ "ukai-proto",
 ]
 
 [[package]]

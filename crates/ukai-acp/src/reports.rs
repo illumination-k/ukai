@@ -13,6 +13,11 @@
 //! and the pane that shows it name the same `reports/run.html`. What may be
 //! read or deleted is the server's business (`ukai_core::report::ReportTree`, which the
 //! relay serves from); nothing here decides it.
+//!
+//! A listing from the gateway also says which sessions published each report
+//! ([`Published`]), as `ukai-store` keeps it; the relay's MCP server publishes
+//! them through [`PublishEndpoint`]. See "セッションのレポート" in
+//! `docs/design.md`.
 
 use std::time::Duration;
 
@@ -73,6 +78,152 @@ pub struct Entry {
     /// server could not tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<u64>,
+    /// The sessions that published it, newest first, as the gateway adds
+    /// them from what `ukai-store` keeps; empty for a report no session
+    /// published (one the relay lists alone).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub published: Vec<Published>,
+}
+
+/// A session publishing a report: the agent saying, through the relay's MCP
+/// server, that it wrote or rewrote the report for the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Published {
+    /// The ACP session.
+    pub session: String,
+    /// What the agent called the report, if anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// When it was last published, in seconds since the epoch.
+    pub at: u64,
+}
+
+/// One report a session published, as `ukai-store` lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publication {
+    pub path: String,
+    pub published: Published,
+}
+
+impl Listing {
+    /// Add to each listed report the sessions that published it, newest
+    /// first. A publication of a report no longer listed is left out: the
+    /// listing is what can be opened.
+    pub fn annotate(&mut self, publications: impl IntoIterator<Item = Publication>) {
+        for publication in publications {
+            if let Some(entry) = self
+                .reports
+                .iter_mut()
+                .find(|entry| entry.path == publication.path)
+            {
+                entry
+                    .published
+                    .retain(|p| p.session != publication.published.session);
+                entry.published.push(publication.published);
+            }
+        }
+        for entry in &mut self.reports {
+            entry.published.sort_by_key(|p| std::cmp::Reverse(p.at));
+        }
+    }
+}
+
+impl Entry {
+    /// Whether `session` published this report.
+    pub fn published_by(&self, session: &str) -> bool {
+        self.published.iter().any(|p| p.session == session)
+    }
+
+    /// The title the latest publication gave it.
+    pub fn title(&self) -> Option<&str> {
+        self.published.iter().find_map(|p| p.title.as_deref())
+    }
+}
+
+/// Publishing the reports of an agent pod's own workspace, as its relay's
+/// MCP server does: the gateway knows the workspace by the relay's token.
+#[derive(Debug, Clone)]
+pub struct PublishEndpoint {
+    channel: crate::grpc::Channel,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PublishError {
+    #[error("{}", .0.join("; "))]
+    Refused(Vec<String>),
+    #[error("the gateway keeps no record of who published reports")]
+    Unavailable,
+    #[error("cannot publish through the gateway: {0}")]
+    Failed(String),
+}
+
+impl PublishEndpoint {
+    /// The gateway at `gateway` (e.g. `http://ukai-gateway`), with the
+    /// relay's `token`.
+    pub fn for_workspace(gateway: &str, token: &str) -> Result<Self, ResolveError> {
+        let (channel, _) = crate::grpc::pod_channel(gateway, token, TIMEOUT)?;
+        Ok(Self { channel })
+    }
+
+    /// Say that `session` published the report at `path` (relative to the
+    /// checkout), calling it `title`.
+    pub async fn publish(
+        &self,
+        session: &str,
+        path: &str,
+        title: Option<&str>,
+    ) -> Result<(), PublishError> {
+        use ukai_proto::gateway::v1 as gw;
+        use ukai_proto::gateway::v1::workspace_reports_client::WorkspaceReportsClient;
+        let response = WorkspaceReportsClient::new(self.channel.clone())
+            .publish(gw::WorkspacePublishRequest {
+                session: session.to_owned(),
+                path: path.to_owned(),
+                title: title.map(str::to_owned),
+            })
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable => PublishError::Unavailable,
+                _ => PublishError::Failed(status.message().to_owned()),
+            })?
+            .into_inner();
+        if response.problems.is_empty() {
+            Ok(())
+        } else {
+            Err(PublishError::Refused(response.problems))
+        }
+    }
+}
+
+/// The wire form of a publication, as `ukai.reports.v1` carries it.
+pub mod wire {
+    use ukai_proto::reports::v1 as pb;
+
+    use super::{Publication, Published};
+
+    impl From<pb::Publication> for Publication {
+        fn from(publication: pb::Publication) -> Self {
+            Self {
+                path: publication.path,
+                published: Published {
+                    session: publication.session,
+                    title: publication.title,
+                    at: u64::try_from(publication.published).unwrap_or(0),
+                },
+            }
+        }
+    }
+
+    impl From<Publication> for pb::Publication {
+        fn from(publication: Publication) -> Self {
+            Self {
+                session: publication.published.session,
+                path: publication.path,
+                title: publication.published.title,
+                published: i64::try_from(publication.published.at).unwrap_or(i64::MAX),
+            }
+        }
+    }
 }
 
 /// One report file, as served.
@@ -366,10 +517,12 @@ mod tests {
                 Entry {
                     path: "reports/run.html".into(),
                     modified: Some(1_700_000_000),
+                    published: Vec::new(),
                 },
                 Entry {
                     path: "reports/img/plot.png".into(),
                     modified: None,
+                    published: Vec::new(),
                 },
             ],
             synced: None,
@@ -384,8 +537,61 @@ mod tests {
                 .and_then(|listing| listing.reports.first().cloned()),
             Some(Entry {
                 path: "reports/run.html".into(),
-                modified: None
+                modified: None,
+                published: Vec::new(),
             })
         );
+    }
+
+    fn publication(path: &str, session: &str, at: u64) -> Publication {
+        Publication {
+            path: path.into(),
+            published: Published {
+                session: session.into(),
+                title: Some(format!("{session} at {at}")),
+                at,
+            },
+        }
+    }
+
+    #[test]
+    fn a_listing_says_who_published_each_report() {
+        let entry = |path: &str| Entry {
+            path: path.into(),
+            modified: None,
+            published: Vec::new(),
+        };
+        let mut listing = Listing {
+            reports: vec![entry("reports/b.html"), entry("reports/a.html")],
+            synced: None,
+        };
+        listing.annotate([
+            publication("reports/a.html", "s1", 10),
+            publication("reports/a.html", "s2", 30),
+            publication("reports/b.html", "s1", 20),
+            // Deleted since, so not listed.
+            publication("reports/gone.html", "s1", 40),
+        ]);
+        let [b, a] = &listing.reports[..] else {
+            panic!("{listing:?}");
+        };
+        assert!(b.published_by("s1") && !b.published_by("s2"));
+        assert_eq!(
+            a.published
+                .iter()
+                .map(|p| p.session.as_str())
+                .collect::<Vec<_>>(),
+            ["s2", "s1"]
+        );
+        assert_eq!(a.title(), Some("s2 at 30"));
+        let json = serde_json::to_string(&listing).unwrap_or_default();
+        assert_eq!(serde_json::from_str::<Listing>(&json).ok(), Some(listing));
+    }
+
+    #[test]
+    fn publications_cross_the_wire() {
+        let publication = publication("reports/a.html", "s1", 10);
+        let pb = ukai_proto::reports::v1::Publication::from(publication.clone());
+        assert_eq!(Publication::from(pb), publication);
     }
 }

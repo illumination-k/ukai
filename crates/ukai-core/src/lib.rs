@@ -16,6 +16,7 @@ pub mod markdown;
 pub mod mention;
 pub mod palette;
 mod project;
+pub mod publication;
 pub mod recall;
 pub mod report;
 pub mod review;

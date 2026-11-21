@@ -1,4 +1,4 @@
-# ukai's cluster side: `ukai-gateway`, `ukai-knowledge`, and the
+# ukai's cluster side: `ukai-gateway`, `ukai-store`, and the
 # `ukai-relay` that agent pods copy out of this image (a static binary, so
 # any agent image can run it).
 #
@@ -23,16 +23,16 @@ COPY crates crates
 ARG CARGO_PROFILE=release
 RUN out=$([ "$CARGO_PROFILE" = dev ] && echo debug || echo "$CARGO_PROFILE") \
   && cargo build --profile "$CARGO_PROFILE" --locked -p ukai-relay --target x86_64-unknown-linux-musl \
-  && cargo build --profile "$CARGO_PROFILE" --locked -p ukai-gateway -p ukai-knowledge \
+  && cargo build --profile "$CARGO_PROFILE" --locked -p ukai-gateway -p ukai-store \
   && cp "target/x86_64-unknown-linux-musl/$out/ukai-relay" "target/$out/ukai-gateway" \
-    "target/$out/ukai-knowledge" /usr/local/bin/
+    "target/$out/ukai-store" /usr/local/bin/
 
 FROM debian:trixie-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
-COPY --from=build /usr/local/bin/ukai-relay /usr/local/bin/ukai-gateway /usr/local/bin/ukai-knowledge /usr/local/bin/
+COPY --from=build /usr/local/bin/ukai-relay /usr/local/bin/ukai-gateway /usr/local/bin/ukai-store /usr/local/bin/
 
 USER 65534:65534
 ENTRYPOINT ["ukai-gateway"]

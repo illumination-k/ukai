@@ -24,7 +24,7 @@ diagnose() {
 	echo "::group::cluster state" >&2
 	k get pods -o wide >&2 || true
 	k describe pods >&2 || true
-	for app in deploy/ukai-gateway deploy/ukai-knowledge statefulset/ukai-surrealdb; do
+	for app in deploy/ukai-gateway deploy/ukai-store statefulset/ukai-surrealdb; do
 		k logs "$app" --all-containers --tail=200 >&2 || true
 	done
 	echo "::endgroup::" >&2
@@ -56,14 +56,14 @@ secret() {
 gateway_token=$(openssl rand -hex 32)
 knowledge_token=$(openssl rand -hex 32)
 secret ukai-gateway --from-literal=token="$gateway_token"
-secret ukai-knowledge --from-literal=token="$knowledge_token"
+secret ukai-store --from-literal=token="$knowledge_token"
 secret ukai-surrealdb --from-literal=user=root --from-literal=pass="$(openssl rand -hex 24)"
 secret ukai-rustfs --from-literal=access-key=ukai --from-literal=secret-key="$(openssl rand -hex 24)"
 
 k apply -k "$here"
 # A rerun brings new tokens: start everything that read the old ones again.
-k rollout restart deploy/ukai-gateway deploy/ukai-knowledge
-for workload in statefulset/ukai-surrealdb statefulset/ukai-rustfs deploy/ukai-knowledge deploy/ukai-gateway; do
+k rollout restart deploy/ukai-gateway deploy/ukai-store
+for workload in statefulset/ukai-surrealdb statefulset/ukai-rustfs deploy/ukai-store deploy/ukai-gateway; do
 	k rollout status "$workload" --timeout=5m
 done
 
@@ -82,12 +82,12 @@ forward() {
 	return 1
 }
 forward svc/ukai-gateway 18080:80
-forward svc/ukai-knowledge 15051:50051
+forward svc/ukai-store 15051:50051
 
 UKAI_E2E_GATEWAY=http://127.0.0.1:18080 \
 	UKAI_E2E_GATEWAY_TOKEN=$gateway_token \
-	UKAI_E2E_KNOWLEDGE=http://127.0.0.1:15051 \
-	UKAI_E2E_KNOWLEDGE_TOKEN=$knowledge_token \
+	UKAI_E2E_STORE=http://127.0.0.1:15051 \
+	UKAI_E2E_STORE_TOKEN=$knowledge_token \
 	cargo nextest run --locked -p ukai-gateway --test e2e --run-ignored only
 
 # Whether a pod with `labels` reaches `service`:`port`; `expected` is
@@ -105,12 +105,12 @@ probe() {
 	[ "$outcome" = "$expected" ]
 }
 gateway=app.kubernetes.io/name=ukai-gateway
-knowledge=app.kubernetes.io/name=ukai-knowledge
+knowledge=app.kubernetes.io/name=ukai-store
 agent=ukai.dev/workspace=e2e,app.kubernetes.io/managed-by=ukai
-probe as-gateway "$gateway" ukai-knowledge 50051 reaches
-probe as-nobody "" ukai-knowledge 50051 blocked
-probe as-agent "$agent" ukai-knowledge 50051 blocked
-probe as-agent-named-gateway "$gateway,$agent" ukai-knowledge 50051 blocked
+probe as-gateway "$gateway" ukai-store 50051 reaches
+probe as-nobody "" ukai-store 50051 blocked
+probe as-agent "$agent" ukai-store 50051 blocked
+probe as-agent-named-gateway "$gateway,$agent" ukai-store 50051 blocked
 probe as-knowledge "$knowledge" ukai-surrealdb 8000 reaches
 probe as-gateway-to-store "$gateway" ukai-surrealdb 8000 blocked
 probe as-agent-named-knowledge "$knowledge,$agent" ukai-surrealdb 8000 blocked

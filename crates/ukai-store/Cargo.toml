@@ -1,14 +1,15 @@
 [package]
-name = "ukai-knowledge"
+name = "ukai-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Keeps the notes a gateway's agents and their people write, over gRPC for the gateway"
+description = "Keeps what a gateway's agents and their people write outside the repositories (notes, and who published which report), over gRPC for the gateway"
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 surrealdb = { workspace = true }
 thiserror = { workspace = true }
