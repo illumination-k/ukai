@@ -123,7 +123,7 @@ impl Listing {
             }
         }
         for entry in &mut self.reports {
-            entry.published.sort_by(|a, b| b.at.cmp(&a.at));
+            entry.published.sort_by_key(|p| std::cmp::Reverse(p.at));
         }
     }
 }

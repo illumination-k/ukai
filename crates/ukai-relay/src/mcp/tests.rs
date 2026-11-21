@@ -1114,11 +1114,14 @@ fn refuses_a_review_with_every_problem_named() {
     assert!(failed, "{text}");
 }
 
+/// A publication as the gateway gets it: session, path, title.
+type Made = (String, String, Option<String>);
+
 /// Publications made, as the gateway would get them; `refuse` answers with
 /// problems.
 #[derive(Default, Clone)]
 struct Published {
-    made: std::rc::Rc<RefCell<Vec<(String, String, Option<String>)>>>,
+    made: std::rc::Rc<RefCell<Vec<Made>>>,
     refuse: bool,
 }
 

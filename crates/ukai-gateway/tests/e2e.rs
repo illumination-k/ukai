@@ -491,7 +491,7 @@ async fn the_store_keeps_who_published_which_report() {
     let mut store = ReportStoreClient::connect(env("UKAI_E2E_STORE"))
         .await
         .unwrap_or_else(|e| panic!("connect: {e}"));
-    let as_gateway = |message| {
+    fn as_gateway<T>(message: T) -> tonic::Request<T> {
         let mut request = tonic::Request::new(message);
         request.metadata_mut().insert(
             "authorization",
@@ -500,7 +500,7 @@ async fn the_store_keeps_who_published_which_report() {
                 .unwrap_or_else(|e| panic!("{e}")),
         );
         request
-    };
+    }
     let workspace = fresh("e2e-workspace");
     let published = store
         .publish(as_gateway(reports::PublishRequest {
