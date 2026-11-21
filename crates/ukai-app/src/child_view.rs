@@ -4,7 +4,7 @@
 //! The view is native, so it sits above the app's DOM: [`use_child_view`]
 //! keeps it over its host element by polling the element's position, hides
 //! it while something of the DOM is drawn over the pane (`covered`), and
-//! drops it on unmount (tab change, split, close).
+//! drops it on unmount (tab change, close).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,6 +17,9 @@ use dioxus::prelude::*;
 
 /// How often the view follows its host's position.
 const POLL: Duration = Duration::from_millis(150);
+/// How often to look for the host before the view is first built, so that
+/// a new pane's view appears with the pane rather than a poll later.
+const FIRST_POLL: Duration = Duration::from_millis(16);
 
 /// The web view once built, shared with whatever else drives it.
 pub type View = Rc<RefCell<Option<WebView>>>;
@@ -112,7 +115,12 @@ pub fn use_child_view(
                             }
                         }
                     }
-                    tokio::time::sleep(POLL).await;
+                    let wait = if view.borrow().is_some() {
+                        POLL
+                    } else {
+                        FIRST_POLL
+                    };
+                    tokio::time::sleep(wait).await;
                 }
             }
         }

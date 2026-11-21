@@ -13,8 +13,8 @@ use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::{
-    Direction, Layout, Node, PaneContent, PaneId, ProjectId, Projects, ReportSource, Side,
-    boundary_span,
+    Boundary, Direction, Frame, Layout, PaneContent, PaneId, ProjectId, Projects, ReportSource,
+    Side,
 };
 
 use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect, session_title};
@@ -29,10 +29,6 @@ use crate::report_pane::{ReportView, delete_report, download_report, pick_report
 use crate::schedules::{ScheduleView, schedule_label};
 use crate::shortcuts::Shortcuts;
 use crate::terminal_pane::{TerminalPane, open_terminal_in};
-
-/// The width of the divider between two children of a split, in CSS pixels;
-/// matches `.divider` in `main.css`.
-const DIVIDER: f64 = 1.0;
 
 /// How far the pointer goes with a pane header held before it is a drag
 /// rather than a click, in CSS pixels.
@@ -328,7 +324,20 @@ fn tab_state(sessions: Sessions, panes: &[PaneId]) -> Option<&'static str> {
 pub fn Workbench() -> Element {
     let app = use_context::<AppSignals>();
     let mut drag = app.drag;
-    let root = app.layout.read().active_tab().root.clone();
+    let frames = app.layout.read().active_tab().root.frames();
+    // Every pane is placed in this one element rather than nested in its
+    // splits, so that a split or a move changes where a pane is drawn but
+    // never remounts it: remounting rebuilds its transcript and reloads
+    // its web view.
+    let mut area = use_signal(|| None::<Rc<MountedData>>);
+    let mut panes = frames.panes;
+    // In a fixed order, so that moving a pane does not move its element.
+    panes.sort_by_key(|(pane, _)| *pane);
+    let panes_class = if panes.len() > 1 {
+        "panes split"
+    } else {
+        "panes"
+    };
     let (class, overlay) = match &*drag.read() {
         None => ("workbench", None),
         Some(Drag::Boundary { direction, .. }) => (
@@ -359,8 +368,20 @@ pub fn Workbench() -> Element {
                 }
             },
             TabBar {}
-            div { class: "panes",
-                NodeView { node: root, path: Vec::new() }
+            div {
+                class: panes_class,
+                onmounted: move |event| area.set(Some(event.data())),
+                for (pane, frame) in panes {
+                    div {
+                        key: "{pane}",
+                        class: "pane-slot",
+                        style: placement(frame),
+                        PaneView { pane }
+                    }
+                }
+                for boundary in frames.boundaries {
+                    Divider { boundary, area }
+                }
             }
             if let Some(overlay) = overlay {
                 div { class: overlay }
@@ -463,67 +484,57 @@ fn TabBar() -> Element {
     }
 }
 
-/// A node of the active tab's tree at `path`, child indices from its root.
-#[component]
-fn NodeView(node: Node, path: Vec<usize>) -> Element {
-    let mut host = use_signal(|| None::<Rc<MountedData>>);
-    match node {
-        Node::Pane(pane) => rsx! {
-            PaneView { key: "{pane}", pane }
-        },
-        Node::Split {
-            direction,
-            children,
-            sizes,
-        } => {
-            let class = match direction {
-                Direction::Horizontal => "split horizontal",
-                Direction::Vertical => "split vertical",
-            };
-            let last = children.len() - 1;
-            rsx! {
-                div {
-                    class,
-                    onmounted: move |event| host.set(Some(event.data())),
-                    for (index, (child, size)) in children.into_iter().zip(sizes.iter().copied()).enumerate() {
-                        div { class: "split-child", style: "flex: {size} 1 0",
-                            NodeView {
-                                node: child,
-                                path: path.iter().copied().chain([index]).collect::<Vec<_>>(),
-                            }
-                        }
-                        if index < last {
-                            Divider {
-                                path: path.clone(),
-                                index,
-                                direction,
-                                sizes: sizes.clone(),
-                                host,
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+/// Where `frame` of the pane area is, as CSS.
+fn placement(frame: Frame) -> String {
+    let percent = |fraction: f64| fraction * 100.0;
+    format!(
+        "left: {}%; top: {}%; width: {}%; height: {}%;",
+        percent(frame.x),
+        percent(frame.y),
+        percent(frame.width),
+        percent(frame.height),
+    )
 }
 
-/// The boundary after child `index` of the split at `path`: drag it to
-/// resize the two children beside it, double-click it to make them equal.
+/// A boundary between two children of a split: drag it to resize them,
+/// double-click it to make them equal. `area` is the pane area it is laid
+/// over.
 #[component]
-fn Divider(
-    path: Vec<usize>,
-    index: usize,
-    direction: Direction,
-    sizes: Vec<f32>,
-    host: Signal<Option<Rc<MountedData>>>,
-) -> Element {
+fn Divider(boundary: Boundary, area: Signal<Option<Rc<MountedData>>>) -> Element {
     let app = use_context::<AppSignals>();
     let mut drag = app.drag;
     let mut layout = app.layout;
+    let class = match boundary.direction {
+        Direction::Horizontal => "divider horizontal",
+        Direction::Vertical => "divider vertical",
+    };
+    // Across the split only: its thickness is the stylesheet's.
+    let line = boundary.line;
+    let style = match boundary.direction {
+        Direction::Horizontal => format!(
+            "left: {}%; top: {}%; height: {}%;",
+            line.x * 100.0,
+            line.y * 100.0,
+            line.height * 100.0,
+        ),
+        Direction::Vertical => format!(
+            "left: {}%; top: {}%; width: {}%;",
+            line.x * 100.0,
+            line.y * 100.0,
+            line.width * 100.0,
+        ),
+    };
+    let Boundary {
+        path,
+        index,
+        direction,
+        span: (start, length),
+        ..
+    } = boundary;
     rsx! {
         div {
-            class: "divider",
+            class,
+            style,
             onmousedown: {
                 let path = path.clone();
                 move |event: MouseEvent| {
@@ -533,11 +544,10 @@ fn Divider(
                     // Keep the press from selecting text or focusing a pane.
                     event.prevent_default();
                     event.stop_propagation();
-                    let Some(element) = host.peek().clone() else {
+                    let Some(element) = area.peek().clone() else {
                         return;
                     };
                     let path = path.clone();
-                    let sizes = sizes.clone();
                     spawn(async move {
                         let Ok(rect) = element.get_client_rect().await else {
                             return;
@@ -546,22 +556,15 @@ fn Divider(
                             Direction::Horizontal => (rect.origin.x, rect.size.width),
                             Direction::Vertical => (rect.origin.y, rect.size.height),
                         };
-                        if let Some((offset, length)) = boundary_span(
-                            &sizes,
-                            index,
-                            extent,
-                            DIVIDER,
-                        ) {
-                            drag.set(
-                                Some(Drag::Boundary {
-                                    path,
-                                    index,
-                                    direction,
-                                    start: origin + offset,
-                                    length,
-                                }),
-                            );
-                        }
+                        drag.set(
+                            Some(Drag::Boundary {
+                                path,
+                                index,
+                                direction,
+                                start: origin + start * extent,
+                                length: length * extent,
+                            }),
+                        );
                     });
                 }
             },

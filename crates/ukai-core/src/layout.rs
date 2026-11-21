@@ -61,7 +61,7 @@ pub enum Node {
     Split {
         direction: Direction,
         children: Vec<Node>,
-        /// Relative size of each child; rendered as flex weights.
+        /// Relative size of each child; shares of the split ([`Node::frames`]).
         sizes: Vec<f32>,
     },
 }
@@ -539,20 +539,132 @@ impl Layout {
     }
 }
 
-/// Where children `index` and `index + 1` of a split with `sizes` lie, for
-/// dragging the boundary between them: the offset of the first from the
-/// split's start and the length of both together, in a split `extent` long
-/// with a divider `gap` long between each two children. Then
-/// `(pointer - offset) / length` is the share [`Layout::resize`] takes.
-pub fn boundary_span(sizes: &[f32], index: usize, extent: f64, gap: f64) -> Option<(f64, f64)> {
-    if index + 1 >= sizes.len() {
-        return None;
+/// A rectangle of a tab's pane area, each coordinate a fraction of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Frame {
+    /// The whole pane area.
+    pub const FULL: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+
+    /// Where the frame starts along `direction`, and how long it is.
+    fn along(&self, direction: Direction) -> (f64, f64) {
+        match direction {
+            Direction::Horizontal => (self.x, self.width),
+            Direction::Vertical => (self.y, self.height),
+        }
     }
-    let total: f64 = sizes.iter().map(|s| f64::from(*s)).sum();
-    let space = (extent - gap * (sizes.len() - 1) as f64).max(0.0);
-    let length = |sizes: &[f32]| sizes.iter().map(|s| f64::from(*s)).sum::<f64>() / total * space;
-    let offset = length(&sizes[..index]) + gap * index as f64;
-    Some((offset, length(&sizes[index..index + 2]) + gap))
+}
+
+/// The boundary between children `index` and `index + 1` of the split at
+/// `path`, as the pane area shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Boundary {
+    pub path: Vec<usize>,
+    pub index: usize,
+    pub direction: Direction,
+    /// The line the boundary is drawn on: zero wide (or high) along
+    /// `direction`, across the whole split the other way.
+    pub line: Frame,
+    /// Where the two children beside it start along `direction`, and how
+    /// long they are together. A pointer at `start + share * length` puts
+    /// the boundary at the share [`Layout::resize`] takes.
+    pub span: (f64, f64),
+}
+
+/// Where each pane of a tree and each boundary between them lie in the
+/// pane area. Panes are placed rather than nested, so that a split, a move,
+/// or a resize changes where a pane is drawn but never what draws it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Frames {
+    /// In display order.
+    pub panes: Vec<(PaneId, Frame)>,
+    pub boundaries: Vec<Boundary>,
+}
+
+impl Node {
+    /// Lay the tree out over the whole pane area.
+    pub fn frames(&self) -> Frames {
+        let mut frames = Frames::default();
+        self.place(Frame::FULL, &mut Vec::new(), &mut frames);
+        frames
+    }
+
+    fn place(&self, frame: Frame, path: &mut Vec<usize>, out: &mut Frames) {
+        let Node::Split {
+            direction,
+            children,
+            sizes,
+        } = self
+        else {
+            if let Node::Pane(id) = self {
+                out.panes.push((*id, frame));
+            }
+            return;
+        };
+        let direction = *direction;
+        let total: f64 = sizes.iter().map(|s| f64::from(*s)).sum();
+        let (origin, extent) = frame.along(direction);
+        let length = |size: f32| {
+            if total > 0.0 {
+                f64::from(size) / total * extent
+            } else {
+                extent / children.len().max(1) as f64
+            }
+        };
+        let mut at = origin;
+        for (index, child) in children.iter().enumerate() {
+            let size = sizes.get(index).copied().unwrap_or(0.0);
+            let extent = length(size);
+            let child_frame = match direction {
+                Direction::Horizontal => Frame {
+                    x: at,
+                    width: extent,
+                    ..frame
+                },
+                Direction::Vertical => Frame {
+                    y: at,
+                    height: extent,
+                    ..frame
+                },
+            };
+            path.push(index);
+            child.place(child_frame, path, out);
+            path.pop();
+            at += extent;
+            if let Some(next) = sizes.get(index + 1).filter(|_| index + 1 < children.len()) {
+                let line = match direction {
+                    Direction::Horizontal => Frame {
+                        x: at,
+                        width: 0.0,
+                        ..frame
+                    },
+                    Direction::Vertical => Frame {
+                        y: at,
+                        height: 0.0,
+                        ..frame
+                    },
+                };
+                out.boundaries.push(Boundary {
+                    path: path.clone(),
+                    index,
+                    direction,
+                    line,
+                    span: (at - extent, extent + length(*next)),
+                });
+            }
+        }
+    }
 }
 
 /// `index + step` modulo `len` (which is at least 1).

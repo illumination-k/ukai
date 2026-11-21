@@ -183,13 +183,69 @@ fn resize_ignores_what_is_not_a_boundary(#[case] path: &[usize], #[case] index: 
     assert_eq!(layout, before);
 }
 
-#[rstest]
-#[case::first(0, Some((0.0, 201.0)))]
-#[case::second(1, Some((101.0, 301.0)))]
-#[case::past_the_end(2, None)]
-fn boundary_span_measures_the_pair(#[case] index: usize, #[case] expected: Option<(f64, f64)>) {
-    // 402 px with two 1 px dividers leaves 400 px for sizes 1:1:2.
-    assert_eq!(boundary_span(&[1.0, 1.0, 2.0], index, 402.0, 1.0), expected);
+fn frame(x: f64, y: f64, width: f64, height: f64) -> Frame {
+    Frame {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+#[test]
+fn a_single_pane_fills_the_area() {
+    assert_eq!(
+        p(0).frames(),
+        Frames {
+            panes: vec![(0, Frame::FULL)],
+            boundaries: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn frames_follow_sizes_and_nesting() {
+    // H[0 (1), V[1, 2] (3)]
+    let tree = sized(H, vec![p(0), split(V, vec![p(1), p(2)])], vec![1.0, 3.0]);
+    let frames = tree.frames();
+    assert_eq!(
+        frames.panes,
+        vec![
+            (0, frame(0.0, 0.0, 0.25, 1.0)),
+            (1, frame(0.25, 0.0, 0.75, 0.5)),
+            (2, frame(0.25, 0.5, 0.75, 0.5)),
+        ]
+    );
+    assert_eq!(
+        frames.boundaries,
+        vec![
+            Boundary {
+                path: Vec::new(),
+                index: 0,
+                direction: H,
+                line: frame(0.25, 0.0, 0.0, 1.0),
+                span: (0.0, 1.0),
+            },
+            Boundary {
+                path: vec![1],
+                index: 0,
+                direction: V,
+                line: frame(0.25, 0.5, 0.75, 0.0),
+                span: (0.0, 1.0),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_boundary_spans_only_its_two_children() {
+    let frames = sized(H, vec![p(0), p(1), p(2)], vec![1.0, 1.0, 2.0]).frames();
+    let spans: Vec<_> = frames
+        .boundaries
+        .iter()
+        .map(|b| (b.index, b.span))
+        .collect();
+    assert_eq!(spans, vec![(0, (0.0, 0.5)), (1, (0.25, 0.75))]);
 }
 
 #[test]
@@ -443,6 +499,23 @@ proptest! {
                 }
             }
             check_invariants(&layout)?;
+            check_frames(&layout.active_tab().root)?;
         }
     }
+}
+
+/// Frames tile the pane area: one per pane in display order, inside it,
+/// covering it exactly.
+fn check_frames(root: &Node) -> Result<(), TestCaseError> {
+    let frames = root.frames();
+    let ids: Vec<PaneId> = frames.panes.iter().map(|(id, _)| *id).collect();
+    prop_assert_eq!(ids, root.panes());
+    let mut area = 0.0;
+    for (_, f) in &frames.panes {
+        prop_assert!(f.x >= -1e-9 && f.y >= -1e-9);
+        prop_assert!(f.x + f.width <= 1.0 + 1e-9 && f.y + f.height <= 1.0 + 1e-9);
+        area += f.width * f.height;
+    }
+    prop_assert!((area - 1.0).abs() < 1e-6, "panes cover {area} of the area");
+    Ok(())
 }

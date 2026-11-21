@@ -1,6 +1,6 @@
 //! Agent panes: one ACP session per pane, kept outside the component tree.
 //!
-//! Splitting a pane or switching tabs remounts its component, so sessions,
+//! Switching tabs remounts a pane's component, so sessions,
 //! transcripts, and drafts live in [`Sessions`] (app-scoped signals keyed by
 //! pane id) rather than in component state. Closing a pane drops its entry,
 //! and with it the session.

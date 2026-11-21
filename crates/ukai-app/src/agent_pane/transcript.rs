@@ -12,10 +12,17 @@ use crate::projects::AppSignals;
 #[component]
 pub(super) fn TranscriptView(pane: PaneId) -> Element {
     let app = use_context::<AppSignals>();
-    let Some(session) = app.sessions.read().get(&pane).cloned() else {
+    // Only this pane's session: another pane connecting must not render
+    // this transcript again.
+    let current = use_memo(move || {
+        app.sessions
+            .read()
+            .get(&pane)
+            .map(|session| (session.transcript, session.composer))
+    });
+    let Some((mut transcript, composer)) = current() else {
         return rsx! {};
     };
-    let mut transcript = session.transcript;
     let status = transcript.read().status.clone();
     let idle = status == Status::Idle;
     let busy = status == Status::Busy;
@@ -48,13 +55,11 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
                             }
                             button {
                                 class: "outline",
-                                onclick: {
-                                    let handle = session.handle.clone();
-                                    move |_| {
-                                        transcript.write().skip_update();
-                                        if let Some(handle) = &handle {
-                                            handle.proceed();
-                                        }
+                                onclick: move |_| {
+                                    transcript.write().skip_update();
+                                    let handle = app.sessions.peek().get(&pane).and_then(|s| s.handle.clone());
+                                    if let Some(handle) = handle {
+                                        handle.proceed();
                                     }
                                 },
                                 "Start without updating"
@@ -82,7 +87,7 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
                     }
                 }
                 if let Some(steer) = steer {
-                    QueuedMessage { pane, steer, composer: session.composer }
+                    QueuedMessage { pane, steer, composer }
                 }
             }
         }
