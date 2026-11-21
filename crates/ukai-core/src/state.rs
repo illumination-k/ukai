@@ -1,7 +1,7 @@
 //! What survives a restart: registered projects with the model and effort
 //! their agents' new sessions start with, the tab/pane layout, including
 //! each agent pane's ACP session id so it can be continued, and what of the
-//! sidebar is folded, and the branch each session last worked on.
+//! sidebar is folded and whether it is hidden, and the branch each session last worked on.
 //!
 //! One versioned JSON document, written atomically. Transcripts are not
 //! stored: agents that support `session/load` replay them.
@@ -27,6 +27,8 @@ pub struct AppState {
     pub layout: Layout,
     #[serde(default, skip_serializing_if = "Folds::is_empty")]
     pub sidebar: Folds,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sidebar_hidden: bool,
     #[serde(default, skip_serializing_if = "SessionBranches::is_empty")]
     pub branches: SessionBranches,
 }
@@ -58,6 +60,7 @@ impl AppState {
         projects: Projects,
         layout: Layout,
         sidebar: Folds,
+        sidebar_hidden: bool,
         branches: SessionBranches,
     ) -> Self {
         Self {
@@ -65,6 +68,7 @@ impl AppState {
             projects,
             layout,
             sidebar,
+            sidebar_hidden,
             branches,
         }
     }
@@ -219,7 +223,7 @@ mod tests {
             },
             "feature/x".into(),
         );
-        AppState::new(projects, layout, sidebar, branches)
+        AppState::new(projects, layout, sidebar, true, branches)
     }
 
     #[test]

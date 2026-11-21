@@ -56,6 +56,8 @@ pub struct AppSignals {
     pub knowledge: KnowledgeListings,
     /// What of the sidebar's tree is folded.
     pub folds: Signal<Folds>,
+    /// Whether the sidebar is hidden.
+    pub sidebar_hidden: Signal<bool>,
     /// The branch each session last worked on (`crate::agent_pane::branch`).
     pub branches: Signal<SessionBranches>,
     /// Whether the command palette is open.

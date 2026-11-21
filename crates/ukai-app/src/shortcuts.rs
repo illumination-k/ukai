@@ -120,6 +120,10 @@ fn perform(app: AppSignals, action: Action) {
     let focused = layout.peek().focused();
     match action {
         Action::Palette => palette.toggle(),
+        Action::ToggleSidebar => {
+            let mut hidden = app.sidebar_hidden;
+            hidden.toggle();
+        }
         Action::NewTab => {
             layout.write().new_tab();
         }

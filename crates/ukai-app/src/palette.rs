@@ -27,6 +27,7 @@ enum Action {
     Split(Direction),
     ClosePane,
     OpenProject,
+    ToggleSidebar,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +130,11 @@ fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
             Action::ClosePane,
             Some(keymap::Action::ClosePane),
         ),
+        command(
+            "Toggle sidebar",
+            Action::ToggleSidebar,
+            Some(keymap::Action::ToggleSidebar),
+        ),
         command("Open project…", Action::OpenProject, None),
     ]);
     items
@@ -153,6 +159,10 @@ fn perform(app: AppSignals, paths: &Paths, action: Action) {
         }
         Action::ClosePane => close_pane(app, focused),
         Action::OpenProject => pick_and_add_project(paths.clone(), app),
+        Action::ToggleSidebar => {
+            let mut hidden = app.sidebar_hidden;
+            hidden.toggle();
+        }
     }
 }
 

@@ -95,10 +95,11 @@ pub fn Sidebar() -> Element {
         }
     });
 
-    let class = if shown.is_some() {
-        "sidebar wide"
-    } else {
-        "sidebar"
+    // Hidden rather than unmounted, so it comes back as it was left.
+    let class = match (*app.sidebar_hidden.read(), shown.is_some()) {
+        (true, _) => "sidebar hidden",
+        (false, true) => "sidebar wide",
+        (false, false) => "sidebar",
     };
 
     rsx! {

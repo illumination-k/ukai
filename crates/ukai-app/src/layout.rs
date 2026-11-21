@@ -430,8 +430,19 @@ fn TabBar() -> Element {
         (tabs, current.active())
     };
 
+    let mut sidebar_hidden = app.sidebar_hidden;
+
     rsx! {
         nav { class: "tabbar",
+            button {
+                class: "icon sidebar-toggle",
+                title: shortcuts.title(
+                    if sidebar_hidden() { "Show sidebar" } else { "Hide sidebar" },
+                    Action::ToggleSidebar,
+                ),
+                onclick: move |_| sidebar_hidden.toggle(),
+                Svg { icon: Icon::Sidebar }
+            }
             for (index, label, hint, count, state, unread) in tabs {
                 div {
                     key: "{index}",
