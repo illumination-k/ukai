@@ -17,7 +17,7 @@ use ukai_core::knowledge::{Editor, Note, NoteSpec, NoteWrite};
 use ukai_proto::knowledge::v1 as pb;
 use ukai_proto::knowledge::v1::change_response::Outcome;
 
-use crate::store::{Knowledge, KnowledgeError};
+use super::store::{Knowledge, KnowledgeError};
 
 /// Changes one agent pod's workspace may make per [`WORKSPACE_WINDOW`]: a
 /// session that read something hostile cannot flood the store with notes

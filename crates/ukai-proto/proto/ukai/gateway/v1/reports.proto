@@ -1,0 +1,25 @@
+// What the gateway answers its agent pods about reports, over gRPC and
+// gRPC-Web on its own port. See "セッションのレポート" in docs/design.md.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/reports/v1/reports.proto";
+
+// Publishing a report of an agent pod's own workspace, with its relay's
+// token: the gateway finds the pod by it, and the workspace from the pod's
+// Job, never from the request. Clients read who published what with the
+// workspace's report listing (`/agents/<id>/reports`). UNAVAILABLE, a
+// gateway that keeps no store, or cannot reach it now.
+service WorkspaceReports {
+  rpc Publish(WorkspacePublishRequest) returns (ukai.reports.v1.PublishResponse);
+}
+
+message WorkspacePublishRequest {
+  // The ACP session publishing it, as the relay told the agent's MCP
+  // server.
+  string session = 1;
+  // Relative to the checkout, e.g. `reports/run.html`.
+  string path = 2;
+  optional string title = 3;
+}

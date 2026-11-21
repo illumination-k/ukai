@@ -16,9 +16,9 @@ rust-version = "1.97"
 ukai-acp = { path = "crates/ukai-acp" }
 ukai-config = { path = "crates/ukai-config" }
 ukai-core = { path = "crates/ukai-core" }
-ukai-knowledge = { path = "crates/ukai-knowledge" }
 ukai-proto = { path = "crates/ukai-proto" }
 ukai-relay = { path = "crates/ukai-relay" }
+ukai-store = { path = "crates/ukai-store" }
 ukai-voice = { path = "crates/ukai-voice" }
 
 agent-client-protocol = "3.3"
@@ -64,7 +64,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 similar = "3"
-# ukai-knowledge's store, reached over WebSocket; engines are opted into
+# ukai-store's store, reached over WebSocket; engines are opted into
 # where needed (`kv-mem` in tests).
 surrealdb = { version = "4.0", default-features = false, features = ["protocol-ws", "rustls"] }
 tempfile = "3"

@@ -20,7 +20,10 @@
 //! - A client's `cwd` names a directory on its own machine, not the agent's,
 //!   so session setup is pointed at the relay's working directory instead,
 //!   and given the relay's own MCP servers (see [`crate::mcp`]) next to the
-//!   client's.
+//!   client's. Each setup gives those servers a key of their own
+//!   ([`SESSION_KEY_ENV`]), and once the agent answers, the hub says which
+//!   session the key is ([`Output::SessionKey`]): a server is started before
+//!   the agent names the session it serves, and this is how it learns it.
 //!
 //! Every input returns the messages to send; nothing here does I/O.
 
@@ -34,6 +37,10 @@ pub type ConnId = u64;
 /// Notification the relay sends about a session's prompt turn.
 pub const TURN_STATE: &str = "_ukai/turn_state";
 
+/// The environment variable that gives the relay's MCP servers of one
+/// session setup their key; [`Output::SessionKey`] says which session it is.
+pub const SESSION_KEY_ENV: &str = "UKAI_SESSION_KEY";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Output {
     Agent(Value),
@@ -41,6 +48,11 @@ pub enum Output {
     /// A session's prompt turn finished, whoever was connected: a point to
     /// snapshot the work.
     TurnEnded(String),
+    /// The relay's MCP servers given `key` serve `session`.
+    SessionKey {
+        key: String,
+        session: String,
+    },
 }
 
 /// What a request the relay sent to the agent was for.
@@ -125,6 +137,11 @@ pub struct Hub {
     to_client: BTreeMap<u64, (String, String)>,
     sessions: BTreeMap<String, Session>,
     conns: BTreeSet<ConnId>,
+    /// Keys handed out so far, for the next to be new.
+    keys_given: u64,
+    /// Key given to the MCP servers of a setup forwarded to the agent, by
+    /// the id of the request, until it answers.
+    keys: BTreeMap<u64, String>,
 }
 
 impl Hub {
@@ -219,7 +236,26 @@ impl Hub {
         mut message: Value,
     ) -> Vec<Output> {
         let session = session_id(&message);
-        self.set_up_here(method, &mut message);
+        let key = self.set_up_here(method, &mut message);
+        let outputs = self.client_request_set_up(conn, id, method, session, message);
+        // A setup forwarded to the agent starts the servers given the key.
+        if let (Some(key), [Output::Agent(sent), ..]) = (key, outputs.as_slice())
+            && let Some(ours) = sent.get("id").and_then(Value::as_u64)
+            && sent.get("method").and_then(Value::as_str) == Some(method)
+        {
+            self.keys.insert(ours, key);
+        }
+        outputs
+    }
+
+    fn client_request_set_up(
+        &mut self,
+        conn: ConnId,
+        id: Value,
+        method: &str,
+        session: Option<String>,
+        mut message: Value,
+    ) -> Vec<Output> {
         match method {
             "initialize" => match &self.agent_init {
                 Some(init) => vec![Output::Client(conn, result(id, init.clone()))],
@@ -269,33 +305,39 @@ impl Hub {
         }
     }
 
-    /// Point session setup at the relay's directory and MCP servers.
-    fn set_up_here(&self, method: &str, message: &mut Value) {
+    /// Point session setup at the relay's directory and MCP servers, the
+    /// servers given a new key, which is returned.
+    fn set_up_here(&mut self, method: &str, message: &mut Value) -> Option<String> {
         let setup = matches!(method, "session/new" | "session/load" | "session/resume");
         if !setup && method != "session/list" {
-            return;
+            return None;
         }
-        let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) else {
-            return;
-        };
+        let params = message.get_mut("params").and_then(Value::as_object_mut)?;
         if let Some(cwd) = &self.cwd {
             params.insert("cwd".to_owned(), json!(cwd));
         }
         if !setup || self.mcp_servers.is_empty() {
-            return;
+            return None;
         }
+        self.keys_given += 1;
+        let key = format!("k{}", self.keys_given);
         let servers = params
             .entry("mcpServers")
             .or_insert_with(|| Value::Array(Vec::new()));
-        if let Some(servers) = servers.as_array_mut() {
-            let ours = |server: &Value| {
-                self.mcp_servers
-                    .iter()
-                    .any(|mine| mine.get("name") == server.get("name"))
-            };
-            servers.retain(|server| !ours(server));
-            servers.extend(self.mcp_servers.iter().cloned());
-        }
+        let servers = servers.as_array_mut()?;
+        let ours = |server: &Value| {
+            self.mcp_servers
+                .iter()
+                .any(|mine| mine.get("name") == server.get("name"))
+        };
+        servers.retain(|server| !ours(server));
+        servers.extend(self.mcp_servers.iter().cloned().map(|mut server| {
+            if let Some(env) = server.get_mut("env").and_then(Value::as_array_mut) {
+                env.push(json!({ "name": SESSION_KEY_ENV, "value": key }));
+            }
+            server
+        }));
+        Some(key)
     }
 
     fn forward(
@@ -442,6 +484,7 @@ impl Hub {
         let Some(origin) = id.as_u64().and_then(|ours| self.to_agent.remove(&ours)) else {
             return Vec::new();
         };
+        let key = id.as_u64().and_then(|ours| self.keys.remove(&ours));
         let Origin::Client {
             conn,
             id: client_id,
@@ -453,6 +496,14 @@ impl Hub {
         };
         message["id"] = client_id;
         let mut outputs = Vec::new();
+        let named = message
+            .pointer("/result/sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| session.clone().filter(|_| message.get("result").is_some()));
+        if let (Some(key), Some(session)) = (key, named) {
+            outputs.push(Output::SessionKey { key, session });
+        }
         match (method.as_str(), session) {
             ("session/new", _) => self.session_created(conn, &message),
             ("session/load" | "session/resume", Some(sid)) => self.session_restored(&sid, &message),

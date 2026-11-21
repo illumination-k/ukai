@@ -341,7 +341,7 @@ pub fn requested_key(workspace: &str, url_path: &str) -> Option<Path> {
 
 /// The checkout-relative path a percent-encoded URL path names, as the
 /// manifest has it: decoded once, without the leading `/`.
-fn requested_path(url_path: &str) -> Option<String> {
+pub fn requested_path(url_path: &str) -> Option<String> {
     let decoded = percent_encoding::percent_decode_str(url_path)
         .decode_utf8()
         .ok()?;
@@ -562,6 +562,7 @@ mod tests {
                     .map(|path| Entry {
                         path: path.clone(),
                         modified: Some(1),
+                        published: Vec::new(),
                     })
                     .collect(),
                 synced: None,

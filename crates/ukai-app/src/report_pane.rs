@@ -31,6 +31,7 @@ use dioxus::prelude::*;
 use ukai_acp::ReportsEndpoint;
 use ukai_acp::reports::ReportsError;
 use ukai_core::markdown::LINK_SCHEMES;
+use ukai_core::publication::Sessions;
 use ukai_core::report::{self, CONFINED_CSP, IMAGE_VIEW_QUERY, ReportFile, ReportKind};
 use ukai_core::sidebar::{Fold, Node};
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource};
@@ -318,7 +319,7 @@ pub fn delete_report(
         // runs for, which would stop it halfway.
         if let Some(workspace) = Workspace::at(&project, &source) {
             let mut reports = app.reports;
-            if let Some(Listing::Reports(paths) | Listing::Saved { paths, .. }) =
+            if let Some(Listing::Reports(paths, _) | Listing::Saved { paths, .. }) =
                 reports.write().get_mut(&workspace)
             {
                 paths.retain(|listed| *listed != path);
@@ -657,13 +658,13 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
         }
     });
     let listing = match Workspace::at(&project, &place) {
-        None => Listing::Reports(found()),
+        None => Listing::Reports(found(), Sessions::default()),
         Some(workspace) => app
             .reports
             .read()
             .get(&workspace)
             .cloned()
-            .unwrap_or(Listing::Reports(Vec::new())),
+            .unwrap_or(Listing::Reports(Vec::new(), Sessions::default())),
     };
     let fold = Fold::new(
         &project,
@@ -673,8 +674,10 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
     );
     let open_now = app.folds.read().is_open(&fold);
     let open = layout_open_reports(&app.layout.read(), &project);
+    // Whose reports go first: the focused agent pane's, if it works here.
+    let session = ukai_core::publication::focused_session(&app.layout.read(), &project, &place);
     let count = match &listing {
-        Listing::Reports(paths) | Listing::Saved { paths, .. } if !paths.is_empty() => {
+        Listing::Reports(paths, _) | Listing::Saved { paths, .. } if !paths.is_empty() => {
             paths.len().to_string()
         }
         _ => String::new(),
@@ -711,7 +714,7 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
                 Listing::Failed(problem) => rsx! {
                     pre { class: "config-error tree-hint", style: "--depth: {inner}", "{problem}" }
                 },
-                Listing::Reports(paths) if paths.is_empty() => rsx! {
+                Listing::Reports(paths, _) if paths.is_empty() => rsx! {
                     if local && !watched {
                         p { class: "muted hint tree-hint", style: "--depth: {inner}",
                             "List them here with "
@@ -722,39 +725,100 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
                         p { class: "muted hint tree-hint", style: "--depth: {inner}", "No reports yet." }
                     }
                 },
-                Listing::Saved { paths, synced } => rsx! {
+                Listing::Saved { paths, synced, sessions } => rsx! {
                     p {
                         class: "muted hint tree-hint",
                         style: "--depth: {inner}",
                         title: "The workspace is not running; these are the copies the gateway kept.",
                         "Saved {when_unix(synced as i64, local_now())} · not running"
                     }
-                    for path in paths {
-                        ReportRow {
-                            key: "{path.display()}",
-                            project: project.clone(),
-                            path: path.clone(),
-                            source: place.clone(),
-                            open: open.clone(),
-                            depth: inner,
-                            found,
-                        }
+                    ReportList {
+                        project: project.clone(),
+                        place: place.clone(),
+                        paths,
+                        sessions,
+                        session: session.clone(),
+                        open: open.clone(),
+                        depth: inner,
+                        found,
                     }
                 },
-                Listing::Reports(paths) => rsx! {
-                    for path in paths {
-                        ReportRow {
-                            key: "{path.display()}",
-                            project: project.clone(),
-                            path: path.clone(),
-                            source: place.clone(),
-                            open: open.clone(),
-                            depth: inner,
-                            found,
-                        }
+                Listing::Reports(paths, sessions) => rsx! {
+                    ReportList {
+                        project: project.clone(),
+                        place: place.clone(),
+                        paths,
+                        sessions,
+                        session: session.clone(),
+                        open: open.clone(),
+                        depth: inner,
+                        found,
                     }
                 },
             }
+        }
+    }
+}
+
+/// A workspace's reports: those the focused session published first, when
+/// it works here and any session published anything, then the rest, which
+/// other sessions published or nobody did.
+#[component]
+fn ReportList(
+    project: ProjectId,
+    place: ReportSource,
+    paths: Vec<PathBuf>,
+    sessions: Sessions,
+    session: Option<String>,
+    open: Vec<(PaneId, PathBuf, ReportSource)>,
+    depth: u8,
+    found: Signal<Vec<PathBuf>>,
+) -> Element {
+    let (mine, rest) = match &session {
+        Some(session) if !sessions.is_empty() => {
+            let (mine, rest) = sessions.split(&paths, session);
+            (
+                Some(mine.into_iter().cloned().collect::<Vec<_>>()),
+                rest.into_iter().cloned().collect::<Vec<_>>(),
+            )
+        }
+        _ => (None, paths),
+    };
+    let row = |path: PathBuf| {
+        rsx! {
+            ReportRow {
+                key: "{path.display()}",
+                project: project.clone(),
+                label: sessions.title(&path).map(str::to_owned),
+                path,
+                source: place.clone(),
+                open: open.clone(),
+                depth,
+                found,
+            }
+        }
+    };
+    rsx! {
+        if let Some(mine) = mine {
+            if mine.is_empty() {
+                p { class: "muted hint tree-hint", style: "--depth: {depth}",
+                    "This session has published no report yet."
+                }
+            }
+            for path in mine {
+                {row(path)}
+            }
+            if !rest.is_empty() {
+                p {
+                    class: "muted hint tree-hint",
+                    style: "--depth: {depth}",
+                    title: "Reports other sessions published here, or that nobody published",
+                    "Other sessions"
+                }
+            }
+        }
+        for path in rest {
+            {row(path)}
         }
     }
 }
@@ -766,6 +830,9 @@ pub fn ReportGroup(project: ProjectId, place: ReportSource, depth: u8) -> Elemen
 fn ReportRow(
     project: ProjectId,
     path: PathBuf,
+    /// What the session that published it called it.
+    #[props(default)]
+    label: Option<String>,
     source: ReportSource,
     open: Vec<(PaneId, PathBuf, ReportSource)>,
     depth: u8,
@@ -786,12 +853,18 @@ fn ReportRow(
         .unwrap_or_default();
     let saved = (project.clone(), path.clone(), source.clone());
     let deleted = saved.clone();
+    let hint = match &label {
+        Some(label) => format!("{label} · {}", path.display()),
+        None => path.display().to_string(),
+    };
+    // A published report goes by the title its session gave it.
+    let name = label.unwrap_or(name);
 
     rsx! {
         div {
             class: if shown.is_some() { "row report-row open" } else { "row report-row" },
             style: "--depth: {depth}",
-            title: "{path.display()}",
+            title: "{hint}",
             onclick: move |_| {
                 if let Some(pane) = shown {
                     let mut layout = app.layout;

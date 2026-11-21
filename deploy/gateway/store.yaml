@@ -1,26 +1,27 @@
-# ukai-knowledge: keeps the notes the gateway's agents and their people
-# write (in SurrealDB, surrealdb.yaml), and answers the gateway over gRPC.
+# ukai-store: keeps the notes the gateway's agents and their people
+# write, and which session published which report (in SurrealDB,
+# surrealdb.yaml), and answers the gateway over gRPC.
 # The gateway tells it who is asking, so nothing else may reach it: it
-# answers only the token in the Secret `ukai-knowledge` (key `token`), which
+# answers only the token in the Secret `ukai-store` (key `token`), which
 # the gateway holds too and agent pods never get, and the NetworkPolicy
 # below lets in the gateway alone. This base does not create the Secret:
-#   kubectl create secret generic ukai-knowledge \
+#   kubectl create secret generic ukai-store \
 #     --from-literal=token="$(openssl rand -hex 32)"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ukai-knowledge
+  name: ukai-store
   labels:
-    app.kubernetes.io/name: ukai-knowledge
+    app.kubernetes.io/name: ukai-store
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: ukai-knowledge
+      app.kubernetes.io/name: ukai-store
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: ukai-knowledge
+        app.kubernetes.io/name: ukai-store
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -30,23 +31,23 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: knowledge
+        - name: store
           image: ukai-runtime
-          command: ["ukai-knowledge"]
+          command: ["ukai-store"]
           env:
-            - name: UKAI_KNOWLEDGE_TOKEN
+            - name: UKAI_STORE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: ukai-knowledge
+                  name: ukai-store
                   key: token
-            - name: UKAI_KNOWLEDGE_STORE
+            - name: UKAI_STORE_DB
               value: ws://ukai-surrealdb:8000
-            - name: UKAI_KNOWLEDGE_STORE_USER
+            - name: UKAI_STORE_DB_USER
               valueFrom:
                 secretKeyRef:
                   name: ukai-surrealdb
                   key: user
-            - name: UKAI_KNOWLEDGE_STORE_PASS
+            - name: UKAI_STORE_DB_PASS
               valueFrom:
                 secretKeyRef:
                   name: ukai-surrealdb
@@ -73,13 +74,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: ukai-knowledge
+  name: ukai-store
   labels:
-    app.kubernetes.io/name: ukai-knowledge
+    app.kubernetes.io/name: ukai-store
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: ukai-knowledge
+    app.kubernetes.io/name: ukai-store
   ports:
     - name: grpc
       port: 50051
@@ -92,13 +93,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: ukai-knowledge
+  name: ukai-store
   labels:
-    app.kubernetes.io/name: ukai-knowledge
+    app.kubernetes.io/name: ukai-store
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: ukai-knowledge
+      app.kubernetes.io/name: ukai-store
   policyTypes: ["Ingress"]
   ingress:
     - from:

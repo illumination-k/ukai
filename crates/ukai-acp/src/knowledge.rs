@@ -328,19 +328,9 @@ impl KnowledgeEndpoint {
     /// What an agent pod uses: the gateway at `gateway` (e.g.
     /// `http://ukai-gateway`), with its relay's `token`.
     pub fn for_workspace(gateway: &str, token: &str) -> Result<Self, ResolveError> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| ResolveError::InvalidHeader("authorization".to_owned()))?;
-        value.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, value);
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(TIMEOUT)
-            .build()
-            .map_err(|error| ResolveError::Client(error.to_string()))?;
-        let root = gateway.trim_end_matches('/').to_owned();
+        let (channel, root) = grpc::pod_channel(gateway, token, TIMEOUT)?;
         Ok(Self {
-            channel: grpc::channel(client, root.clone()),
+            channel,
             root,
             asker: Asker::Workspace,
         })

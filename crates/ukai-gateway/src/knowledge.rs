@@ -1,12 +1,12 @@
 //! Knowledge, as the gateway serves it: `ukai.gateway.v1.Knowledge` to its
 //! clients and `WorkspaceKnowledge` to its agent pods (gRPC and gRPC-Web, on
-//! its own port), each answered by asking `ukai-knowledge`
+//! its own port), each answered by asking `ukai-store`
 //! (`ukai.knowledge.v1.KnowledgeStore`) on behalf of whoever is asking.
 //!
 //! The gateway is what can tell who that is: a person by the gateway's
 //! token, whose scope is their agent's in `gateway.toml`, or an agent pod by
 //! its relay's token, whose scope and workspace its Job says. It names that
-//! [`Caller`] to `ukai-knowledge`, which believes it and is reached with the
+//! [`Caller`] to `ukai-store`, which believes it and is reached with the
 //! token the two share. What the service answers goes back as it is.
 
 use std::sync::Arc;
@@ -45,7 +45,7 @@ impl From<&Caller> for pb::Caller {
     }
 }
 
-/// `ukai-knowledge`, at the address the gateway was given.
+/// `ukai-store`, at the address the gateway was given.
 #[derive(Clone)]
 pub struct KnowledgeClient {
     client: KnowledgeStoreClient<Channel>,
@@ -53,19 +53,51 @@ pub struct KnowledgeClient {
     token: MetadataValue<Ascii>,
 }
 
+/// The channel to `ukai-store` at `url` (`http://ukai-store:50051`),
+/// connecting on first use so the gateway starts without it, and the
+/// `authorization` it is asked with.
+pub fn connect(url: &str, token: &str) -> Result<(Channel, MetadataValue<Ascii>), String> {
+    let channel = Endpoint::from_shared(url.to_owned())
+        .map_err(|error| format!("{url}: {error}"))?
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(TIMEOUT)
+        .connect_lazy();
+    let mut token: MetadataValue<Ascii> = format!("Bearer {token}")
+        .parse()
+        .map_err(|_| "the store token is not a valid header value".to_owned())?;
+    token.set_sensitive(true);
+    Ok((channel, token))
+}
+
+/// `message` with the gateway's `token` for the store.
+pub fn request<T>(token: &MetadataValue<Ascii>, message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", token.clone());
+    request
+}
+
+/// What the store said to the gateway, as the gateway's caller should hear
+/// it: the store refusing the gateway's own token is the gateway's failure,
+/// not the caller's.
+pub fn answer<T>(result: Result<Response<T>, Status>) -> Result<T, Status> {
+    match result {
+        Ok(response) => Ok(response.into_inner()),
+        Err(status) if status.code() == Code::Unauthenticated => {
+            tracing::warn!("ukai-store does not take the gateway's UKAI_STORE_TOKEN");
+            Err(Status::internal(
+                "the gateway cannot authenticate to its store",
+            ))
+        }
+        Err(status) => Err(status),
+    }
+}
+
 impl KnowledgeClient {
-    /// A client of the service at `url` (`http://ukai-knowledge:50051`),
-    /// connecting on first use, so the gateway starts without it.
+    /// A client of the store at `url`; see [`connect`].
     pub fn new(url: &str, token: &str) -> Result<Self, String> {
-        let channel = Endpoint::from_shared(url.to_owned())
-            .map_err(|error| format!("{url}: {error}"))?
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(TIMEOUT)
-            .connect_lazy();
-        let mut token: MetadataValue<Ascii> = format!("Bearer {token}")
-            .parse()
-            .map_err(|_| "the knowledge token is not a valid header value".to_owned())?;
-        token.set_sensitive(true);
+        let (channel, token) = connect(url, token)?;
         Ok(Self {
             client: KnowledgeStoreClient::new(channel),
             token,
@@ -73,27 +105,11 @@ impl KnowledgeClient {
     }
 
     fn request<T>(&self, message: T) -> Request<T> {
-        let mut request = Request::new(message);
-        request
-            .metadata_mut()
-            .insert("authorization", self.token.clone());
-        request
+        request(&self.token, message)
     }
 
-    /// What the service said to the gateway, as the gateway's caller should
-    /// hear it: the service refusing the gateway's own token is the
-    /// gateway's failure, not the caller's.
     fn answer<T>(result: Result<Response<T>, Status>) -> Result<T, Status> {
-        match result {
-            Ok(response) => Ok(response.into_inner()),
-            Err(status) if status.code() == Code::Unauthenticated => {
-                tracing::warn!("ukai-knowledge does not take the gateway's UKAI_KNOWLEDGE_TOKEN");
-                Err(Status::internal(
-                    "the gateway cannot authenticate to its knowledge",
-                ))
-            }
-            Err(status) => Err(status),
-        }
+        answer(result)
     }
 
     async fn list(&self, caller: &Caller) -> Result<pb::ListResponse, Status> {
@@ -176,17 +192,17 @@ impl KnowledgeClient {
     }
 }
 
-/// `ukai-knowledge`, or why there is none to ask.
+/// `ukai-store`, or why there is none to ask.
 fn store(gateway: &Gateway) -> Result<&KnowledgeClient, Status> {
     gateway.knowledge.as_ref().ok_or_else(|| {
         Status::unavailable(
-            "this gateway keeps no knowledge: set UKAI_KNOWLEDGE_URL and UKAI_KNOWLEDGE_TOKEN",
+            "this gateway keeps no knowledge: set UKAI_STORE_URL and UKAI_STORE_TOKEN",
         )
     })
 }
 
 /// The bearer token of a request.
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -316,23 +332,31 @@ impl PodKnowledge {
     /// there is none. The scope and workspace are the pod's Job's, never the
     /// pod's say.
     async fn caller<T>(&self, request: &Request<T>) -> Result<(Caller, &KnowledgeClient), Status> {
-        let headers = request.metadata().clone().into_headers();
-        let token = bearer(&headers)
-            .ok_or_else(|| Status::unauthenticated("a pod asks with its relay's token"))?;
-        let pod = match self.gateway.cluster.pod_of(token).await {
-            Ok(Some(pod)) => pod,
-            Ok(None) => return Err(Status::unauthenticated("no agent pod has this token")),
-            Err(error) => {
-                tracing::warn!(%error, "cannot look up the pod asking for knowledge");
-                return Err(Status::unavailable("cannot look up the pod asking"));
-            }
-        };
+        let pod = pod_asking(&self.gateway, request).await?;
         let caller = Caller {
             scope: pod.scope,
             editor: Editor::Agent,
             workspace: Some(pod.workspace),
         };
         Ok((caller, store(&self.gateway)?))
+    }
+}
+
+/// The agent pod whose relay token `request` carries, as its Job says.
+pub async fn pod_asking<T>(
+    gateway: &Gateway,
+    request: &Request<T>,
+) -> Result<crate::cluster::PodIdentity, Status> {
+    let headers = request.metadata().clone().into_headers();
+    let token = bearer(&headers)
+        .ok_or_else(|| Status::unauthenticated("a pod asks with its relay's token"))?;
+    match gateway.cluster.pod_of(token).await {
+        Ok(Some(pod)) => Ok(pod),
+        Ok(None) => Err(Status::unauthenticated("no agent pod has this token")),
+        Err(error) => {
+            tracing::warn!(%error, "cannot look up the pod asking");
+            Err(Status::unavailable("cannot look up the pod asking"))
+        }
     }
 }
 
@@ -423,15 +447,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_services_refusal_of_the_gateway_is_the_gateways_failure() {
-        let refused = KnowledgeClient::answer::<()>(Err(Status::unauthenticated("no")));
+        let refused = answer::<()>(Err(Status::unauthenticated("no")));
         assert_eq!(refused.map_err(|s| s.code()), Err(Code::Internal));
-        let missing = KnowledgeClient::answer::<()>(Err(Status::not_found("no")));
+        let missing = answer::<()>(Err(Status::not_found("no")));
         assert_eq!(missing.map_err(|s| s.code()), Err(Code::NotFound));
     }
 
     #[tokio::test]
     async fn the_token_is_never_shown() {
-        let client = KnowledgeClient::new("http://ukai-knowledge:50051", "s3cret")
+        let client = KnowledgeClient::new("http://ukai-store:50051", "s3cret")
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(!format!("{:?}", client.token).contains("s3cret"));
     }

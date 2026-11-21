@@ -3,11 +3,20 @@
 //! in the rest of ukai, and the conversions to the types it works with, are
 //! where those types are (`ukai_acp::knowledge`).
 
-/// `ukai.knowledge.v1`: the notes `ukai-knowledge` keeps for the gateway.
+/// `ukai.knowledge.v1`: the notes `ukai-store` keeps for the gateway.
 pub mod knowledge {
     pub mod v1 {
         #![allow(clippy::all, clippy::pedantic, missing_docs)]
         tonic::include_proto!("ukai.knowledge.v1");
+    }
+}
+
+/// `ukai.reports.v1`: which session published which report, as
+/// `ukai-store` keeps it for the gateway.
+pub mod reports {
+    pub mod v1 {
+        #![allow(clippy::all, clippy::pedantic, missing_docs)]
+        tonic::include_proto!("ukai.reports.v1");
     }
 }
 

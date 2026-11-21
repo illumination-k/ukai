@@ -1,4 +1,4 @@
-//! The gateway and `ukai-knowledge` as deployed, checked from outside by
+//! The gateway and `ukai-store` as deployed, checked from outside by
 //! e2e/gateway/run.sh against a kind cluster; ignored otherwise. A person's
 //! side goes through the gateway with the app's own client, and an agent's
 //! is played on the knowledge service directly, with the token the gateway
@@ -6,7 +6,7 @@
 //!
 //! Environment (set by the script):
 //! - `UKAI_E2E_GATEWAY`, `UKAI_E2E_GATEWAY_TOKEN`: the gateway, port-forwarded
-//! - `UKAI_E2E_KNOWLEDGE`, `UKAI_E2E_KNOWLEDGE_TOKEN`: `ukai-knowledge`, likewise
+//! - `UKAI_E2E_STORE`, `UKAI_E2E_STORE_TOKEN`: `ukai-store`, likewise
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,7 +55,7 @@ fn person() -> KnowledgeEndpoint {
     .unwrap_or_else(|| panic!("a gateway agent has knowledge"))
 }
 
-/// `ukai-knowledge` itself, presenting `token`.
+/// `ukai-store` itself, presenting `token`.
 struct Service {
     client: KnowledgeStoreClient<Channel>,
     token: String,
@@ -63,7 +63,7 @@ struct Service {
 
 impl Service {
     async fn connect(token: &str) -> Self {
-        let client = KnowledgeStoreClient::connect(env("UKAI_E2E_KNOWLEDGE"))
+        let client = KnowledgeStoreClient::connect(env("UKAI_E2E_STORE"))
             .await
             .unwrap_or_else(|e| panic!("connect: {e}"));
         Self {
@@ -180,7 +180,7 @@ async fn a_person_writes_reads_and_deletes_a_note_through_the_gateway() {
 #[ignore = "needs a cluster: e2e/gateway/run.sh"]
 async fn a_person_approves_and_rejects_what_an_agent_wrote() {
     let notes = person();
-    let mut service = Service::connect(&env("UKAI_E2E_KNOWLEDGE_TOKEN")).await;
+    let mut service = Service::connect(&env("UKAI_E2E_STORE_TOKEN")).await;
 
     // Approved, then a newer revision rejected: back to the approved one.
     let name = fresh("agent");
@@ -237,7 +237,7 @@ async fn the_knowledge_service_answers_its_token_only() {
         let status = service.client.list(request).await.map(drop);
         assert_eq!(status.map_err(|s| s.code()), Err(Code::Unauthenticated));
     }
-    let mut service = Service::connect(&env("UKAI_E2E_KNOWLEDGE_TOKEN")).await;
+    let mut service = Service::connect(&env("UKAI_E2E_STORE_TOKEN")).await;
     let request = service.request(pb::ListRequest {
         caller: Some(agent()),
     });
@@ -480,4 +480,89 @@ async fn the_gateway_answers_plain_grpc_too() {
         .await
         .map(drop);
     assert_eq!(anonymous.map_err(|s| s.code()), Err(Code::Unauthenticated));
+}
+
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn the_store_keeps_who_published_which_report() {
+    use ukai_proto::reports::v1 as reports;
+    use ukai_proto::reports::v1::report_store_client::ReportStoreClient;
+
+    let mut store = ReportStoreClient::connect(env("UKAI_E2E_STORE"))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    fn as_gateway<T>(message: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", env("UKAI_E2E_STORE_TOKEN"))
+                .parse()
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        request
+    }
+    let workspace = fresh("e2e-workspace");
+    let published = store
+        .publish(as_gateway(reports::PublishRequest {
+            workspace: workspace.clone(),
+            publication: Some(reports::Publication {
+                session: "s1".into(),
+                path: "reports/run.html".into(),
+                title: Some("Run".into()),
+                published: 0,
+            }),
+        }))
+        .await
+        .unwrap_or_else(|status| panic!("{status:?}"))
+        .into_inner();
+    assert!(published.problems.is_empty(), "{published:?}");
+    let listed = store
+        .list(as_gateway(reports::ListRequest {
+            workspace: workspace.clone(),
+        }))
+        .await
+        .unwrap_or_else(|status| panic!("{status:?}"))
+        .into_inner();
+    assert_eq!(listed.publications.len(), 1);
+    assert_eq!(listed.publications[0].session, "s1");
+    // Only the gateway may ask.
+    let anonymous = store
+        .list(reports::ListRequest {
+            workspace: workspace.clone(),
+        })
+        .await
+        .map(drop);
+    assert_eq!(anonymous.map_err(|s| s.code()), Err(Code::Unauthenticated));
+    store
+        .forget(as_gateway(reports::ForgetRequest {
+            workspace: workspace.clone(),
+            path: "reports/run.html".into(),
+        }))
+        .await
+        .unwrap_or_else(|status| panic!("{status:?}"));
+}
+
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn only_an_agent_pod_publishes_a_report() {
+    use ukai_proto::gateway::v1::WorkspacePublishRequest;
+    use ukai_proto::gateway::v1::workspace_reports_client::WorkspaceReportsClient;
+
+    let mut reports = WorkspaceReportsClient::connect(env("UKAI_E2E_GATEWAY"))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    // The gateway's own token names no pod.
+    let mut request = tonic::Request::new(WorkspacePublishRequest {
+        session: "s1".into(),
+        path: "reports/run.html".into(),
+        title: None,
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", env("UKAI_E2E_GATEWAY_TOKEN"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let refused = reports.publish(request).await.map(drop);
+    assert_eq!(refused.map_err(|s| s.code()), Err(Code::Unauthenticated));
 }

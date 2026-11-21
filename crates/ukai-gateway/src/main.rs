@@ -15,8 +15,9 @@
 //! them in its pod. Same token, same workspace headers; a report request
 //! never starts a pod. With a bucket ([`archive`]), the gateway keeps a copy
 //! of every running workspace's reports and answers from it once the pod is
-//! gone. `DELETE /agents/<id>/reports/files/<path>` deletes one report, from
-//! the pod's checkout and from that copy.
+//! gone. The listing says which sessions published each report
+//! ([`reports`]). `DELETE /agents/<id>/reports/files/<path>` deletes one
+//! report, from the pod's checkout and from that copy.
 //!
 //! `GET /agents/<id>/forward/<port>` upgrades to a WebSocket carrying one
 //! TCP connection to a port in that workspace's pod, through the pod's
@@ -39,11 +40,12 @@
 //!
 //! `ukai.gateway.v1.Knowledge` (gRPC and gRPC-Web, on the same port) is the
 //! knowledge of an agent's scope (its project in `gateway.toml`, else its
-//! repository): notes kept outside the repositories by `ukai-knowledge`,
+//! repository): notes kept outside the repositories by `ukai-store`,
 //! which the gateway asks on behalf of whoever it finds is asking
 //! ([`knowledge`]). Agent pods reach their own scope's at
 //! `WorkspaceKnowledge`, with their relay's token instead of the gateway's;
-//! they cannot review.
+//! they cannot review. They publish the reports their sessions write at
+//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too.
 //!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
@@ -51,13 +53,14 @@
 //! - `UKAI_GATEWAY_TOKEN`: if set, clients must send `Authorization: Bearer <it>`
 //! - `UKAI_RELAY_IMAGE`: image whose `/usr/local/bin/ukai-relay` agent pods
 //!   run; the gateway's own image (read from its pod, `HOSTNAME`) when unset
-//! - `UKAI_KNOWLEDGE_URL`: `ukai-knowledge`, which keeps the notes
-//!   (`http://ukai-knowledge:50051` in `deploy/gateway`); without it the
-//!   gateway keeps none, and agent pods are not offered any
-//! - `UKAI_KNOWLEDGE_TOKEN`: the token `ukai-knowledge` answers; knowledge
-//!   needs it too
+//! - `UKAI_STORE_URL`: `ukai-store`, which keeps the notes and who
+//!   published which report (`http://ukai-store:50051` in
+//!   `deploy/gateway`); without it the gateway keeps neither, and agent
+//!   pods are not offered them
+//! - `UKAI_STORE_TOKEN`: the token `ukai-store` answers; the store needs
+//!   it too
 //! - `UKAI_GATEWAY_INTERNAL_URL`: where agent pods reach the gateway for the
-//!   knowledge (default `http://ukai-gateway`, the Service in `deploy/gateway`)
+//!   store (default `http://ukai-gateway`, the Service in `deploy/gateway`)
 //! - `UKAI_REPORTS_BUCKET`: the S3 bucket keeping a copy of the workspaces'
 //!   reports ([`archive`]), reached as the `AWS_*` variables say
 //!   (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
@@ -94,6 +97,7 @@ mod cluster;
 mod config;
 mod job;
 mod knowledge;
+mod reports;
 mod schedules;
 
 use crate::archive::Archive;
@@ -110,8 +114,10 @@ struct Gateway {
     runtime: Runtime,
     token: Option<String>,
     schedules: Scheduler,
-    /// `ukai-knowledge`, when the gateway is given one.
+    /// `ukai-store`'s notes, when the gateway is given one.
     knowledge: Option<KnowledgeClient>,
+    /// `ukai-store`'s record of who published which report, likewise.
+    reports: Option<reports::ReportsClient>,
     /// The copy of the workspaces' reports, when there is a bucket for it.
     archive: Option<Arc<Archive>>,
     /// The agent pods' addresses, which the person's side refuses.
@@ -156,21 +162,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("UKAI_RELAY_IMAGE is not set and the gateway pod has no image")?
         }
     };
-    let knowledge_url = env("UKAI_KNOWLEDGE_URL");
-    let knowledge = match (&knowledge_url, env("UKAI_KNOWLEDGE_TOKEN")) {
-        (Some(url), Some(token)) => Some(
-            KnowledgeClient::new(url, &token)
-                .map_err(|error| format!("UKAI_KNOWLEDGE_URL: {error}"))?,
-        ),
-        (Some(_), None) => {
-            tracing::warn!(
-                "UKAI_KNOWLEDGE_URL is set without UKAI_KNOWLEDGE_TOKEN; keeping no knowledge"
-            );
-            None
+    let knowledge_url = env("UKAI_STORE_URL");
+    let (knowledge, publications) = match (&knowledge_url, env("UKAI_STORE_TOKEN")) {
+        (Some(url), Some(token)) => {
+            let store = |error| format!("UKAI_STORE_URL: {error}");
+            (
+                Some(KnowledgeClient::new(url, &token).map_err(store)?),
+                Some(reports::ReportsClient::new(url, &token).map_err(store)?),
+            )
         }
-        (None, _) => None,
+        (Some(_), None) => {
+            tracing::warn!("UKAI_STORE_URL is set without UKAI_STORE_TOKEN; keeping no store");
+            (None, None)
+        }
+        (None, _) => (None, None),
     };
-    // Agent pods are told where the gateway is only when it keeps knowledge.
+    // Agent pods are told where the gateway is only when it keeps a store.
     let gateway_url = knowledge.as_ref().map(|_| {
         env("UKAI_GATEWAY_INTERNAL_URL").unwrap_or_else(|| "http://ukai-gateway".to_owned())
     });
@@ -198,6 +205,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         token: env("UKAI_GATEWAY_TOKEN"),
         schedules,
         knowledge,
+        reports: publications,
         archive,
         agent_pods: access::AgentPods::default(),
         http: reqwest::Client::new(),
@@ -250,6 +258,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
+    use ukai_proto::gateway::v1::workspace_reports_server::WorkspaceReportsServer;
 
     let web = GrpcWebLayer::new();
     let api = api::Api {
@@ -260,9 +269,10 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     })))
     .add_service(
         web.layer(WorkspaceKnowledgeServer::new(knowledge::PodKnowledge {
-            gateway,
+            gateway: gateway.clone(),
         })),
     )
+    .add_service(web.layer(WorkspaceReportsServer::new(reports::PodReports { gateway })))
     .add_service(web.layer(AgentsServer::new(api.clone())))
     .add_service(web.layer(PortsServer::new(api.clone())))
     .add_service(
@@ -303,7 +313,7 @@ async fn connect(
 /// that is already there. A workspace whose pod has idled out is answered
 /// from the copy the gateway kept of it, when there is a bucket for one, and
 /// is 410 otherwise, so a pane can say so instead of waiting out an image
-/// pull.
+/// pull. The listing says which sessions published each report.
 async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: Uri) -> Response {
     // The path is read from the URI rather than through `Path`, which cannot
     // serve both routes at once, and so the file part stays percent-encoded
@@ -315,11 +325,21 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
         Ok(plan) => plan,
         Err(refused) => return refused.into_response(),
     };
-    let endpoint = match access::running_relay(&gateway, &plan).await {
+    let response = read_reports(&gateway, &plan, &id, suffix).await;
+    if !suffix.is_empty() || response.status() != StatusCode::OK {
+        return response;
+    }
+    with_publications(&gateway, plan.workspace_id(), response).await
+}
+
+/// A report request as the pod's relay answers it, or the copy once the
+/// pod is gone.
+async fn read_reports(gateway: &Gateway, plan: &Plan, id: &str, suffix: &str) -> Response {
+    let endpoint = match access::running_relay(gateway, plan).await {
         Ok(Some(endpoint)) => endpoint,
         Ok(None) => {
             return match &gateway.archive {
-                Some(archive) => from_archive(archive, &id, plan.workspace_id(), suffix).await,
+                Some(archive) => from_archive(archive, id, plan.workspace_id(), suffix).await,
                 None => gone(),
             };
         }
@@ -338,6 +358,31 @@ async fn reports(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, uri: U
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
+}
+
+/// A listing with the sessions that published each report added; one that
+/// cannot be read goes out as it came.
+async fn with_publications(gateway: &Gateway, workspace: &str, response: Response) -> Response {
+    /// A listing is at most `MAX_LISTED` short entries.
+    const LISTING_BYTES: usize = 4 * 1024 * 1024;
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, LISTING_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "cannot read the workspace's report listing");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    let Ok(listing) = serde_json::from_slice::<ukai_acp::reports::Listing>(&bytes) else {
+        return Response::from_parts(parts, bytes.into());
+    };
+    let listing = reports::annotate(gateway, workspace, listing).await;
+    let mut response = axum::Json(listing).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// `DELETE /agents/<id>/reports/files/<path>`: delete one report of the
@@ -408,6 +453,9 @@ async fn remove_report(
     }
     if status.is_success() {
         tracing::info!(agent = %id, %workspace, "deleted a report");
+        if let Some(path) = archive::requested_path(path) {
+            reports::forget(&gateway, workspace, &path).await;
+        }
     }
     status.into_response()
 }
