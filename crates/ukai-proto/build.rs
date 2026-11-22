@@ -10,6 +10,7 @@ const PROTOS: &[&str] = &[
     "proto/ukai/gateway/v1/ports.proto",
     "proto/ukai/gateway/v1/reports.proto",
     "proto/ukai/gateway/v1/schedules.proto",
+    "proto/ukai/gateway/v1/secretary.proto",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

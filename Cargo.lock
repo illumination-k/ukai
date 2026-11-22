@@ -10272,6 +10272,7 @@ dependencies = [
  "ukai-acp",
  "ukai-config",
  "ukai-core",
+ "ukai-proto",
 ]
 
 [[package]]

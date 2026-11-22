@@ -39,6 +39,10 @@ pub struct Options {
     /// Touched after every finished turn, for the pod's workspace sidecar to
     /// take a snapshot.
     pub snapshot_trigger: Option<std::path::PathBuf>,
+    /// The agent is a secretary: its MCP server offers the tools that read
+    /// and prompt the other workspaces, which the gateway answers only for
+    /// a secretary's pod.
+    pub secretary: bool,
 }
 
 enum Event {
@@ -97,6 +101,9 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         tracing::warn!(%error, path = %sessions.display(), "cannot record sessions");
     }
     let token = options.token.clone().map(Arc::<str>::from);
+    // What the gateway asks about the sessions for a secretary; see
+    // `crate::sessions`.
+    let (queries_tx, mut queries) = mpsc::unbounded_channel();
     // A shell in the checkout, for a terminal pane; see `crate::terminal`.
     let terminals = crate::terminal::Terminals::default();
     let router = server
@@ -112,6 +119,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
             previews.with_file_name("attachments"),
         ))
         .merge(crate::review::router(review.clone()))
+        .merge(crate::sessions::router(queries_tx))
         .merge(crate::terminal::router(
             cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
             terminals.clone(),
@@ -138,8 +146,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     };
     let mut conns: HashMap<ConnId, UnboundedSender<TransportFrame>> = HashMap::new();
     let trigger = options.snapshot_trigger.clone();
+    let mut answers = crate::sessions::Answers::default();
     let dispatch = |outputs: Vec<Output>,
-                    conns: &HashMap<ConnId, UnboundedSender<TransportFrame>>| {
+                    conns: &HashMap<ConnId, UnboundedSender<TransportFrame>>,
+                    answers: &mut crate::sessions::Answers| {
         for output in outputs {
             match output {
                 Output::Agent(message) => send_agent(message),
@@ -153,6 +163,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                         tracing::warn!(%error, path = %sessions.display(), "cannot record a session");
                     }
                 }
+                Output::Started { ticket, outcome } => answers.started(ticket, outcome),
                 Output::TurnEnded(session) => {
                     if let Some(path) = &trigger
                         && let Err(error) = std::fs::write(path, session.as_bytes())
@@ -183,6 +194,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 Some(&previews),
                 Some(&review),
                 Some(&sessions),
+                options.secretary,
             )]
         }
         (_, Err(error)) => {
@@ -195,7 +207,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         cwd.map(|dir| dir.to_string_lossy().into_owned()),
         mcp_servers,
     );
-    dispatch(init, &conns);
+    dispatch(init, &conns, &mut answers);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let terminate = terminate_signal();
@@ -208,7 +220,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                     break;
                 };
                 for message in values(frame) {
-                    dispatch(hub.from_agent(message), &conns);
+                    dispatch(hub.from_agent(message), &conns, &mut answers);
                 }
             }
             Some(event) = events.recv() => match event {
@@ -219,7 +231,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 }
                 Event::Frame(conn, frame) => {
                     for message in values(frame) {
-                        dispatch(hub.from_client(conn, message), &conns);
+                        dispatch(hub.from_client(conn, message), &conns, &mut answers);
                     }
                 }
                 Event::Close(conn) => {
@@ -228,6 +240,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                     hub.disconnect(conn);
                 }
             },
+            Some(query) = queries.recv() => {
+                let outputs = answers.answer(&mut hub, query);
+                dispatch(outputs, &conns, &mut answers);
+            }
             _ = tick.tick() => {
                 // Someone typing in a terminal is as busy as a turn.
                 if hub.busy() || terminals.open() > 0 {

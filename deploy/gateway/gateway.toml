@@ -13,6 +13,9 @@ workspace = { git = "https://github.com/org/repo.git" }
 # Agents naming the same project share its knowledge, whatever repository
 # each works on; without it, an agent's knowledge is its repository's.
 # knowledge = "my-project"
+# A secretary reads the other workspaces' sessions and prompts them, starting
+# a workspace if need be; it never answers their permission requests.
+# secretary = true
 # The checkout's reports, set here rather than in a ukai.toml in the
 # repository: directories added to `[reports] dirs` (relative to its root,
 # separated by `:`), globs replacing `[reports] globs` (likewise), and

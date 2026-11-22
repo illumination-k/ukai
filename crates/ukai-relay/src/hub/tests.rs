@@ -571,3 +571,138 @@ fn a_load_answers_with_the_settings_changed_since_setup() {
     ));
     assert_eq!(load(&mut hub, A), Some(model_option("a")));
 }
+
+fn unattached_prompt_id(outputs: &[Output]) -> u64 {
+    outputs
+        .iter()
+        .find_map(|output| match output {
+            Output::Agent(message) if message["method"] == "session/prompt" => {
+                message["id"].as_u64()
+            }
+            _ => None,
+        })
+        .unwrap_or(u64::MAX)
+}
+
+#[test]
+fn lists_sessions_with_their_state() {
+    let mut hub = with_session();
+    let turn = prompt(&mut hub, A, 3, "fix the build");
+    hub.from_agent(update("Fixed."));
+    let [summary] = hub
+        .sessions()
+        .try_into()
+        .unwrap_or_else(|s| panic!("{s:?}"));
+    assert!(summary.running);
+    assert_eq!(summary.last_prompt.as_deref(), Some("fix the build"));
+    assert_eq!(summary.last_reply.as_deref(), Some("Fixed."));
+
+    hub.from_agent(permission(7));
+    assert!(hub.sessions()[0].waiting);
+    hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
+    let summary = &hub.sessions()[0];
+    assert!(!summary.running);
+    assert_eq!(summary.stop_reason.as_deref(), Some("end_turn"));
+}
+
+#[test]
+fn reads_the_end_of_a_transcript() {
+    let mut hub = with_session();
+    prompt(&mut hub, A, 3, "hello");
+    hub.from_agent(update("hi"));
+    let texts: Vec<_> = hub
+        .transcript(SID, 1)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect();
+    assert_eq!(texts, ["hi"]);
+    assert_eq!(hub.transcript("nope", 1), None);
+}
+
+#[test]
+fn an_unattached_prompt_runs_a_turn_the_attached_client_follows() {
+    let mut hub = with_session();
+    let outputs = hub
+        .prompt_unattached(SID, "from the secretary")
+        .unwrap_or_default();
+    let turn = unattached_prompt_id(&outputs);
+    // The client attached hears the prompt and the turn starting...
+    let heard = client_messages(&outputs, A);
+    assert_eq!(
+        heard[0]["params"]["update"]["sessionUpdate"],
+        "user_message_chunk"
+    );
+    assert_eq!(heard[1], turn_state(SID, "running", None));
+    assert!(hub.sessions()[0].running);
+    // ...a second prompt is refused while it runs...
+    assert_eq!(
+        hub.prompt_unattached(SID, "again"),
+        Err(PromptRefused::Running)
+    );
+    // ...and the turn ending, though it did not ask.
+    let ended = hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
+    assert_eq!(
+        client_messages(&ended, A),
+        [turn_state(SID, "idle", Some(json!("end_turn")))]
+    );
+    assert_eq!(
+        replayed_texts(&mut hub),
+        ["from the secretary"],
+        "the prompt is in the history"
+    );
+}
+
+#[test]
+fn an_unattached_prompt_needs_a_known_session() {
+    let mut hub = with_session();
+    assert_eq!(
+        hub.prompt_unattached("nope", "hi"),
+        Err(PromptRefused::Unknown)
+    );
+}
+
+#[test]
+fn an_unattached_start_sets_up_a_session_and_prompts_it() {
+    let mut hub = with_session();
+    let sent = hub.start_unattached(9, "start on #12".to_owned());
+    let setup = agent_id(&sent);
+    let out = hub.from_agent(result(json!(setup), json!({ "sessionId": "s2" })));
+    assert_eq!(
+        out[0],
+        Output::Started {
+            ticket: 9,
+            outcome: Ok("s2".to_owned())
+        }
+    );
+    let turn = unattached_prompt_id(&out);
+    assert_ne!(turn, u64::MAX, "the prompt goes to the agent: {out:?}");
+    assert!(client_messages(&out, A).is_empty(), "no client is told");
+    assert!(hub.sessions().iter().any(|s| s.id == "s2" && s.running));
+}
+
+#[test]
+fn an_unattached_start_says_why_it_failed() {
+    let mut hub = with_session();
+    let setup = agent_id(&hub.start_unattached(9, "hi".to_owned()));
+    let out = hub.from_agent(error(json!(setup), -32603, "no room"));
+    assert_eq!(
+        out,
+        [Output::Started {
+            ticket: 9,
+            outcome: Err("no room".to_owned())
+        }]
+    );
+}
+
+#[test]
+fn an_unattached_start_waits_for_the_agent() {
+    let (mut hub, _) = Hub::new(None, Vec::new());
+    assert!(matches!(
+        hub.start_unattached(1, "hi".to_owned()).as_slice(),
+        [Output::Started {
+            outcome: Err(_),
+            ..
+        }]
+    ));
+}

@@ -21,6 +21,7 @@ tracing-subscriber = { workspace = true }
 ukai-acp = { workspace = true }
 ukai-config = { workspace = true }
 ukai-core = { workspace = true }
+ukai-proto = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true, features = ["process", "pthread", "signal"] }
@@ -28,6 +29,7 @@ nix = { workspace = true, features = ["process", "pthread", "signal"] }
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "handshake"] }
 tower = { workspace = true }
 

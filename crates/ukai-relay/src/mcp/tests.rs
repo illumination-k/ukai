@@ -222,7 +222,8 @@ fn server_entry_runs_the_relay_for_the_checkout() {
             None,
             None,
             None,
-            None
+            None,
+            false
         ),
         json!({
             "name": "ukai",
@@ -246,7 +247,8 @@ fn server_entry_hands_the_gateway_on_with_the_token_in_the_environment() {
             Some(&gateway),
             None,
             None,
-            None
+            None,
+            false
         ),
         json!({
             "name": "ukai",
@@ -927,6 +929,33 @@ fn a_write_of_the_wrong_kind_is_refused(#[case] extra: Value, #[case] expected: 
 }
 
 #[test]
+fn server_entry_makes_a_secretary_only_with_a_gateway() {
+    let gateway = Gateway {
+        url: "http://ukai-gateway".into(),
+        token: "s3cret".into(),
+    };
+    let program = Path::new("/relay/ukai-relay");
+    let root = Path::new("/workspace");
+    let has_flag = |entry: Value| {
+        entry["args"]
+            .as_array()
+            .is_some_and(|args| args.contains(&json!("--secretary")))
+    };
+    assert!(has_flag(server_entry(
+        program,
+        root,
+        Some(&gateway),
+        None,
+        None,
+        None,
+        true
+    )));
+    assert!(!has_flag(server_entry(
+        program, root, None, None, None, None, true
+    )));
+}
+
+#[test]
 fn server_entry_hands_on_the_previews_and_review_files() {
     let entry = server_entry(
         Path::new("/relay/ukai-relay"),
@@ -935,6 +964,7 @@ fn server_entry_hands_on_the_previews_and_review_files() {
         Some(Path::new("/tmp/r/previews.jsonl")),
         Some(Path::new("/tmp/r/review.json")),
         None,
+        false,
     );
     assert_eq!(
         entry["args"],

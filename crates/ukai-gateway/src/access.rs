@@ -99,6 +99,7 @@ pub fn agent<'g>(gateway: &'g Gateway, id: &str) -> Result<&'g KubernetesAgent, 
 /// shared one), as `/acp` places a connection.
 pub fn plan(gateway: &Gateway, id: &str, pane: Option<&str>) -> Result<Plan, Denial> {
     Ok(Plan::new(
+        id,
         agent(gateway, id)?.clone(),
         &gateway.user,
         gateway.cluster.namespace(),
@@ -210,12 +211,15 @@ impl AgentPods {
     }
 }
 
-/// Paths an agent pod may ask: its own knowledge and publishing its own
-/// reports, which it asks with its relay's token, and the health check.
+/// Paths an agent pod may ask: its own knowledge, publishing its own
+/// reports, and a secretary's view of the other workspaces (refused to
+/// any other pod), which it asks with its relay's token, and the health
+/// check.
 fn for_pods(path: &str) -> bool {
     path == "/health"
         || path.starts_with("/ukai.gateway.v1.WorkspaceKnowledge/")
         || path.starts_with("/ukai.gateway.v1.WorkspaceReports/")
+        || path.starts_with("/ukai.gateway.v1.WorkspaceSecretary/")
 }
 
 /// Refuse what an agent pod asks of a person's side.
@@ -290,6 +294,7 @@ mod tests {
     #[case::health("/health", true)]
     #[case::own_knowledge("/ukai.gateway.v1.WorkspaceKnowledge/Put", true)]
     #[case::own_reports("/ukai.gateway.v1.WorkspaceReports/Publish", true)]
+    #[case::secretary("/ukai.gateway.v1.WorkspaceSecretary/PromptSession", true)]
     #[case::persons_knowledge("/ukai.gateway.v1.Knowledge/Approve", false)]
     #[case::schedules("/ukai.gateway.v1.Schedules/Create", false)]
     #[case::acp("/agents/a/acp", false)]

@@ -28,7 +28,7 @@ fn agent(extra: &str) -> KubernetesAgent {
 }
 
 fn plan(extra: &str) -> Plan {
-    Plan::new(agent(extra), "alice", "team", None)
+    Plan::new("k", agent(extra), "alice", "team", None)
 }
 
 fn json(plan: &Plan) -> Value {
@@ -61,14 +61,14 @@ fn workspace_id_is_stable_and_distinguishes_inputs() {
     assert_eq!(a.job_name(), format!("ukai-{}", a.workspace_id));
     assert_ne!(
         a.workspace_id,
-        Plan::new(agent(""), "bob", "team", None).workspace_id
+        Plan::new("k", agent(""), "bob", "team", None).workspace_id
     );
     assert_ne!(
         a.workspace_id,
-        Plan::new(agent(""), "alice", "other", None).workspace_id
+        Plan::new("k", agent(""), "alice", "other", None).workspace_id
     );
     // A pane of its own gets its own workspace, the same one each time.
-    let pane = |key| Plan::new(agent(""), "alice", "team", Some(key)).workspace_id;
+    let pane = |key| Plan::new("k", agent(""), "alice", "team", Some(key)).workspace_id;
     assert_ne!(pane("k1"), a.workspace_id);
     assert_ne!(pane("k1"), pane("k2"));
     assert_eq!(pane("k1"), pane("k1"));
@@ -104,6 +104,7 @@ fn the_github_token_reaches_the_sidecar_and_the_agent() {
 #[test]
 fn author_sets_the_agents_commit_identity() {
     let job = json(&Plan::new(
+        "k",
         agent_with(
             "",
             r#", author = { name = "ukai", email = "ukai@example.com" }"#,
@@ -245,6 +246,7 @@ fn durations_and_wip_ref_reach_the_scripts(
     #[case] wip_prefix: &str,
 ) {
     let job = json(&Plan::new(
+        "k",
         agent_with(extra, workspace),
         "alice",
         "team",
@@ -426,4 +428,24 @@ fn the_agent_gets_its_resources(#[case] extra: &str, #[case] limit: &str) {
             "limits": { "memory": limit }
         })
     );
+}
+
+#[test]
+fn the_pod_says_which_agent_and_pane_it_is() {
+    let annotations =
+        |plan: &Plan| json(plan)["spec"]["template"]["metadata"]["annotations"].clone();
+    let shared = annotations(&plan(""));
+    assert_eq!(shared[AGENT_ANNOTATION], "k");
+    assert!(shared.get(PANE_ANNOTATION).is_none());
+    let own = annotations(&Plan::new("k", agent(""), "alice", "team", Some("p1")));
+    assert_eq!(own[PANE_ANNOTATION], "p1");
+}
+
+#[rstest]
+#[case::secretary("secretary = true", true)]
+#[case::not("", false)]
+fn only_a_secretary_is_told_it_is_one(#[case] extra: &str, #[case] told: bool) {
+    let job = json(&plan(extra));
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    assert_eq!(env_names(agent).contains(&SECRETARY_ENV), told);
 }

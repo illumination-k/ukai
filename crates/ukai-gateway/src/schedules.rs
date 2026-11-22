@@ -300,6 +300,7 @@ async fn execute(
         return failed(format!("the gateway has no agent `{}`", schedule.agent));
     };
     let plan = Plan::new(
+        &schedule.agent,
         agent,
         &gateway.user,
         gateway.cluster.namespace(),

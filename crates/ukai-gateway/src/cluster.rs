@@ -22,8 +22,9 @@ use ukai_acp::review::REVIEW_PATH;
 use ukai_acp::terminal::{Size, TERMINAL_PATH};
 
 use crate::job::{
-    AGENT_CONTAINER, GIT_ANNOTATION, KNOWLEDGE_ANNOTATION, MANAGED_BY, Plan, RELAY_PORT,
-    RELAY_TOKEN_ENV, REPORTS_PATH, Runtime, WORKSPACE_CONTAINER, WORKSPACE_LABEL, job,
+    AGENT_ANNOTATION, AGENT_CONTAINER, GIT_ANNOTATION, KNOWLEDGE_ANNOTATION, MANAGED_BY,
+    PANE_ANNOTATION, Plan, RELAY_PORT, RELAY_TOKEN_ENV, REPORTS_PATH, Runtime, WORKSPACE_CONTAINER,
+    WORKSPACE_LABEL, job,
 };
 
 /// Long enough for a cold node to pull a large image and clone the repository.
@@ -198,6 +199,16 @@ impl Cluster {
         Ok(ready_relays(&found))
     }
 
+    /// Every ready agent pod that says which agent and workspace it is.
+    pub async fn running_pods(&self) -> Result<Vec<RunningPod>> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let found = pods
+            .list(&ListParams::default().labels(&format!("{MANAGED_BY}=ukai")))
+            .await?
+            .items;
+        Ok(running_pods(&found))
+    }
+
     /// The addresses of every agent pod, running or not: what
     /// `access::guard` keeps off the person's side.
     pub async fn agent_pod_addresses(&self) -> Result<std::collections::HashSet<std::net::IpAddr>> {
@@ -233,6 +244,7 @@ impl Cluster {
                 Some(PodIdentity {
                     scope,
                     workspace: pod.metadata.labels.as_ref()?.get(WORKSPACE_LABEL)?.clone(),
+                    agent: annotations.get(AGENT_ANNOTATION).cloned(),
                 })
             }))
     }
@@ -351,6 +363,24 @@ fn ready_relays(pods: &[Pod]) -> Vec<(String, RelayEndpoint)> {
         .collect()
 }
 
+/// The ready pods among `pods` that name their agent, with their workspace.
+fn running_pods(pods: &[Pod]) -> Vec<RunningPod> {
+    pods.iter()
+        .filter(|pod| {
+            pod.metadata.deletion_timestamp.is_none() && pod_state(pod) == PodState::Ready
+        })
+        .filter_map(|pod| {
+            let annotations = pod.metadata.annotations.as_ref()?;
+            Some(RunningPod {
+                agent: annotations.get(AGENT_ANNOTATION)?.clone(),
+                pane: annotations.get(PANE_ANNOTATION).cloned(),
+                workspace: pod.metadata.labels.as_ref()?.get(WORKSPACE_LABEL)?.clone(),
+                relay: RelayEndpoint::of(pod)?,
+            })
+        })
+        .collect()
+}
+
 /// Which agent pod a request came from, as the gateway found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodIdentity {
@@ -358,6 +388,19 @@ pub struct PodIdentity {
     pub scope: String,
     /// Its workspace id.
     pub workspace: String,
+    /// Its agent's id, unless the pod is from before pods said.
+    pub agent: Option<String>,
+}
+
+/// A ready pod as a secretary sees it: whose workspace it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningPod {
+    pub agent: String,
+    /// The pane key of a workspace of its own; `None` for the shared one.
+    pub pane: Option<String>,
+    /// Its workspace id.
+    pub workspace: String,
+    pub relay: RelayEndpoint,
 }
 
 /// Where `pod`'s relay serves, and the token it wants.
@@ -426,6 +469,16 @@ impl RelayEndpoint {
     /// The WebSocket carrying one connection to `port` in the pod.
     pub fn forward_url(&self, port: u16) -> String {
         format!("ws://{}{FORWARD_PATH}/{port}", self.address)
+    }
+
+    /// The relay's sessions, and `/<suffix>` under them, e.g.
+    /// `/<id>/transcript`, already percent-encoded.
+    pub fn sessions_url(&self, suffix: &str) -> String {
+        format!(
+            "http://{}{}{suffix}",
+            self.address,
+            ukai_acp::secretary::SESSIONS_PATH
+        )
     }
 
     /// The WebSocket carrying a shell in the pod's checkout, `size` large.
@@ -645,6 +698,45 @@ mod tests {
             .map(|(workspace, endpoint)| (workspace, endpoint.address))
             .collect();
         assert_eq!(found, [("w1".to_owned(), "10.0.0.7:7070".to_owned())]);
+    }
+
+    #[test]
+    fn a_secretary_sees_the_ready_pods_that_name_their_agent() {
+        let agent_pod = |annotations: serde_json::Value, phase: &str| {
+            serde_json::from_value::<Pod>(json!({
+                "metadata": { "name": "p", "labels": { WORKSPACE_LABEL: "w1" }, "annotations": annotations },
+                "spec": { "containers": [
+                    { "name": "agent", "env": [{ "name": "UKAI_RELAY_TOKEN", "value": "t" }] }
+                ] },
+                "status": {
+                    "phase": phase,
+                    "podIP": "10.0.0.7",
+                    "conditions": [{ "type": "Ready", "status": "True" }]
+                }
+            }))
+            .unwrap_or_default()
+        };
+        let pods = [
+            agent_pod(
+                json!({ AGENT_ANNOTATION: "claude", PANE_ANNOTATION: "k1" }),
+                "Running",
+            ),
+            agent_pod(json!({ AGENT_ANNOTATION: "codex" }), "Running"),
+            agent_pod(json!({ AGENT_ANNOTATION: "late" }), "Pending"),
+            // From before pods said which agent they are.
+            agent_pod(json!({}), "Running"),
+        ];
+        let found: Vec<_> = running_pods(&pods)
+            .into_iter()
+            .map(|pod| (pod.agent, pod.pane))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("claude".to_owned(), Some("k1".to_owned())),
+                ("codex".to_owned(), None)
+            ]
+        );
     }
 
     #[test]
