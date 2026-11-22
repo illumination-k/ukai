@@ -60,6 +60,7 @@ pub fn App() -> Element {
             schedules: Signal::new(HashMap::new()),
             knowledge: Signal::new(HashMap::new()),
             folds: Signal::new(state.sidebar),
+            sidebar_hidden: Signal::new(state.sidebar_hidden),
             branches: Signal::new(state.branches),
             palette: Signal::new(false),
             drag: Signal::new(None),
@@ -85,6 +86,7 @@ pub fn App() -> Element {
         app.projects,
         app.layout,
         app.folds,
+        app.sidebar_hidden,
         app.branches,
     );
 

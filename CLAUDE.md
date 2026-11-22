@@ -87,7 +87,9 @@ When running the app for a manual check, point it at throwaway directories so
 it does not touch your real projects and layout:
 `UKAI_STATE_DIR=$(mktemp -d) UKAI_CONFIG_DIR=$(mktemp -d) cargo run -p ukai-app`.
 Stop it by PID, not with a `pkill` pattern that also matches a copy you are
-using.
+using. On Linux without a display (a cloud session), the `run-ukai-app`
+skill (`.claude/skills/run-ukai-app`) sets up Xvfb, builds with `dx` so the
+CSS is bundled, and drives the app with keys, clicks, and screenshots.
 
 ## Security notes
 

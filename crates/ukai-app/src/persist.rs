@@ -5,20 +5,21 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use ukai_core::branch::SessionBranches;
-use ukai_core::sidebar::Folds;
+use ukai_core::sidebar::{Folds, Hidden};
 use ukai_core::state::{self, AppState};
 use ukai_core::{Layout, Projects};
 
 /// Coalesce bursts of changes (typing a split, resizing later) into one write.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Save `projects`, `layout`, `folds`, and `branches` to `path` shortly
+/// Save `projects`, `layout`, `folds`, `sidebar_hidden`, and `branches` to `path` shortly
 /// after one changes.
 pub fn use_autosave(
     path: Option<PathBuf>,
     projects: Signal<Projects>,
     layout: Signal<Layout>,
     folds: Signal<Folds>,
+    sidebar_hidden: Signal<Hidden>,
     branches: Signal<SessionBranches>,
 ) {
     let mut generation = use_signal(|| 0_u64);
@@ -28,6 +29,7 @@ pub fn use_autosave(
             projects.read().clone(),
             layout.read().clone(),
             folds.read().clone(),
+            sidebar_hidden(),
             branches.read().clone(),
         );
         let Some(path) = path.clone() else {

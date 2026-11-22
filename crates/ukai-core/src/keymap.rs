@@ -17,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ukai_config::Keys;
 
+use crate::sidebar::Column;
+
 /// What a shortcut does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
@@ -29,6 +31,8 @@ pub enum Action {
     PrevTab,
     NextPane,
     PrevPane,
+    /// Show or hide a column of the sidebar.
+    ToggleColumn(Column),
     /// The tab at this 1-based position (1 to 9).
     Tab(u8),
     /// Stop the focused pane's turn.
@@ -61,6 +65,8 @@ impl Action {
             Action::PrevTab,
             Action::NextPane,
             Action::PrevPane,
+            Action::ToggleColumn(Column::Tree),
+            Action::ToggleColumn(Column::Detail),
         ]
         .into_iter()
         .chain((1..=9).map(Action::Tab))
@@ -86,6 +92,8 @@ impl Action {
             Action::PrevTab => "prev-tab".to_owned(),
             Action::NextPane => "next-pane".to_owned(),
             Action::PrevPane => "prev-pane".to_owned(),
+            Action::ToggleColumn(Column::Tree) => "toggle-sidebar-tree".to_owned(),
+            Action::ToggleColumn(Column::Detail) => "toggle-sidebar-detail".to_owned(),
             Action::Tab(n) => format!("tab-{n}"),
             Action::Stop => "stop".to_owned(),
             Action::Dictate => "dictate".to_owned(),
@@ -108,6 +116,8 @@ impl Action {
             Action::PrevTab => &["ctrl+shift+tab", "mod+shift+["],
             Action::NextPane => &["mod+]"],
             Action::PrevPane => &["mod+["],
+            Action::ToggleColumn(Column::Tree) => &["mod+b"],
+            Action::ToggleColumn(Column::Detail) => &["mod+shift+b"],
             Action::Stop => &["escape"],
             Action::Dictate => &["mod+shift+m"],
             Action::Send => &["enter"],
