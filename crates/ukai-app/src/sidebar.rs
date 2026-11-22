@@ -162,9 +162,7 @@ pub fn Sidebar() -> Element {
             }
             if let Some(id) = selected {
                 div { class: "sidebar-columns",
-                    div {
-                        class: "sidebar-column tree",
-                        hidden: !tree_shown,
+                    div { class: "sidebar-column tree", hidden: !tree_shown,
                         ProjectPanes {
                             key: "{id}",
                             id: id.clone(),
