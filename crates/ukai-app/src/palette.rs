@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
+use ukai_core::sidebar::Column;
 use ukai_core::{Direction, PaneContent, PaneId, ProjectId, ReportSource, keymap, palette, report};
 
 use crate::icons::{Icon, Svg};
@@ -27,6 +28,7 @@ enum Action {
     Split(Direction),
     ClosePane,
     OpenProject,
+    ToggleColumn(Column),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +131,16 @@ fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
             Action::ClosePane,
             Some(keymap::Action::ClosePane),
         ),
+        command(
+            "Toggle workspaces column",
+            Action::ToggleColumn(Column::Tree),
+            Some(keymap::Action::ToggleColumn(Column::Tree)),
+        ),
+        command(
+            "Toggle workspace detail column",
+            Action::ToggleColumn(Column::Detail),
+            Some(keymap::Action::ToggleColumn(Column::Detail)),
+        ),
         command("Open project…", Action::OpenProject, None),
     ]);
     items
@@ -153,6 +165,10 @@ fn perform(app: AppSignals, paths: &Paths, action: Action) {
         }
         Action::ClosePane => close_pane(app, focused),
         Action::OpenProject => pick_and_add_project(paths.clone(), app),
+        Action::ToggleColumn(column) => {
+            let mut hidden = app.sidebar_hidden;
+            hidden.write().toggle(column);
+        }
     }
 }
 

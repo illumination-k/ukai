@@ -13,6 +13,7 @@ use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::keymap::Action;
 use ukai_core::launch::{self, Choice, Group, Status};
+use ukai_core::sidebar::Column;
 use ukai_core::{
     Boundary, Direction, Frame, Layout, PaneContent, PaneId, Placed, ProjectId, Projects, Recent,
     ReportSource, Side,
@@ -430,8 +431,31 @@ fn TabBar() -> Element {
         (tabs, current.active())
     };
 
+    let mut sidebar_hidden = app.sidebar_hidden;
+
     rsx! {
         nav { class: "tabbar",
+            for (column, icon, name) in [
+                (Column::Tree, Icon::Sidebar, "workspaces"),
+                (Column::Detail, Icon::SidebarDetail, "workspace detail"),
+            ]
+            {
+                button {
+                    key: "{name}",
+                    class: if sidebar_hidden().is_hidden(column) { "icon sidebar-toggle" } else { "icon sidebar-toggle open" },
+                    title: shortcuts
+                        .title(
+                            &if sidebar_hidden().is_hidden(column) {
+                                format!("Show {name} column")
+                            } else {
+                                format!("Hide {name} column")
+                            },
+                            Action::ToggleColumn(column),
+                        ),
+                    onclick: move |_| sidebar_hidden.write().toggle(column),
+                    Svg { icon }
+                }
+            }
             for (index, label, hint, count, state, unread) in tabs {
                 div {
                     key: "{index}",

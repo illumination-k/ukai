@@ -307,6 +307,11 @@ button:focus-visible,
   background: var(--sidebar);
 }
 
+.sidebar.hidden,
+.sidebar-column[hidden] {
+  display: none;
+}
+
 /* With a workspace opened, the second column takes its own width. */
 .sidebar.wide {
   flex-basis: 520px;
@@ -827,6 +832,14 @@ button.project-trigger.open {
 .tab .dot {
   width: 7px;
   height: 7px;
+}
+
+button.sidebar-toggle {
+  align-self: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin: 0 4px;
 }
 
 button.new-tab {

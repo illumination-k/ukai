@@ -825,7 +825,10 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
   ユーザーが割り当てた chord は、それを既定で持っていたアクションから外す。未知のアクション・解釈できない chord・
   ユーザー設定同士の衝突は全部集めてサイドバー下部に警告として出し、残りの設定は効かせる。起動時に 1 回読む。
   アクション: `palette` `new-tab` `close-pane` `split-right` `split-down` `next-tab` `prev-tab` `next-pane`
-  `prev-pane` `tab-1`〜`tab-9` `stop` `dictate`（以上アプリ全体）、`send`（入力欄）。
+  `prev-pane` `toggle-sidebar-tree`（サイドバーのワークスペースの木の列、既定 `mod+b`）
+  `toggle-sidebar-detail`（ワークスペースの中身の列、既定 `mod+shift+b`。どちらもタブバー左端のボタンとパレットからも。
+  隠した列は `state.json` に残し、両方隠すとサイドバーごと消える）
+  `tab-1`〜`tab-9` `stop` `dictate`（以上アプリ全体）、`send`（入力欄）。
 
   ```toml
   [keybindings]
