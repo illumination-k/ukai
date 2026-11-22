@@ -1,7 +1,7 @@
 //! What survives a restart: registered projects with the model and effort
 //! their agents' new sessions start with, the tab/pane layout, including
 //! each agent pane's ACP session id so it can be continued, and what of the
-//! sidebar is folded and whether it is hidden, and the branch each session last worked on.
+//! sidebar is folded and which of its columns are hidden, and the branch each session last worked on.
 //!
 //! One versioned JSON document, written atomically. Transcripts are not
 //! stored: agents that support `session/load` replay them.
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::branch::SessionBranches;
 use crate::layout::{Layout, PaneContent};
 use crate::project::Projects;
-use crate::sidebar::Folds;
+use crate::sidebar::{Folds, Hidden};
 
 /// Bump on incompatible changes; older files are migrated on load, newer
 /// ones are refused rather than misread.
@@ -27,8 +27,8 @@ pub struct AppState {
     pub layout: Layout,
     #[serde(default, skip_serializing_if = "Folds::is_empty")]
     pub sidebar: Folds,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sidebar_hidden: bool,
+    #[serde(default, skip_serializing_if = "Hidden::is_none")]
+    pub sidebar_hidden: Hidden,
     #[serde(default, skip_serializing_if = "SessionBranches::is_empty")]
     pub branches: SessionBranches,
 }
@@ -60,7 +60,7 @@ impl AppState {
         projects: Projects,
         layout: Layout,
         sidebar: Folds,
-        sidebar_hidden: bool,
+        sidebar_hidden: Hidden,
         branches: SessionBranches,
     ) -> Self {
         Self {
@@ -223,7 +223,16 @@ mod tests {
             },
             "feature/x".into(),
         );
-        AppState::new(projects, layout, sidebar, true, branches)
+        AppState::new(
+            projects,
+            layout,
+            sidebar,
+            Hidden {
+                tree: false,
+                detail: true,
+            },
+            branches,
+        )
     }
 
     #[test]

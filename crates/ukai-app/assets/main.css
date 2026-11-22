@@ -307,7 +307,8 @@ button:focus-visible,
   background: var(--sidebar);
 }
 
-.sidebar.hidden {
+.sidebar.hidden,
+.sidebar-column[hidden] {
   display: none;
 }
 

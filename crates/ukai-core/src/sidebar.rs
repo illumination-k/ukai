@@ -184,6 +184,50 @@ impl Fold {
     }
 }
 
+/// One of the sidebar's two columns: the workspaces' tree, and what is in
+/// the workspace opened from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Column {
+    Tree,
+    Detail,
+}
+
+/// Which of the sidebar's columns the user hid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hidden {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tree: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub detail: bool,
+}
+
+impl Hidden {
+    pub fn is_none(&self) -> bool {
+        !self.tree && !self.detail
+    }
+
+    pub fn is_hidden(self, column: Column) -> bool {
+        match column {
+            Column::Tree => self.tree,
+            Column::Detail => self.detail,
+        }
+    }
+
+    pub fn toggle(&mut self, column: Column) {
+        match column {
+            Column::Tree => self.tree = !self.tree,
+            Column::Detail => self.detail = !self.detail,
+        }
+    }
+
+    /// The columns to draw, given whether a workspace is opened for the
+    /// detail column: `(tree, detail)`.
+    pub fn shown(self, opened: bool) -> (bool, bool) {
+        (!self.tree, opened && !self.detail)
+    }
+}
+
 /// Which nodes the user opened or folded, as the nodes whose state differs
 /// from their default, so a node never touched follows the default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -532,5 +576,53 @@ mod tests {
         let folds = folds.unwrap_or_default();
         assert_eq!(folds.toggled.len(), 1);
         assert_eq!(folds.toggled[0].node, Node::Schedules);
+    }
+
+    #[rstest::rstest]
+    #[case::nothing_hidden(Hidden::default(), true, (true, true))]
+    #[case::nothing_opened(Hidden::default(), false, (true, false))]
+    #[case::tree_hidden(Hidden { tree: true, detail: false }, true, (false, true))]
+    #[case::detail_hidden(Hidden { tree: false, detail: true }, true, (true, false))]
+    #[case::both_hidden(Hidden { tree: true, detail: true }, true, (false, false))]
+    fn shows_the_columns_not_hidden(
+        #[case] hidden: Hidden,
+        #[case] opened: bool,
+        #[case] expected: (bool, bool),
+    ) {
+        assert_eq!(hidden.shown(opened), expected);
+    }
+
+    #[test]
+    fn toggles_each_column_alone() {
+        let mut hidden = Hidden::default();
+        hidden.toggle(Column::Detail);
+        assert!(hidden.is_hidden(Column::Detail));
+        assert!(!hidden.is_hidden(Column::Tree));
+        hidden.toggle(Column::Tree);
+        hidden.toggle(Column::Detail);
+        assert_eq!(
+            hidden,
+            Hidden {
+                tree: true,
+                detail: false
+            }
+        );
+    }
+
+    #[test]
+    fn saves_only_what_is_hidden() {
+        let json = |hidden: Hidden| serde_json::to_string(&hidden).ok();
+        assert_eq!(json(Hidden::default()).as_deref(), Some("{}"));
+        assert_eq!(
+            json(Hidden {
+                tree: false,
+                detail: true
+            }),
+            Some(r#"{"detail":true}"#.to_owned())
+        );
+        assert_eq!(
+            serde_json::from_str::<Hidden>("{}").ok(),
+            Some(Hidden::default())
+        );
     }
 }

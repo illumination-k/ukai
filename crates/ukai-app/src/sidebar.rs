@@ -95,11 +95,13 @@ pub fn Sidebar() -> Element {
         }
     });
 
-    // Hidden rather than unmounted, so it comes back as it was left.
-    let class = match (*app.sidebar_hidden.read(), shown.is_some()) {
-        (true, _) => "sidebar hidden",
-        (false, true) => "sidebar wide",
-        (false, false) => "sidebar",
+    // Columns are hidden rather than unmounted, so they come back as they
+    // were left.
+    let (tree_shown, detail_shown) = app.sidebar_hidden.read().shown(shown.is_some());
+    let class = match (tree_shown, detail_shown) {
+        (false, false) => "sidebar hidden",
+        (true, true) => "sidebar wide",
+        _ => "sidebar",
     };
 
     rsx! {
@@ -160,7 +162,9 @@ pub fn Sidebar() -> Element {
             }
             if let Some(id) = selected {
                 div { class: "sidebar-columns",
-                    div { class: "sidebar-column tree",
+                    div {
+                        class: "sidebar-column tree",
+                        hidden: !tree_shown,
                         ProjectPanes {
                             key: "{id}",
                             id: id.clone(),
@@ -169,7 +173,9 @@ pub fn Sidebar() -> Element {
                         }
                     }
                     if let Some((project, place)) = shown {
-                        div { class: "sidebar-column sidebar-detail tree",
+                        div {
+                            class: "sidebar-column sidebar-detail tree",
+                            hidden: !detail_shown,
                             WorkspaceDetail {
                                 key: "{place_key(&place)}",
                                 project,
