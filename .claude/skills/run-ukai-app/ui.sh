@@ -31,7 +31,10 @@ start)
 	if ! xdpyinfo >/dev/null 2>&1; then
 		setsid Xvfb "$display" -screen 0 1440x900x24 </dev/null >"$run/xvfb.log" 2>&1 &
 		echo $! >"$run/xvfb.pid"
-		for _ in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break || sleep 0.1; done
+		for _ in $(seq 50); do
+			if xdpyinfo >/dev/null 2>&1; then break; fi
+			sleep 0.1
+		done
 	fi
 	state=$(mktemp -d -p "$run" state.XXXX)
 	config=$(mktemp -d -p "$run" config.XXXX)
