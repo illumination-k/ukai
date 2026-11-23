@@ -29,6 +29,7 @@ pub mod reconnect;
 pub mod reports;
 pub mod review;
 pub mod schedules;
+pub mod secretary;
 mod secrets;
 mod session;
 pub mod terminal;

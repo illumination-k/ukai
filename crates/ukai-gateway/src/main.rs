@@ -45,7 +45,9 @@
 //! ([`knowledge`]). Agent pods reach their own scope's at
 //! `WorkspaceKnowledge`, with their relay's token instead of the gateway's;
 //! they cannot review. They publish the reports their sessions write at
-//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too.
+//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too. A
+//! secretary agent's pod reads and prompts the other workspaces' sessions at
+//! `WorkspaceSecretary` ([`secretary`]).
 //!
 //! Environment:
 //! - `UKAI_GATEWAY_CONFIG`: path of `gateway.toml` (default `/etc/ukai/gateway.toml`)
@@ -99,6 +101,7 @@ mod job;
 mod knowledge;
 mod reports;
 mod schedules;
+mod secretary;
 
 use crate::archive::Archive;
 use crate::cluster::{Cluster, RelayEndpoint};
@@ -259,6 +262,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
     use ukai_proto::gateway::v1::workspace_reports_server::WorkspaceReportsServer;
+    use ukai_proto::gateway::v1::workspace_secretary_server::WorkspaceSecretaryServer;
 
     let web = GrpcWebLayer::new();
     let api = api::Api {
@@ -272,7 +276,14 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
             gateway: gateway.clone(),
         })),
     )
-    .add_service(web.layer(WorkspaceReportsServer::new(reports::PodReports { gateway })))
+    .add_service(web.layer(WorkspaceReportsServer::new(reports::PodReports {
+        gateway: gateway.clone(),
+    })))
+    .add_service(
+        web.layer(WorkspaceSecretaryServer::new(secretary::PodSecretary {
+            gateway,
+        })),
+    )
     .add_service(web.layer(AgentsServer::new(api.clone())))
     .add_service(web.layer(PortsServer::new(api.clone())))
     .add_service(

@@ -36,6 +36,10 @@
 //! them by tag, read, write, and delete them, so what the agent learns
 //! outlives the session without being committed.
 //!
+//! In a secretary's pod (see "秘書" in `docs/design.md`), it also offers the
+//! tools that read the other workspaces' sessions and prompt them
+//! ([`secretary`]).
+//!
 //! The protocol is newline-delimited JSON-RPC on stdin/stdout; [`handle`]
 //! answers one message and does no I/O beyond reading the checkout and
 //! asking [`Notes`].
@@ -194,6 +198,9 @@ pub struct Session {
     review: Option<PathBuf>,
     /// Where `publish_report` publishes; without it the tool is not offered.
     publishing: Option<Publishing>,
+    /// The gateway's answers about the other workspaces; without it the
+    /// secretary's tools are not offered.
+    secretary: Option<Box<dyn secretary::Secretary>>,
 }
 
 impl Default for Session {
@@ -210,7 +217,15 @@ impl Session {
             previews: None,
             review: None,
             publishing: None,
+            secretary: None,
         }
+    }
+
+    /// Offer the secretary's tools.
+    #[must_use]
+    pub fn with_secretary(mut self, secretary: Box<dyn secretary::Secretary>) -> Self {
+        self.secretary = Some(secretary);
+        self
     }
 
     /// Offer `publish_report`.
@@ -277,6 +292,7 @@ pub fn server_entry(
     previews: Option<&Path>,
     review: Option<&Path>,
     sessions: Option<&Path>,
+    secretary: bool,
 ) -> Value {
     let mut args = vec![
         json!(SUBCOMMAND),
@@ -296,6 +312,9 @@ pub fn server_entry(
     if let Some(gateway) = gateway {
         args.extend([json!("--gateway"), json!(gateway.url)]);
         env.push(json!({ "name": TOKEN_ENV, "value": gateway.token }));
+        if secretary {
+            args.push(json!("--secretary"));
+        }
     }
     json!({
         "name": SERVER_NAME,
@@ -315,6 +334,7 @@ pub async fn serve(
     previews: Option<PathBuf>,
     review: Option<PathBuf>,
     publishing: Option<Publishing>,
+    secretary: Option<Box<dyn secretary::Secretary>>,
 ) -> io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -327,6 +347,9 @@ pub async fn serve(
     }
     if let Some(publishing) = publishing {
         session = session.with_publishing(publishing);
+    }
+    if let Some(secretary) = secretary {
+        session = session.with_secretary(secretary);
     }
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -386,13 +409,17 @@ pub async fn handle<N: Notes>(
                     "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
                     "instructions": instructions(root, known.as_ref(), session.previews.is_some(), session.publishing.is_some())
                         + &session.review.as_ref().map(|_| review_instructions(root)).unwrap_or_default()
+                        + &session.secretary.as_ref().map(|_| secretary::instructions()).unwrap_or_default()
                 }),
             )
         }
         "ping" => result(id, json!({})),
         "tools/list" => result(
             id,
-            json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some(), session.publishing.is_some()) }),
+            json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some(), session.publishing.is_some())
+                .into_iter()
+                .chain(session.secretary.iter().flat_map(|_| secretary::tools()))
+                .collect::<Vec<_>>() }),
         ),
         "tools/call" => {
             let name = message.pointer("/params/name").and_then(Value::as_str);
@@ -400,7 +427,14 @@ pub async fn handle<N: Notes>(
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(Value::Null);
+            let theirs = match (name, &session.secretary) {
+                (Some(tool), Some(secretary)) => {
+                    secretary::call(secretary.as_ref(), tool, &arguments).await
+                }
+                _ => None,
+            };
             let outcome = match (name, notes, &session.previews, &session.publishing) {
+                _ if theirs.is_some() => theirs.unwrap_or_else(|| Err(String::new())),
                 (Some(LIST_REPORTS), ..) => list_reports(root),
                 (Some(PUBLISH_REPORT), _, _, Some(publishing)) => {
                     publish_report(root, publishing, &arguments).await
@@ -1424,6 +1458,8 @@ fn result(id: Value, result: Value) -> Value {
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
+
+pub mod secretary;
 
 #[cfg(test)]
 mod tests;

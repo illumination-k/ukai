@@ -57,6 +57,14 @@ pub const GIT_ANNOTATION: &str = "ukai.dev/git";
 /// Annotation on the Job and its pod naming the knowledge scope, which the
 /// gateway reads to tell whose knowledge a pod may use from its relay token.
 pub const KNOWLEDGE_ANNOTATION: &str = "ukai.dev/knowledge";
+/// Annotation on the pod naming its agent's id in `gateway.toml`, and the
+/// pane key of a workspace of its own: how a secretary is told which
+/// workspace a running pod is.
+pub const AGENT_ANNOTATION: &str = "ukai.dev/agent";
+pub const PANE_ANNOTATION: &str = "ukai.dev/pane";
+/// The agent container's environment variable saying its agent is a
+/// secretary, for the relay to offer the secretary's tools.
+pub const SECRETARY_ENV: &str = "UKAI_SECRETARY";
 /// The relay binary's path in the image named by [`job`]'s `relay_image`.
 const RELAY_IN_IMAGE: &str = "/usr/local/bin/ukai-relay";
 const RELAY_DIR: &str = "/ukai/bin";
@@ -70,7 +78,11 @@ const GRACE_PERIOD_SECONDS: i64 = 60;
 /// identity of the workspace.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// The agent's id in `gateway.toml`.
+    pub agent_id: String,
     pub agent: KubernetesAgent,
+    /// The pane key of a workspace of its own; `None` for the shared one.
+    pub pane: Option<String>,
     /// Short, stable id of `(user, namespace, repository, ref, agent command,
     /// pane key)`.
     pub workspace_id: String,
@@ -80,7 +92,13 @@ pub struct Plan {
 impl Plan {
     /// `pane` keys a workspace of one pane's own; without it, every
     /// connection to this agent shares one.
-    pub fn new(agent: KubernetesAgent, user: &str, namespace: &str, pane: Option<&str>) -> Self {
+    pub fn new(
+        agent_id: &str,
+        agent: KubernetesAgent,
+        user: &str,
+        namespace: &str,
+        pane: Option<&str>,
+    ) -> Self {
         let mut parts = vec![
             user,
             namespace,
@@ -92,7 +110,9 @@ impl Plan {
         parts.extend(pane);
         let workspace_id = workspace_id(&parts);
         Self {
+            agent_id: agent_id.to_owned(),
             agent,
+            pane: pane.map(str::to_owned),
             workspace_id,
             user: user.to_owned(),
         }
@@ -210,6 +230,9 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
             .as_deref()
             .map(|url| env(GATEWAY_URL_ENV, url)),
     );
+    if agent.secretary {
+        agent_env.push(env(SECRETARY_ENV, "true"));
+    }
     agent_env.extend(agent.env.iter().map(|(name, value)| env(name, value)));
     agent_env.extend(secret_env(&agent.secret_env));
     if let Some(token) = github_token {
@@ -397,12 +420,17 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         ..Container::default()
     };
 
+    let mut pod_annotations = BTreeMap::from([
+        (GIT_ANNOTATION.to_owned(), agent.workspace.git.clone()),
+        (KNOWLEDGE_ANNOTATION.to_owned(), agent.knowledge_scope()),
+        (AGENT_ANNOTATION.to_owned(), plan.agent_id.clone()),
+    ]);
+    if let Some(pane) = &plan.pane {
+        pod_annotations.insert(PANE_ANNOTATION.to_owned(), pane.clone());
+    }
     let metadata = ObjectMeta {
         labels: Some(plan.labels()),
-        annotations: Some(BTreeMap::from([
-            (GIT_ANNOTATION.to_owned(), agent.workspace.git.clone()),
-            (KNOWLEDGE_ANNOTATION.to_owned(), agent.knowledge_scope()),
-        ])),
+        annotations: Some(pod_annotations),
         ..ObjectMeta::default()
     };
     Job {

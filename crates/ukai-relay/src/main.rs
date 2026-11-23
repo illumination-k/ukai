@@ -48,6 +48,10 @@ struct Cli {
     /// project the MCP server hands the agent.
     #[arg(long, env = "UKAI_GATEWAY_URL")]
     gateway: Option<String>,
+    /// The agent is the gateway's secretary, which reads and prompts the
+    /// other workspaces.
+    #[arg(long, env = "UKAI_SECRETARY")]
+    secretary: bool,
     /// The agent and its arguments.
     #[arg(last = true, required = true, value_name = "AGENT")]
     command: Vec<String>,
@@ -74,6 +78,9 @@ enum Mode {
         /// for publishing reports through the gateway.
         #[arg(long)]
         sessions: Option<PathBuf>,
+        /// Offer the secretary's tools, through the gateway.
+        #[arg(long)]
+        secretary: bool,
     },
 }
 
@@ -120,6 +127,7 @@ async fn serve(cli: Cli) -> ExitCode {
         previews,
         review,
         sessions,
+        secretary,
     }) = cli.mode
     {
         let publishing = match (&gateway, &token, sessions) {
@@ -140,9 +148,9 @@ async fn serve(cli: Cli) -> ExitCode {
             }
             _ => None,
         };
-        let notes = match (gateway, &token) {
+        let notes = match (&gateway, &token) {
             (Some(gateway), Some(token)) => {
-                match KnowledgeEndpoint::for_workspace(&gateway, token) {
+                match KnowledgeEndpoint::for_workspace(gateway, token) {
                     Ok(endpoint) => Some(endpoint),
                     Err(error) => {
                         tracing::warn!(%error, "cannot reach the gateway's knowledge");
@@ -152,7 +160,23 @@ async fn serve(cli: Cli) -> ExitCode {
             }
             _ => None,
         };
-        return match ukai_relay::mcp::serve(&root, notes, previews, review, publishing).await {
+        let secretary = match (secretary, &gateway, &token) {
+            (true, Some(gateway), Some(token)) => {
+                match ukai_acp::secretary::SecretaryEndpoint::for_workspace(gateway, token) {
+                    Ok(endpoint) => {
+                        Some(Box::new(endpoint) as Box<dyn ukai_relay::mcp::secretary::Secretary>)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot reach the gateway for the secretary's tools");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        return match ukai_relay::mcp::serve(&root, notes, previews, review, publishing, secretary)
+            .await
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "mcp server failed");
@@ -172,6 +196,7 @@ async fn serve(cli: Cli) -> ExitCode {
         command: program,
         args: command.collect(),
         snapshot_trigger: cli.snapshot_trigger,
+        secretary: cli.secretary,
     };
     match run(options).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -222,7 +247,7 @@ mod tests {
     fn mcp_needs_no_agent() {
         let cli = parse(&["mcp", "--root", "/workspace"]).unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None, sessions: None }) if root == std::path::Path::new("/workspace"))
+            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None, sessions: None, secretary: false }) if root == std::path::Path::new("/workspace"))
         );
         let cli =
             parse(&["mcp", "--gateway", "http://ukai-gateway"]).unwrap_or_else(|e| panic!("{e}"));

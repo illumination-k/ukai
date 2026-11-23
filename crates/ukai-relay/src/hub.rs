@@ -25,14 +25,26 @@
 //!   session the key is ([`Output::SessionKey`]): a server is started before
 //!   the agent names the session it serves, and this is how it learns it.
 //!
+//! - A secretary (see "秘書" in `docs/design.md`) reads the sessions through
+//!   [`Hub::sessions`] and [`Hub::transcript`], and sends a prompt with no
+//!   connection of its own ([`Hub::prompt_unattached`],
+//!   [`Hub::start_unattached`]): attaching would take the session from the
+//!   user's pane. The attached client hears the prompt and the turn as if
+//!   it had sent it.
+//!
 //! Every input returns the messages to send; nothing here does I/O.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
+use ukai_acp::secretary::{Entry, SessionSummary};
 
 /// A client connection, numbered by the caller.
 pub type ConnId = u64;
+
+/// The connection a prompt with no client comes from: never connected, so
+/// nothing is sent to it. Callers number their connections from 1.
+pub const UNATTACHED: ConnId = 0;
 
 /// Notification the relay sends about a session's prompt turn.
 pub const TURN_STATE: &str = "_ukai/turn_state";
@@ -53,6 +65,21 @@ pub enum Output {
         key: String,
         session: String,
     },
+    /// The session [`Hub::start_unattached`] asked for with `ticket` was
+    /// set up (its id) or refused (why).
+    Started {
+        ticket: u64,
+        outcome: Result<String, String>,
+    },
+}
+
+/// Why [`Hub::prompt_unattached`] sent nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptRefused {
+    /// The relay does not know the session (or is still loading it).
+    Unknown,
+    /// Its turn is running.
+    Running,
 }
 
 /// What a request the relay sent to the agent was for.
@@ -81,6 +108,8 @@ struct Session {
     /// Set until the agent answers a forwarded `session/load`: the session is
     /// not known to the relay yet, and the replay is being recorded.
     loading: bool,
+    /// How the last turn ended.
+    stop_reason: Option<String>,
 }
 
 impl Session {
@@ -142,6 +171,11 @@ pub struct Hub {
     /// Key given to the MCP servers of a setup forwarded to the agent, by
     /// the id of the request, until it answers.
     keys: BTreeMap<u64, String>,
+    /// The prompt for each session [`Hub::start_unattached`] is setting up,
+    /// by ticket.
+    starting: BTreeMap<u64, String>,
+    /// Prompts sent unattached so far, for each to have an id of its own.
+    unattached_prompts: u64,
 }
 
 impl Hub {
@@ -177,6 +211,94 @@ impl Hub {
     /// connected client or a running turn.
     pub fn busy(&self) -> bool {
         !self.conns.is_empty() || self.sessions.values().any(|s| s.turn.is_some())
+    }
+
+    /// Every session the relay knows, newest id last.
+    pub fn sessions(&self) -> Vec<SessionSummary> {
+        self.sessions
+            .iter()
+            .filter(|(_, state)| !state.loading)
+            .map(|(id, state)| {
+                let (last_prompt, last_reply) = digest::last_prompt_and_reply(&state.history);
+                SessionSummary {
+                    id: id.clone(),
+                    title: digest::title(&state.history),
+                    running: state.turn.is_some(),
+                    stop_reason: state.stop_reason.clone(),
+                    waiting: !state.pending.is_empty(),
+                    last_prompt,
+                    last_reply,
+                }
+            })
+            .collect()
+    }
+
+    /// The last `limit` entries of a session's history; `None` for one the
+    /// relay does not know.
+    pub fn transcript(&self, session: &str, limit: usize) -> Option<Vec<Entry>> {
+        let state = self.sessions.get(session).filter(|state| !state.loading)?;
+        Some(digest::tail(&state.history, limit))
+    }
+
+    /// Send `text` as a prompt to `session` with no client of its own. The
+    /// attached client, if any, hears it as its own turn.
+    pub fn prompt_unattached(
+        &mut self,
+        session: &str,
+        text: &str,
+    ) -> Result<Vec<Output>, PromptRefused> {
+        let state = self
+            .sessions
+            .get(session)
+            .filter(|state| !state.loading)
+            .ok_or(PromptRefused::Unknown)?;
+        if state.turn.is_some() {
+            return Err(PromptRefused::Running);
+        }
+        let attached = state.attached;
+        self.unattached_prompts += 1;
+        let id = json!(format!("unattached-{}", self.unattached_prompts));
+        let block = json!({ "type": "text", "text": text });
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/prompt",
+            "params": { "sessionId": session, "prompt": [block] }
+        });
+        let mut outputs = self.client_request(UNATTACHED, id, "session/prompt", message);
+        if let Some(conn) = attached {
+            outputs.push(Output::Client(
+                conn,
+                notification(
+                    "session/update",
+                    json!({
+                        "sessionId": session,
+                        "update": { "sessionUpdate": "user_message_chunk", "content": block }
+                    }),
+                ),
+            ));
+            outputs.push(Output::Client(conn, turn_state(session, "running", None)));
+        }
+        Ok(outputs)
+    }
+
+    /// Set up a session with no client of its own and send it `text`. Its
+    /// id, or why there is none, comes as [`Output::Started`] with `ticket`.
+    pub fn start_unattached(&mut self, ticket: u64, text: String) -> Vec<Output> {
+        if self.agent_init.is_none() {
+            return vec![Output::Started {
+                ticket,
+                outcome: Err("the agent is still starting; try again in a moment".to_owned()),
+            }];
+        }
+        self.starting.insert(ticket, text);
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": ticket,
+            "method": "session/new",
+            "params": { "cwd": self.cwd.clone().unwrap_or_else(|| ".".to_owned()), "mcpServers": [] }
+        });
+        self.client_request(UNATTACHED, json!(ticket), "session/new", message)
     }
 
     pub fn connect(&mut self, conn: ConnId) {
@@ -505,6 +627,11 @@ impl Hub {
             outputs.push(Output::SessionKey { key, session });
         }
         match (method.as_str(), session) {
+            ("session/new", _) if conn == UNATTACHED => {
+                self.session_created(conn, &message);
+                outputs.extend(self.started(&message));
+                return outputs;
+            }
             ("session/new", _) => self.session_created(conn, &message),
             ("session/load" | "session/resume", Some(sid)) => self.session_restored(&sid, &message),
             ("session/set_config_option", Some(sid)) => {
@@ -517,6 +644,13 @@ impl Hub {
             }
             ("session/prompt", Some(sid)) => {
                 outputs.push(Output::TurnEnded(sid.clone()));
+                if let Some(state) = self.sessions.get_mut(&sid) {
+                    state.stop_reason = message
+                        .pointer("/result/stopReason")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| message.get("error").map(|_| "error".to_owned()));
+                }
                 if let Some(attached) = self.end_turn(&sid, conn) {
                     // The client that asked is gone; tell whoever is here.
                     let stop = message.pointer("/result/stopReason").cloned();
@@ -564,6 +698,37 @@ impl Hub {
             };
             self.sessions.insert(sid.to_owned(), session);
         }
+    }
+
+    /// The agent answered a `session/new` from [`Hub::start_unattached`]:
+    /// say so, and send the prompt it was set up for.
+    fn started(&mut self, response: &Value) -> Vec<Output> {
+        let Some(ticket) = response.get("id").and_then(Value::as_u64) else {
+            return Vec::new();
+        };
+        let text = self.starting.remove(&ticket);
+        let Some(session) = response
+            .pointer("/result/sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            let why = response
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("the agent set up no session");
+            return vec![Output::Started {
+                ticket,
+                outcome: Err(why.to_owned()),
+            }];
+        };
+        let mut outputs = vec![Output::Started {
+            ticket,
+            outcome: Ok(session.clone()),
+        }];
+        if let Some(text) = text {
+            outputs.extend(self.prompt_unattached(&session, &text).unwrap_or_default());
+        }
+        outputs
     }
 
     /// The agent answered a `session/load` or `session/resume` the relay
@@ -649,6 +814,8 @@ fn turn_state(session: &str, state: &str, stop_reason: Option<Value>) -> Value {
     }
     notification(TURN_STATE, Value::Object(params))
 }
+
+mod digest;
 
 #[cfg(test)]
 mod tests;

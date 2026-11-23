@@ -63,6 +63,10 @@ pub struct KubernetesAgent {
     /// every agent naming the same one, whatever repository it works on;
     /// the agent's repository when absent.
     pub knowledge: Option<String>,
+    /// The agent is a secretary: its pod may read and prompt the other
+    /// workspaces' sessions (see "秘書" in `docs/design.md`).
+    #[serde(default)]
+    pub secretary: bool,
 }
 
 impl KubernetesAgent {
