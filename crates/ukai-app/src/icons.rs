@@ -32,6 +32,7 @@ pub enum Icon {
     Trash,
     Sidebar,
     SidebarDetail,
+    Chart,
 }
 
 impl Icon {
@@ -60,6 +61,7 @@ impl Icon {
             ],
             Self::Copy => &["M5.5 5.5h8v8h-8z", "M10.5 5.5v-3h-8v8h3"],
             Self::Check => &["M3.5 8.5l3 3 6-7"],
+            Self::Chart => &["M2.5 13.5h11", "M4.5 11V8", "M8 11V4", "M11.5 11V6.5"],
             Self::History => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
                 "M8 5v3l2 1.5",

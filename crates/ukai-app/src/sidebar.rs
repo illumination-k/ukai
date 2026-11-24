@@ -22,6 +22,7 @@ use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
 use crate::knowledge::KnowledgeNode;
 use crate::layout::{launch_agent, launch_target, open_agent_in};
+use crate::metrics_pane::MetricsNode;
 use crate::ports::PortGroup;
 use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, remove_project};
 use crate::report_pane::ReportGroup;
@@ -445,6 +446,11 @@ fn ProjectPanes(id: ProjectId, launching: Signal<bool>, opened: Opened) -> Eleme
             div { class: "tree-divider" }
             KnowledgeNode { project: id.clone(), depth: 0 }
             ScheduleNode {
+                project: id.clone(),
+                gateways: tree.gateways.clone(),
+                depth: 0,
+            }
+            MetricsNode {
                 project: id.clone(),
                 gateways: tree.gateways.clone(),
                 depth: 0,

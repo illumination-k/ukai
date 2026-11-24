@@ -1,6 +1,7 @@
 //! The SurrealDB server everything `ukai-store` keeps lives in: one
 //! namespace ([`NAMESPACE`]), a database per kind of thing kept (notes in
-//! `knowledge`, which session published which report in `reports`), each on
+//! `knowledge`, which session published which report in `reports`, what each
+//! turn took in `metrics`), each on
 //! a connection of its own, since a connection is in one database at a time.
 
 use surrealdb::Surreal;

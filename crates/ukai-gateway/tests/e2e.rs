@@ -566,3 +566,105 @@ async fn only_an_agent_pod_publishes_a_report() {
     let refused = reports.publish(request).await.map(drop);
     assert_eq!(refused.map_err(|s| s.code()), Err(Code::Unauthenticated));
 }
+
+/// A turn the store keeps for the e2e agent, as a relay's pod would have
+/// the gateway record it, shows on the agent's dashboard through the
+/// gateway, summed under its branch.
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn a_recorded_turn_shows_on_the_dashboard() {
+    use ukai_acp::metrics::MetricsEndpoint;
+    use ukai_proto::metrics::v1 as metrics;
+    use ukai_proto::metrics::v1::metrics_store_client::MetricsStoreClient;
+
+    let mut store = MetricsStoreClient::connect(env("UKAI_E2E_STORE"))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let mut record = tonic::Request::new(metrics::RecordRequest {
+        workspace: fresh("e2e-workspace"),
+        agent: AGENT.into(),
+        turn: None,
+    });
+    let branch = fresh("e2e/metrics");
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    record.get_mut().turn = Some(metrics::Turn {
+        session: "s1".into(),
+        branch: Some(branch.clone()),
+        started: now - 60_000,
+        ended: now,
+        stop_reason: Some("end_turn".into()),
+        cost: Some(metrics::Cost {
+            amount: 0.25,
+            currency: "USD".into(),
+        }),
+        tools: vec![metrics::ToolStat {
+            name: "$ cargo test".into(),
+            count: 2,
+            failed: 1,
+            millis: 30_000,
+        }],
+        ..metrics::Turn::default()
+    });
+    record.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", env("UKAI_E2E_STORE_TOKEN"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let recorded = store
+        .record(record)
+        .await
+        .unwrap_or_else(|status| panic!("{status:?}"))
+        .into_inner();
+    assert!(recorded.problems.is_empty(), "{recorded:?}");
+
+    let endpoint =
+        MetricsEndpoint::resolve(&agent_spec(&env("UKAI_E2E_GATEWAY_TOKEN")), |_, _| None)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("not a gateway agent"));
+    let branches = endpoint.branches(1).await.unwrap_or_else(|e| panic!("{e}"));
+    let shown = branches
+        .iter()
+        .find(|b| b.branch == branch)
+        .unwrap_or_else(|| panic!("{branch} is not on the dashboard: {branches:?}"));
+    assert_eq!((shown.turns, shown.agent_millis), (1, 60_000));
+    assert_eq!(shown.repo.as_deref(), Some("illumination-k/ukai"));
+    assert_eq!(shown.tools[0].name, "$ cargo test");
+
+    let refused = MetricsEndpoint::resolve(&agent_spec("wrong"), |_, _| None)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("not a gateway agent"))
+        .branches(1)
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn only_an_agent_pod_records_a_turn() {
+    use ukai_proto::gateway::v1::workspace_metrics_client::WorkspaceMetricsClient;
+    use ukai_proto::metrics::v1::Turn;
+
+    let mut metrics = WorkspaceMetricsClient::connect(env("UKAI_E2E_GATEWAY"))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    // The gateway's own token names no pod.
+    let mut request = tonic::Request::new(Turn {
+        session: "s1".into(),
+        ..Turn::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", env("UKAI_E2E_GATEWAY_TOKEN"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let refused = metrics.record(request).await.map(drop);
+    assert_eq!(refused.map_err(|s| s.code()), Err(Code::Unauthenticated));
+}

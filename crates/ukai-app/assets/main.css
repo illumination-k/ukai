@@ -3410,3 +3410,196 @@ button.outline.danger {
   color: var(--muted-fg);
   font-size: 11px;
 }
+
+/* The dashboard of a gateway agent's pull requests. */
+.metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 16px;
+}
+
+.metrics-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.metrics-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.metrics-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.metrics-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.metrics-tile-label,
+.metrics-tile-detail {
+  color: var(--muted-fg);
+  font-size: 11px;
+}
+
+.metrics-tile-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics-empty {
+  margin: 0;
+}
+
+.metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.metrics-table th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-fg);
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.metrics-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.metrics-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.metrics-row {
+  cursor: pointer;
+}
+
+.metrics-row:hover,
+.metrics-row.open {
+  background: var(--hover);
+}
+
+.metrics-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.metrics-pr {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.metrics-pr a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.metrics-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metrics-branch {
+  color: var(--muted-fg);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.metrics-state {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--muted-fg);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.metrics-state.open {
+  background: color-mix(in srgb, var(--ready) 18%, transparent);
+  color: var(--fg);
+}
+
+.metrics-state.merged {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--fg);
+}
+
+.metrics-bar {
+  height: 3px;
+  margin-top: 3px;
+  border-radius: 2px;
+  background: var(--muted);
+}
+
+.metrics-bar > div {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.metrics-detail > td {
+  background: var(--hover);
+}
+
+.metrics-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  padding: 4px 0;
+}
+
+.metrics-breakdown h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.metrics-breakdown table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.metrics-breakdown td {
+  padding: 3px 4px;
+  border-bottom: none;
+}
+
+.metrics-breakdown .mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.metrics-failed {
+  color: var(--error);
+}
+
+.metrics-facts p {
+  margin: 0 0 4px;
+}

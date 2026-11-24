@@ -147,12 +147,24 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     let mut conns: HashMap<ConnId, UnboundedSender<TransportFrame>> = HashMap::new();
     let trigger = options.snapshot_trigger.clone();
     let mut answers = crate::sessions::Answers::default();
+    // What each turn took, recorded with the gateway; see `crate::metrics`.
+    let mut recorder = crate::metrics::Recorder::new(
+        options.gateway.as_deref(),
+        options.token.as_deref(),
+        cwd.clone(),
+    );
     let dispatch = |outputs: Vec<Output>,
                     conns: &HashMap<ConnId, UnboundedSender<TransportFrame>>,
-                    answers: &mut crate::sessions::Answers| {
+                    answers: &mut crate::sessions::Answers,
+                    recorder: &mut Option<crate::metrics::Recorder>| {
         for output in outputs {
             match output {
-                Output::Agent(message) => send_agent(message),
+                Output::Agent(message) => {
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.to_agent(&message);
+                    }
+                    send_agent(message);
+                }
                 Output::Client(conn, message) => {
                     if let (Some(tx), Some(frame)) = (conns.get(&conn), frame(message)) {
                         let _ = tx.unbounded_send(frame);
@@ -207,7 +219,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         cwd.map(|dir| dir.to_string_lossy().into_owned()),
         mcp_servers,
     );
-    dispatch(init, &conns, &mut answers);
+    dispatch(init, &conns, &mut answers, &mut recorder);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let terminate = terminate_signal();
@@ -220,7 +232,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                     break;
                 };
                 for message in values(frame) {
-                    dispatch(hub.from_agent(message), &conns, &mut answers);
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.from_agent(&message);
+                    }
+                    dispatch(hub.from_agent(message), &conns, &mut answers, &mut recorder);
                 }
             }
             Some(event) = events.recv() => match event {
@@ -231,7 +246,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 }
                 Event::Frame(conn, frame) => {
                     for message in values(frame) {
-                        dispatch(hub.from_client(conn, message), &conns, &mut answers);
+                        dispatch(hub.from_client(conn, message), &conns, &mut answers, &mut recorder);
                     }
                 }
                 Event::Close(conn) => {
@@ -242,7 +257,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
             },
             Some(query) = queries.recv() => {
                 let outputs = answers.answer(&mut hub, query);
-                dispatch(outputs, &conns, &mut answers);
+                dispatch(outputs, &conns, &mut answers, &mut recorder);
             }
             _ = tick.tick() => {
                 // Someone typing in a terminal is as busy as a turn.

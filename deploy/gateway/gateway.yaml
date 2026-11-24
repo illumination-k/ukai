@@ -113,6 +113,15 @@ spec:
                   name: ukai-rustfs
                   key: secret-key
                   optional: true
+            # A GitHub token that reads the agents' repositories' pull
+            # requests and Actions runs, for the PR metrics; without it only
+            # public repositories are read, at a lower rate limit.
+            - name: UKAI_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-github
+                  key: token
+                  optional: true
           ports:
             - name: http
               containerPort: 8080

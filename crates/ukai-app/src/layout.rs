@@ -25,6 +25,7 @@ use crate::browser_pane::BrowserView;
 use crate::diff_pane::DiffPane;
 use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
+use crate::metrics_pane::MetricsView;
 use crate::ports::{PortPrompt, open_browser};
 use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, delete_report, download_report, pick_report};
@@ -294,6 +295,9 @@ pub fn pane_label(
             Some(project_name(project)),
             note.clone().unwrap_or_else(|| "New note".to_owned()),
         ),
+        Some(PaneContent::Metrics { project, agent }) => {
+            (Some(project_name(project)), format!("PR metrics · {agent}"))
+        }
         Some(PaneContent::Diff { project, place }) => (
             Some(project_name(project)),
             match place.agent() {
@@ -804,6 +808,16 @@ fn PaneView(pane: PaneId) -> Element {
                             project,
                             agent,
                             note,
+                        }
+                    }
+                },
+                PaneContent::Metrics { project, agent } => rsx! {
+                    for (project, agent) in [(project, agent)] {
+                        MetricsView {
+                            key: "{project}-{agent}",
+                            pane,
+                            project,
+                            agent,
                         }
                     }
                 },

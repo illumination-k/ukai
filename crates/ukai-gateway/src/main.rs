@@ -45,7 +45,10 @@
 //! ([`knowledge`]). Agent pods reach their own scope's at
 //! `WorkspaceKnowledge`, with their relay's token instead of the gateway's;
 //! they cannot review. They publish the reports their sessions write at
-//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too. A
+//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too, and
+//! their relays record what each prompt turn took at `WorkspaceMetrics`,
+//! which clients read per branch, joined with GitHub's pull requests and
+//! CI runs, at `Metrics` ([`metrics`]). A
 //! secretary agent's pod reads and prompts the other workspaces' sessions at
 //! `WorkspaceSecretary` ([`secretary`]).
 //!
@@ -55,8 +58,8 @@
 //! - `UKAI_GATEWAY_TOKEN`: if set, clients must send `Authorization: Bearer <it>`
 //! - `UKAI_RELAY_IMAGE`: image whose `/usr/local/bin/ukai-relay` agent pods
 //!   run; the gateway's own image (read from its pod, `HOSTNAME`) when unset
-//! - `UKAI_STORE_URL`: `ukai-store`, which keeps the notes and who
-//!   published which report (`http://ukai-store:50051` in
+//! - `UKAI_STORE_URL`: `ukai-store`, which keeps the notes, who
+//!   published which report, and what each turn took (`http://ukai-store:50051` in
 //!   `deploy/gateway`); without it the gateway keeps neither, and agent
 //!   pods are not offered them
 //! - `UKAI_STORE_TOKEN`: the token `ukai-store` answers; the store needs
@@ -67,6 +70,10 @@
 //!   reports ([`archive`]), reached as the `AWS_*` variables say
 //!   (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 //!   `AWS_REGION`); without it no copy is kept
+//! - `UKAI_GITHUB_TOKEN`: a GitHub token that reads the agents'
+//!   repositories' pull requests and Actions runs, for the metrics; without
+//!   it only public repositories are read, at GitHub's lower rate limit
+//! - `UKAI_GITHUB_API`: GitHub's API (default `https://api.github.com`)
 //!
 //! Each agent runs in a Job per workspace, in the gateway's namespace, with
 //! nothing installed cluster-side: no CRD, no PersistentVolumeClaim of its
@@ -99,6 +106,7 @@ mod cluster;
 mod config;
 mod job;
 mod knowledge;
+mod metrics;
 mod reports;
 mod schedules;
 mod secretary;
@@ -121,6 +129,10 @@ struct Gateway {
     knowledge: Option<KnowledgeClient>,
     /// `ukai-store`'s record of who published which report, likewise.
     reports: Option<reports::ReportsClient>,
+    /// `ukai-store`'s record of what each turn took, likewise.
+    metrics: Option<metrics::MetricsClient>,
+    /// Where the dashboard finds each branch's pull request and CI runs.
+    github: metrics::Github,
     /// The copy of the workspaces' reports, when there is a bucket for it.
     archive: Option<Arc<Archive>>,
     /// The agent pods' addresses, which the person's side refuses.
@@ -166,19 +178,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let knowledge_url = env("UKAI_STORE_URL");
-    let (knowledge, publications) = match (&knowledge_url, env("UKAI_STORE_TOKEN")) {
+    let (knowledge, publications, turns) = match (&knowledge_url, env("UKAI_STORE_TOKEN")) {
         (Some(url), Some(token)) => {
             let store = |error| format!("UKAI_STORE_URL: {error}");
             (
                 Some(KnowledgeClient::new(url, &token).map_err(store)?),
                 Some(reports::ReportsClient::new(url, &token).map_err(store)?),
+                Some(metrics::MetricsClient::new(url, &token).map_err(store)?),
             )
         }
         (Some(_), None) => {
             tracing::warn!("UKAI_STORE_URL is set without UKAI_STORE_TOKEN; keeping no store");
-            (None, None)
+            (None, None, None)
         }
-        (None, _) => (None, None),
+        (None, _) => (None, None, None),
     };
     // Agent pods are told where the gateway is only when it keeps a store.
     let gateway_url = knowledge.as_ref().map(|_| {
@@ -209,6 +222,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         schedules,
         knowledge,
         reports: publications,
+        metrics: turns,
+        github: metrics::Github::new(
+            env("UKAI_GITHUB_API").unwrap_or_else(|| "https://api.github.com".to_owned()),
+            env("UKAI_GITHUB_TOKEN"),
+        ),
         archive,
         agent_pods: access::AgentPods::default(),
         http: reqwest::Client::new(),
@@ -258,9 +276,11 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::commands_server::CommandsServer;
     use ukai_proto::gateway::v1::files_server::FilesServer;
     use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
+    use ukai_proto::gateway::v1::metrics_server::MetricsServer;
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
+    use ukai_proto::gateway::v1::workspace_metrics_server::WorkspaceMetricsServer;
     use ukai_proto::gateway::v1::workspace_reports_server::WorkspaceReportsServer;
     use ukai_proto::gateway::v1::workspace_secretary_server::WorkspaceSecretaryServer;
 
@@ -277,6 +297,12 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
         })),
     )
     .add_service(web.layer(WorkspaceReportsServer::new(reports::PodReports {
+        gateway: gateway.clone(),
+    })))
+    .add_service(web.layer(WorkspaceMetricsServer::new(metrics::PodMetrics {
+        gateway: gateway.clone(),
+    })))
+    .add_service(web.layer(MetricsServer::new(metrics::ClientMetrics {
         gateway: gateway.clone(),
     })))
     .add_service(

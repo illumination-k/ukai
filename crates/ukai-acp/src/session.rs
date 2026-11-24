@@ -200,7 +200,7 @@ pub struct Usage {
 }
 
 /// Cumulative cost of a session.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cost {
     pub amount: f64,
     /// ISO 4217 code, e.g. `USD`.

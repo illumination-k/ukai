@@ -247,7 +247,7 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 部品の間の通信: ACP は仕様どおり WebSocket（`/acp`）で、ポートのトンネル（`/forward`）はバイト列、レポートは
 web view が相対パスで素材を読むので HTTP のまま。それ以外の要求と応答の API は gRPC にしていく。型は
 `ukai-proto` の `.proto` が決める。アプリと relay → gateway の `ukai.gateway.v1`（`Knowledge`・
-`WorkspaceKnowledge`・`WorkspaceReports`・`Agents`・`Ports`・`Files`・`Commands`・`Schedules`）と、gateway → `ukai-store` が gRPC。gateway → relay
+`WorkspaceKnowledge`・`WorkspaceReports`・`Metrics`・`WorkspaceMetrics`・`Agents`・`Ports`・`Files`・`Commands`・`Schedules`）と、gateway → `ukai-store` が gRPC。gateway → relay
 （`/ports` など）はクラスタの中の HTTP のまま。アプリと gateway の間は IAP
 などの HTTP/1.1 の proxy を通ることがあるので、gateway は同じポートで gRPC（h2c）と gRPC-Web の両方を受け、
 gateway のクライアント（アプリと relay）は gRPC-Web で話す。gRPC-Web は、エージェントのヘッダー・TLS・
@@ -557,6 +557,60 @@ workspace = { git = "https://github.com/o/r" }
 - 段階: (1) 束ねる（済み）、(2) MCP サーバーの設定、(3) GitHub の webhook、(4) メール。残りの (1) の UI:
   秘書の常駐ワークスペースとサイドバーの固定、秘書が立てたワークスペースをアプリの pane で開くこと
   （今は鍵を知る pane からしか開けない）、秘書の prompt の描き分け。
+
+### PR ごとのメトリクス
+
+エージェントに任せた仕事が何にどれだけかかったかを、pull request（＝ブランチ）ごとに見る。ターンの時間・
+トークン・コスト・実行したコマンドはエージェントのセッションの側にしかなく、PR と CI は GitHub の側にしか
+ないので、gateway が両方を突き合わせる。対象は gateway のエージェントだけ（手元の stdio エージェントは
+relay を通らないので測れない。後述「今後」）。
+
+```
+relay（ターンごとに計測）─WorkspaceMetrics.Record─▶ gateway ─MetricsStore─▶ ukai-store（表 turn）
+アプリ（ダッシュボード pane）─Metrics.Branches─▶ gateway ─▶ ukai-store ＋ GitHub REST（PR・Actions）
+```
+
+- **測るのは relay。** relay はクライアントとエージェントの間のメッセージをすべて通すので、時刻を添えて
+  `ukai_core::metrics::Meter`（純粋。時計は呼び出し側）に見せる。エージェントへ送る `session/prompt` で
+  ターンが始まり、その応答で終わる（`stopReason`、エラーなら `error`）。秘書の prompt も hub の出力として
+  同じ道を通る。ターンの中の `tool_call` / `tool_call_update` から、ツール呼び出しごとの時間（呼び出しから
+  `completed` / `failed` まで。終わらないものはターンの終わりまで）と失敗を数え、名前ごとに足す。名前は
+  コマンド（`kind` が `execute`）なら `$ cargo test` のようにプログラムと（`cargo`・`git` などは）
+  サブコマンド、ほかは ACP の `kind`、`kind` のないものはタイトルの最初の語（MCP のツール名など）。
+  1 ターン 64 名まで、残りは `…` にまとめる。
+- **トークンとコスト。** トークンは `session/prompt` の応答の `usage`（ACP の unstable。claude-agent-acp など
+  送るものだけ）をそのターンの分として持つ。コストは `usage_update` の累計の差分（ターンの前と後）。
+  relay を再起動して知らないセッションを load したときは、再生される `usage_update` を前の値に使う（再生中の
+  ツール呼び出しは数えない）。送らないエージェントでは空のまま。
+- **ブランチ。** ターンが終わったら relay が checkout で `git symbolic-ref --short HEAD` を読み、ターンに
+  付ける（detached や安全でない名前は付けない）。セッションの途中でブランチを変えても、ターンごとに
+  正しい側に入る。
+- **記録。** relay は自分のトークンで `ukai.gateway.v1.WorkspaceMetrics.Record` を呼び、gateway は
+  トークンから Pod を探してワークスペースとエージェント（注釈）を決める（レポートの `WorkspaceReports` と
+  同じ。Pod の申告は信じない）。`ukai-store` の database `metrics` の表 `turn` に、`[ワークスペース,
+  セッション, 開始時刻]` を id にして 1 ターン 1 件置く（送り直しは置き換え）。形の検査（セッション id、
+  ブランチ名、時刻の前後、通貨、ツール名）は `ukai_core::metrics::problems` を relay 側の型と store で
+  共有する。Pod より長く残る。gateway に store がなければ relay に gateway の場所が渡らないので何も送らない。
+- **集計は読むとき。** アプリが `ukai.gateway.v1.Metrics.Branches`（エージェントと日数。既定 30 日、
+  最大 365 日）を呼ぶと、gateway は store からその期間に終わったターン（新しい順に最大 2 万件）を読み、
+  ブランチごとに足す（`ukai_core::metrics::branches`: セッション数、ターン数、ターン時間の合計、トークン、
+  通貨ごとのコスト、コンテキストの最大、ツールごとの内訳）。
+- **GitHub。** エージェントの `workspace.git` が github.com のリポジトリなら、最近動いたブランチ 50 本まで、
+  `GET /repos/<r>/pulls?head=<owner>:<branch>&state=all`（最も新しい PR。状態は open / closed / merged、
+  作成・マージ・クローズの時刻からリードタイム）と `GET /repos/<r>/actions/runs?branch=<branch>`（直近 100 件。
+  終わった run の `run_started_at` から `updated_at` までを CI 時間として、ワークフローごとに足す。失敗は
+  `failure` / `timed_out` / `startup_failure`）を聞く。答えは 5 分持つ。トークンは gateway の
+  `UKAI_GITHUB_TOKEN`（Secret `ukai-github`、任意。エージェントの `github_token` は Pod の Secret で、
+  gateway は読まない）。なければ公開リポジトリだけを低いレート制限で読む。聞けなかった理由はブランチに
+  `github_problem` として付け、数字はそのまま出す。GitHub Enterprise は `UKAI_GITHUB_API`。
+- **アプリ。** サイドバーの gateway のエージェントの下（Schedules の後）に「PR metrics」を出し、押すと
+  pane（`PaneContent::Metrics { project, agent }`）で開く。上に合計（PR 数とマージ数、エージェント時間と
+  ターン数、CI 時間、トークン、コスト）、下にブランチごとの表（PR 番号・題・状態、エージェント時間、CI 時間、
+  リードタイム、ターン、トークン、コスト、最後に動いた時刻）。行を押すと、ツール・コマンドごとと CI
+  ワークフローごとの回数・失敗・時間、トークンの内訳を開く。期間は 7 / 30 / 90 / 365 日、1 分ごとに読み直す。
+- **今後:** 手元のエージェント（relay を通らない）の計測。アプリが同じ `Meter` を通して `state.json` か
+  手元の store に持つ。マージ済みの PR の答えをもっと長く持つこと。コストを返さないエージェントの
+  トークンからの見積もり。
 
 ### ワークスペース Pod
 

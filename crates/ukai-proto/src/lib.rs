@@ -20,6 +20,15 @@ pub mod reports {
     }
 }
 
+/// `ukai.metrics.v1`: what each prompt turn took, as `ukai-store` keeps it
+/// for the gateway.
+pub mod metrics {
+    pub mod v1 {
+        #![allow(clippy::all, clippy::pedantic, missing_docs)]
+        tonic::include_proto!("ukai.metrics.v1");
+    }
+}
+
 /// `ukai.gateway.v1`: what the gateway answers its clients and agent pods.
 pub mod gateway {
     pub mod v1 {

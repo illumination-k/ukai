@@ -124,6 +124,9 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// The dashboard of the pull requests `[agents.<agent>]` of `project`
+    /// (a gateway agent) worked on.
+    Metrics { project: ProjectId, agent: String },
     /// The changes of a workspace's checkout: this machine's, or a gateway
     /// agent's, named as a report's source names it.
     Diff {
@@ -189,6 +192,7 @@ impl PaneContent {
             | PaneContent::Browser { project, .. }
             | PaneContent::Schedule { project, .. }
             | PaneContent::Note { project, .. }
+            | PaneContent::Metrics { project, .. }
             | PaneContent::Diff { project, .. }
             | PaneContent::Terminal { project, .. } => Some(project),
         }

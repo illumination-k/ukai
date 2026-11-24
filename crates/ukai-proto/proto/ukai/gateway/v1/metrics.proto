@@ -1,0 +1,79 @@
+// Metrics per pull request of a gateway agent: what its sessions spent on
+// each branch, joined with the pull request and CI runs GitHub has for it.
+// See "PR ごとのメトリクス" in docs/design.md.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+import "ukai/metrics/v1/metrics.proto";
+
+// For clients.
+service Metrics {
+  // The agent's branches with what its sessions spent on each, newest
+  // activity first.
+  rpc Branches(BranchesRequest) returns (BranchesResponse);
+}
+
+// For agent pods, known by the relay's token: the relay records each turn
+// as it ends.
+service WorkspaceMetrics {
+  rpc Record(ukai.metrics.v1.Turn) returns (ukai.metrics.v1.RecordResponse);
+}
+
+message BranchesRequest {
+  string agent = 1;
+  // Only turns of the last this many days; 0 for the gateway's default.
+  uint32 days = 2;
+}
+
+message PullRequest {
+  uint64 number = 1;
+  string title = 2;
+  string url = 3;
+  // `open`, `closed`, or `merged`.
+  string state = 4;
+  // Unix milliseconds.
+  int64 created = 5;
+  optional int64 merged = 6;
+  optional int64 closed = 7;
+}
+
+// GitHub Actions runs on the branch.
+message Ci {
+  uint32 runs = 1;
+  uint32 failed = 2;
+  // Run time of the finished runs, summed.
+  uint64 millis = 3;
+  // The same, per workflow.
+  repeated ukai.metrics.v1.ToolStat workflows = 4;
+}
+
+message Branch {
+  // Empty for turns that ended off any branch.
+  string branch = 1;
+  // `owner/name` on GitHub, when the agent's repository is there.
+  optional string repo = 2;
+  optional PullRequest pull_request = 3;
+  optional Ci ci = 4;
+  // Why GitHub was not asked, or did not answer.
+  optional string github_problem = 5;
+  uint32 sessions = 6;
+  uint32 turns = 7;
+  // Turn time, summed.
+  uint64 agent_millis = 8;
+  optional ukai.metrics.v1.Tokens tokens = 9;
+  // Per currency.
+  repeated ukai.metrics.v1.Cost cost = 10;
+  uint64 context_peak = 11;
+  repeated ukai.metrics.v1.ToolStat tools = 12;
+  // Unix milliseconds: when the first turn started and the last ended.
+  int64 first = 13;
+  int64 last = 14;
+}
+
+message BranchesResponse {
+  repeated Branch branches = 1;
+  // Set when the gateway keeps no store, so there is nothing to show.
+  optional string problem = 2;
+}

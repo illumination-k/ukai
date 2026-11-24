@@ -1,0 +1,89 @@
+// Metrics: what each prompt turn of a gateway agent's sessions took (time,
+// tokens, cost, tool calls) and the branch it worked on, for the dashboard
+// of pull requests. See "PR ごとのメトリクス" in docs/design.md.
+syntax = "proto3";
+
+package ukai.metrics.v1;
+
+// The turns, as `ukai-store` keeps them. Only the gateway calls it, with the
+// token it shares with it, naming the workspace and agent it found out.
+service MetricsStore {
+  // Record a turn, or record it again (by workspace, session, and start).
+  rpc Record(RecordRequest) returns (RecordResponse);
+  // An agent's turns, newest first.
+  rpc List(ListRequest) returns (ListResponse);
+}
+
+// Tokens a turn used, as the agent reported them in its `session/prompt`
+// response (ACP's unstable `usage`).
+message Tokens {
+  uint64 total = 1;
+  uint64 input = 2;
+  uint64 output = 3;
+  optional uint64 thought = 4;
+  optional uint64 cached_read = 5;
+  optional uint64 cached_write = 6;
+}
+
+message Cost {
+  double amount = 1;
+  // ISO 4217, e.g. `USD`.
+  string currency = 2;
+}
+
+// The tool calls of one name in a turn (or summed over turns).
+message ToolStat {
+  // `$ cargo test` for a command, else the tool's kind or name.
+  string name = 1;
+  uint32 count = 2;
+  uint32 failed = 3;
+  // Time between the call and its last update, summed.
+  uint64 millis = 4;
+}
+
+// One prompt turn of a session.
+message Turn {
+  string session = 1;
+  // The branch the checkout was on when the turn ended.
+  optional string branch = 2;
+  // Unix milliseconds.
+  int64 started = 3;
+  int64 ended = 4;
+  optional string stop_reason = 5;
+  optional Tokens tokens = 6;
+  // What this turn cost: the agent's cumulative cost less what it had
+  // reported before the turn.
+  optional Cost cost = 7;
+  // Tokens in context, and the window, at the turn's end.
+  uint64 context_used = 8;
+  uint64 context_size = 9;
+  repeated ToolStat tools = 10;
+}
+
+message RecordRequest {
+  // The gateway's id of the workspace, from the pod's Job.
+  string workspace = 1;
+  // The agent's id in `gateway.toml`, from the pod.
+  string agent = 2;
+  Turn turn = 3;
+}
+
+message RecordResponse {
+  // Every reason the turn was refused; empty when it was recorded.
+  repeated string problems = 1;
+}
+
+message ListRequest {
+  string agent = 1;
+  // Only turns that ended at or after this, in Unix milliseconds.
+  int64 since = 2;
+}
+
+message RecordedTurn {
+  string workspace = 1;
+  Turn turn = 2;
+}
+
+message ListResponse {
+  repeated RecordedTurn turns = 1;
+}
