@@ -1,6 +1,7 @@
 //! The composer: the draft, what goes with it, and sending it.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use dioxus::core::spawn_forever;
@@ -35,6 +36,41 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
     // The highlighted suggestion, and whether escape hid the list.
     let mut picked = use_signal(|| 0_usize);
     let mut dismissed = use_signal(|| false);
+    // The textarea keeps what the user types; the draft follows it through
+    // `oninput`. Binding `value` to the draft would write each keystroke back
+    // a round trip late, over the keys typed meanwhile and into an input
+    // method's composition. Only a draft changed here (recalled, completed,
+    // cleared on send, dictated) is written into the textarea.
+    let input_id = use_hook(|| {
+        static VIEWS: AtomicU64 = AtomicU64::new(0);
+        format!("composer-{pane}-{}", VIEWS.fetch_add(1, Ordering::Relaxed))
+    });
+    // What the textarea holds, as far as this view knows.
+    let mut shown = use_signal(String::new);
+    use_effect({
+        let input_id = input_id.clone();
+        move || {
+            let Some(draft) = app.sessions.read().get(&pane).map(|s| s.composer.draft) else {
+                return;
+            };
+            let value = draft();
+            if *shown.peek() == value {
+                return;
+            }
+            shown.set(value.clone());
+            let eval = document::eval(&format!(
+                "const value = await dioxus.recv();
+                 const input = document.getElementById('{input_id}');
+                 if (input && input.value !== value) {{
+                     input.value = value;
+                     input.selectionStart = input.selectionEnd = value.length;
+                 }}"
+            ));
+            if let Err(error) = eval.send(value) {
+                tracing::warn!("composer: {error}");
+            }
+        }
+    });
     let Some(session) = app.sessions.read().get(&pane).cloned() else {
         return rsx! {};
     };
@@ -162,15 +198,16 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                 // (`::after`) sizes the grid cell both share.
                 div { class: "composer-input", "data-value": "{draft}",
                     textarea {
+                        id: "{input_id}",
                         rows: "1",
                         placeholder: placeholder(&status, steering),
                         disabled: !writable,
-                        value: "{draft}",
                         oninput: move |event: FormEvent| {
                             let value = event.value();
                             if mention::query(&value).is_some() {
                                 refresh_files(checkout.clone(), files);
                             }
+                            shown.set(value.clone());
                             draft.set(value);
                             picked.set(0);
                             dismissed.set(false);
