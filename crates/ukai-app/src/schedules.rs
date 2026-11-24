@@ -29,6 +29,7 @@ use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::projects::AppSignals;
 use crate::sidebar::Head;
+use crate::text_field::{TextField, use_text_field};
 
 /// How often the app asks the gateways for their schedules.
 const LIST_EVERY: Duration = Duration::from_secs(15);
@@ -527,6 +528,16 @@ pub fn ScheduleView(
     let mut draft = use_signal(|| schedule.is_none().then(new_spec));
     let errors = use_signal(Vec::<String>::new);
     let busy = use_signal(|| false);
+    let field = |of: fn(&ScheduleSpec) -> String| -> TextField {
+        use_text_field(move || draft.read().as_ref().map(of).unwrap_or_default())
+    };
+    let name_field = field(|spec| spec.name.clone());
+    // The command or the prompt, whichever is shown.
+    let task_field = field(|spec| match &spec.task {
+        Task::Command { command } => command.clone(),
+        Task::Prompt { prompt } => prompt.clone(),
+    });
+    let cron_field = field(|spec| spec.cron.clone());
 
     use_future({
         let schedule = schedule.clone();
@@ -692,9 +703,11 @@ pub fn ScheduleView(
                 div { class: "schedule-head",
                     input {
                         class: "schedule-name",
-                        value: "{current.name}",
+                        id: name_field.id(),
+                        onmounted: move |_| name_field.mounted(),
                         placeholder: "Name",
                         oninput: move |event| {
+                            name_field.typed(&event.value());
                             if let Some(draft) = draft.write().as_mut() {
                                 draft.name = event.value();
                             }
@@ -754,7 +767,7 @@ pub fn ScheduleView(
                     }
                 }
                 match current.task.clone() {
-                    Task::Command { command } => rsx! {
+                    Task::Command { .. } => rsx! {
                         div { class: "field",
                             span { class: "field-label", "Command" }
                             textarea {
@@ -762,8 +775,10 @@ pub fn ScheduleView(
                                 rows: 4,
                                 spellcheck: false,
                                 placeholder: "mise run ci",
-                                value: "{command}",
+                                id: task_field.id(),
+                                onmounted: move |_| task_field.mounted(),
                                 oninput: move |event| {
+                                    task_field.typed(&event.value());
                                     if let Some(draft) = draft.write().as_mut() {
                                         draft.task = Task::Command {
                                             command: event.value(),
@@ -776,14 +791,16 @@ pub fn ScheduleView(
                             }
                         }
                     },
-                    Task::Prompt { prompt } => rsx! {
+                    Task::Prompt { .. } => rsx! {
                         div { class: "field",
                             span { class: "field-label", "Prompt" }
                             textarea {
                                 rows: 5,
                                 placeholder: "Look at the new issues and label them",
-                                value: "{prompt}",
+                                id: task_field.id(),
+                                onmounted: move |_| task_field.mounted(),
                                 oninput: move |event| {
+                                    task_field.typed(&event.value());
                                     if let Some(draft) = draft.write().as_mut() {
                                         draft.task = Task::Prompt {
                                             prompt: event.value(),
@@ -802,10 +819,12 @@ pub fn ScheduleView(
                     div { class: "cron-row",
                         input {
                             class: "mono cron",
-                            value: "{current.cron}",
+                            id: cron_field.id(),
+                            onmounted: move |_| cron_field.mounted(),
                             spellcheck: false,
                             placeholder: "0 9 * * 1-5",
                             oninput: move |event| {
+                                cron_field.typed(&event.value());
                                 if let Some(draft) = draft.write().as_mut() {
                                     draft.cron = event.value();
                                 }

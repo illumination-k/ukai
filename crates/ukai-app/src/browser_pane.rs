@@ -29,6 +29,7 @@ use crate::icons::{Icon, Svg};
 use crate::ports;
 use crate::projects::AppSignals;
 use crate::report_pane::open_external;
+use crate::text_field::use_text_field;
 
 /// How often the bar follows the page's address.
 const FOLLOW: Duration = Duration::from_millis(500);
@@ -158,6 +159,7 @@ fn BrowserSurface(
     });
     let mut address = use_signal(|| path.clone());
     let mut editing = use_signal(|| false);
+    let address_field = use_text_field(move || address.cloned());
 
     // Show where the page went, unless the user is typing over it.
     use_future({
@@ -250,10 +252,14 @@ fn BrowserSurface(
                 input {
                     class: "browser-address",
                     spellcheck: false,
-                    value: "{address}",
+                    id: address_field.id(),
+                    onmounted: move |_| address_field.mounted(),
                     onfocus: move |_| editing.set(true),
                     onblur: move |_| editing.set(false),
-                    oninput: move |event| address.set(event.value()),
+                    oninput: move |event| {
+                        address_field.typed(&event.value());
+                        address.set(event.value());
+                    },
                     onkeydown: move |event| {
                         if event.key() == Key::Enter {
                             navigate(address.peek().clone());

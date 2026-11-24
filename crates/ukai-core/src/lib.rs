@@ -8,6 +8,7 @@ pub mod browser;
 pub mod composer;
 pub mod config;
 pub mod diff;
+pub mod field;
 pub mod keymap;
 pub mod knowledge;
 pub mod launch;

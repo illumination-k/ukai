@@ -23,6 +23,7 @@ use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
 use crate::projects::AppSignals;
 use crate::sidebar::Head;
+use crate::text_field::use_text_field;
 
 /// How often the listings are read again while agent panes are open.
 const RELIST: Duration = Duration::from_secs(3);
@@ -406,6 +407,7 @@ fn PortRowView(project: ProjectId, row: PortRow, source: ReportSource, depth: u8
 pub fn PortPrompt(on_open: EventHandler<(u16, String)>, on_cancel: EventHandler<()>) -> Element {
     let mut typed = use_signal(String::new);
     let mut invalid = use_signal(|| false);
+    let field = use_text_field(move || typed.cloned());
     rsx! {
         div { class: "port-prompt",
             input {
@@ -413,8 +415,10 @@ pub fn PortPrompt(on_open: EventHandler<(u16, String)>, on_cancel: EventHandler<
                 placeholder: "5173 or localhost:3000/docs",
                 spellcheck: false,
                 autofocus: true,
-                value: "{typed}",
+                id: field.id(),
+                onmounted: move |_| field.mounted(),
                 oninput: move |event| {
+                    field.typed(&event.value());
                     typed.set(event.value());
                     invalid.set(false);
                 },
