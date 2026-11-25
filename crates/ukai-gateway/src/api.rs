@@ -34,13 +34,17 @@ pub struct Api {
 
 impl Api {
     /// Refuse a request without the gateway's token.
-    fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
+    pub(crate) fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
         let headers = request.metadata().clone().into_headers();
         Ok(access::authorize(&self.gateway, &headers)?)
     }
 
     /// The workspace of `agent` a request names, as for its `/acp`.
-    fn plan(&self, agent: &str, workspace: Option<gw::Workspace>) -> Result<Plan, Status> {
+    pub(crate) fn plan(
+        &self,
+        agent: &str,
+        workspace: Option<gw::Workspace>,
+    ) -> Result<Plan, Status> {
         let pane = access::pane_of(workspace)?;
         Ok(access::plan(&self.gateway, agent, pane.as_deref())?)
     }

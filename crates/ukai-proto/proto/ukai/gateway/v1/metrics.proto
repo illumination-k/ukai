@@ -1,10 +1,29 @@
-// What the gateway takes from its agent pods about their turns, over gRPC
-// and gRPC-Web on its own port. See "ターンのメトリクス" in docs/design.md.
+// What each turn of an agent's sessions took: the gateway takes it from its
+// agent pods and answers it to clients, over gRPC and gRPC-Web on its own
+// port. See "ターンのメトリクス" in docs/design.md.
 syntax = "proto3";
 
 package ukai.gateway.v1;
 
+import "ukai/gateway/v1/common.proto";
 import "ukai/metrics/v1/metrics.proto";
+
+// With the gateway's token. Reading never starts a pod: the turns are kept
+// by `ukai-store`, whether the workspace runs or not. UNAVAILABLE, a gateway
+// that keeps no store, or cannot reach it now.
+service Metrics {
+  // The workspace's turns, newest first.
+  rpc List(ListTurnsRequest) returns (ukai.metrics.v1.ListResponse);
+}
+
+message ListTurnsRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  // Only this session's turns.
+  optional string session = 3;
+  // At most this many; 0 for the store's limit.
+  uint32 limit = 4;
+}
 
 // Recording a turn of an agent pod's own workspace, with its relay's token:
 // the gateway finds the pod by it, and the workspace and agent from the

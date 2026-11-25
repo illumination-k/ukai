@@ -131,6 +131,12 @@ pub enum PaneContent {
         #[serde(default, skip_serializing_if = "ReportSource::is_project")]
         place: ReportSource,
     },
+    /// What each turn of a gateway agent's workspace took, as its gateway's
+    /// store keeps it; named as a diff's place is.
+    Metrics {
+        project: ProjectId,
+        place: ReportSource,
+    },
     /// A shell in a workspace's checkout, named as a diff's is. The shell
     /// itself is not kept: after a restart the pane starts a new one there.
     Terminal {
@@ -190,6 +196,7 @@ impl PaneContent {
             | PaneContent::Schedule { project, .. }
             | PaneContent::Note { project, .. }
             | PaneContent::Diff { project, .. }
+            | PaneContent::Metrics { project, .. }
             | PaneContent::Terminal { project, .. } => Some(project),
         }
     }

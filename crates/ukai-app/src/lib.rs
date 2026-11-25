@@ -15,6 +15,7 @@ mod icons;
 mod knowledge;
 mod layout;
 mod markdown;
+mod metrics_pane;
 mod palette;
 mod persist;
 mod ports;
