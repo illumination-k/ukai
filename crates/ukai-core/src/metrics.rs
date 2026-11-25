@@ -214,7 +214,7 @@ impl Summary {
                 .cmp(&a.spread.total)
                 .then_with(|| a.kind.cmp(&b.kind))
         });
-        slowest.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
+        slowest.sort_by_key(|call| std::cmp::Reverse(call.duration_ms));
         slowest.truncate(SLOWEST);
         let currencies: Vec<&str> = costs.values().map(|(_, currency)| *currency).collect();
         let cost = match currencies.first() {
