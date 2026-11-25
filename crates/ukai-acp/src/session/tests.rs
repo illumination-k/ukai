@@ -519,7 +519,18 @@ impl Harness {
         }
     }
 
+    /// The next event, past the `TurnStarted` every prompt sends first
+    /// (`announces_the_turn_start` checks it with [`Self::next_raw`]).
     async fn next(&mut self) -> SessionEvent {
+        loop {
+            let event = self.next_raw().await;
+            if event != SessionEvent::TurnStarted {
+                return event;
+            }
+        }
+    }
+
+    async fn next_raw(&mut self) -> SessionEvent {
         match tokio::time::timeout(Duration::from_secs(5), self.events.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => panic!("event channel closed"),
@@ -537,10 +548,6 @@ impl Harness {
         let mut seen = Vec::new();
         loop {
             let event = self.next().await;
-            // Every prompt starts with one; `announces_the_turn_start` checks it.
-            if event == SessionEvent::TurnStarted {
-                continue;
-            }
             let last = matches!(
                 event,
                 SessionEvent::TurnEnded { .. }
@@ -889,7 +896,7 @@ async fn reports_usage() {
 async fn announces_the_turn_start() {
     let mut harness = Harness::start().await;
     assert!(harness.handle.prompt("hello"));
-    assert_eq!(harness.next().await, SessionEvent::TurnStarted);
+    assert_eq!(harness.next_raw().await, SessionEvent::TurnStarted);
 }
 
 #[tokio::test]
