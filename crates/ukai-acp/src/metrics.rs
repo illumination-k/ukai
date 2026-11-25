@@ -1,20 +1,17 @@
-//! What each turn of a session took — time, tokens, tool calls — measured
-//! from the events the session sends, to find where agents spend their
-//! turns. One JSON line per turn is appended to the session's file under
-//! the state directory's `metrics/` ([`append`]); nothing leaves the machine.
+//! What each turn of a session took — time, tokens, tool calls — to find
+//! where agents spend their turns (see "ターンのメトリクス" in
+//! `docs/design.md`). A gateway agent's relay folds its sessions' events into
+//! a [`TurnRecord`] per turn with [`Recorder`] and sends each to the gateway
+//! ([`MetricsEndpoint`]), which has `ukai-store` keep it.
 //!
-//! Times are taken as events arrive, so they are the client's view: a phase
-//! runs from its first event until the next event of another kind.
+//! Times are taken as events arrive: a phase runs from its first event until
+//! the next event of another kind.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use ukai_acp::{ConfigOption, ConfigValue, SessionEvent, TokenUsage, ToolStatus, Usage};
 
-use crate::config::Setting;
+use crate::{ConfigOption, ConfigValue, ResolveError, SessionEvent, TokenUsage, ToolStatus, Usage};
 
 /// One turn, as [`Recorder`] measured it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -312,8 +309,20 @@ impl Tool {
 }
 
 impl Recorder {
+    /// A recorder that waits for the session's `Ready`: what comes before it
+    /// is the history a restored session replays.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A recorder of `session`, whose events are live from the start, as a
+    /// relay hears them from the agent.
+    pub fn of_session(session: impl Into<String>) -> Self {
+        Self {
+            session_id: Some(session.into()),
+            live: true,
+            ..Self::default()
+        }
     }
 
     /// Take `event`, which arrived at `now` (`wall` on the clock); returns the
@@ -441,10 +450,10 @@ impl Recorder {
             let ConfigValue::Select { current, .. } = &option.value else {
                 continue;
             };
-            match Setting::of(option) {
-                Some(Setting::Model) => self.model = Some(current.clone()),
-                Some(Setting::Effort) => self.effort = Some(current.clone()),
-                None => {}
+            match option.category.as_deref() {
+                Some("model") => self.model = Some(current.clone()),
+                Some("thought_level") => self.effort = Some(current.clone()),
+                _ => {}
             }
         }
     }
@@ -463,49 +472,157 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The file under `dir` a session's turns go to: its id, with anything that
-/// is not safe in a file name replaced.
-pub fn file_for(dir: &Path, session_id: Option<&str>) -> PathBuf {
-    let name: String = session_id
-        .filter(|id| !id.is_empty())
-        .unwrap_or("unknown")
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '_'
+/// Recording the turns of an agent pod's own workspace, as its relay does:
+/// the gateway knows the workspace and agent by the relay's token.
+#[derive(Debug, Clone)]
+pub struct MetricsEndpoint {
+    channel: crate::grpc::Channel,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    #[error("{}", .0.join("; "))]
+    Refused(Vec<String>),
+    #[error("the gateway keeps no metrics")]
+    Unavailable,
+    #[error("cannot record the turn through the gateway: {0}")]
+    Failed(String),
+}
+
+impl MetricsEndpoint {
+    /// The gateway at `gateway` (e.g. `http://ukai-gateway`), with the
+    /// relay's `token`.
+    pub fn for_workspace(gateway: &str, token: &str) -> Result<Self, ResolveError> {
+        let (channel, _) = crate::grpc::pod_channel(gateway, token, TIMEOUT)?;
+        Ok(Self { channel })
+    }
+
+    pub async fn record(&self, turn: TurnRecord) -> Result<(), RecordError> {
+        use ukai_proto::gateway::v1 as gw;
+        use ukai_proto::gateway::v1::workspace_metrics_client::WorkspaceMetricsClient;
+        let response = WorkspaceMetricsClient::new(self.channel.clone())
+            .record(gw::WorkspaceRecordRequest {
+                turn: Some(turn.into()),
+            })
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable => RecordError::Unavailable,
+                _ => RecordError::Failed(status.message().to_owned()),
+            })?
+            .into_inner();
+        if response.problems.is_empty() {
+            Ok(())
+        } else {
+            Err(RecordError::Refused(response.problems))
+        }
+    }
+}
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The wire form of a turn, as `ukai.metrics.v1` carries it.
+pub mod wire {
+    use ukai_proto::metrics::v1 as pb;
+
+    use super::{Context, Tokens, ToolRecord, TurnRecord};
+
+    impl From<TurnRecord> for pb::Turn {
+        fn from(turn: TurnRecord) -> Self {
+            Self {
+                session: turn.session_id.unwrap_or_default(),
+                agent: turn.agent,
+                model: turn.model,
+                effort: turn.effort,
+                started_at_ms: turn.started_at_ms,
+                outcome: turn.outcome,
+                error: turn.error,
+                duration_ms: turn.duration_ms,
+                first_output_ms: turn.first_output_ms,
+                thinking_ms: turn.thinking_ms,
+                message_ms: turn.message_ms,
+                permission_ms: turn.permission_ms,
+                tools: turn
+                    .tools
+                    .into_iter()
+                    .map(|tool| pb::ToolCall {
+                        kind: tool.kind,
+                        title: tool.title,
+                        status: tool.status,
+                        duration_ms: tool.duration_ms,
+                        parent: tool.parent,
+                    })
+                    .collect(),
+                tokens: turn.tokens.map(|tokens| pb::Tokens {
+                    total: tokens.total,
+                    input: tokens.input,
+                    output: tokens.output,
+                    thought: tokens.thought,
+                    cached_read: tokens.cached_read,
+                    cached_write: tokens.cached_write,
+                }),
+                context: turn.context.map(|context| pb::Context {
+                    used: context.used,
+                    size: context.size,
+                    cost: context.cost,
+                    currency: context.currency,
+                }),
+                joined: turn.joined,
+                reconnected: turn.reconnected,
             }
-        })
-        .collect();
-    dir.join(format!("{name}.jsonl"))
-}
+        }
+    }
 
-/// Append `record` as one line to its session's file under `dir`.
-pub fn append(dir: &Path, record: &TurnRecord) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
-    line.push(b'\n');
-    // One write per line, so lines from two panes of a session do not interleave.
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file_for(dir, record.session_id.as_deref()))?
-        .write_all(&line)
-}
-
-/// Every turn recorded in `path`, skipping lines that do not parse.
-pub fn read(path: &Path) -> io::Result<Vec<TurnRecord>> {
-    Ok(fs::read_to_string(path)?
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect())
+    impl From<pb::Turn> for TurnRecord {
+        fn from(turn: pb::Turn) -> Self {
+            Self {
+                session_id: Some(turn.session).filter(|session| !session.is_empty()),
+                agent: turn.agent,
+                model: turn.model,
+                effort: turn.effort,
+                started_at_ms: turn.started_at_ms,
+                outcome: turn.outcome,
+                error: turn.error,
+                duration_ms: turn.duration_ms,
+                first_output_ms: turn.first_output_ms,
+                thinking_ms: turn.thinking_ms,
+                message_ms: turn.message_ms,
+                permission_ms: turn.permission_ms,
+                tools: turn
+                    .tools
+                    .into_iter()
+                    .map(|tool| ToolRecord {
+                        kind: tool.kind,
+                        title: tool.title,
+                        status: tool.status,
+                        duration_ms: tool.duration_ms,
+                        parent: tool.parent,
+                    })
+                    .collect(),
+                tokens: turn.tokens.map(|tokens| Tokens {
+                    total: tokens.total,
+                    input: tokens.input,
+                    output: tokens.output,
+                    thought: tokens.thought,
+                    cached_read: tokens.cached_read,
+                    cached_write: tokens.cached_write,
+                }),
+                context: turn.context.map(|context| Context {
+                    used: context.used,
+                    size: context.size,
+                    cost: context.cost,
+                    currency: context.currency,
+                }),
+                joined: turn.joined,
+                reconnected: turn.reconnected,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{PromptCaps, RestoreOutcome};
     use rstest::rstest;
-    use ukai_acp::{PromptCaps, RestoreOutcome};
 
     use super::*;
 
@@ -615,7 +732,9 @@ mod tests {
             cached_read: Some(800),
             cached_write: None,
         };
-        let record = clock.at(3500, ended("end_turn", Some(tokens))).unwrap();
+        let record = clock
+            .at(3500, ended("end_turn", Some(tokens)))
+            .unwrap_or_else(|| panic!("no record"));
         assert_eq!(record.session_id.as_deref(), Some("s1"));
         assert_eq!(record.agent.as_deref(), Some("claude"));
         assert_eq!(record.started_at_ms, 100);
@@ -652,7 +771,9 @@ mod tests {
             },
         );
         clock.at(5200, update("t1", ToolStatus::InProgress));
-        let record = clock.at(6000, ended("end_turn", None)).unwrap();
+        let record = clock
+            .at(6000, ended("end_turn", None))
+            .unwrap_or_else(|| panic!("no record"));
         assert_eq!(record.permission_ms, 5000);
         assert_eq!(record.tools[0].status, "in_progress");
         assert_eq!(record.tools[0].duration_ms, None);
@@ -671,7 +792,9 @@ mod tests {
         clock.at(30, sub(tool("grep", ToolStatus::InProgress)));
         clock.at(80, sub(update("grep", ToolStatus::Failed)));
         clock.at(90, update("task", ToolStatus::Completed));
-        let record = clock.at(100, ended("end_turn", None)).unwrap();
+        let record = clock
+            .at(100, ended("end_turn", None))
+            .unwrap_or_else(|| panic!("no record"));
         assert_eq!(record.thinking_ms, 0);
         let grep = &record.tools[1];
         assert_eq!(grep.parent.as_deref(), Some("task"));
@@ -700,7 +823,9 @@ mod tests {
         clock.at(20, tool("old", ToolStatus::Completed));
         clock.at(30, ready("s1", Vec::new()));
         clock.at(31, SessionEvent::TurnRunning);
-        let record = clock.at(50, ended("end_turn", None)).unwrap();
+        let record = clock
+            .at(50, ended("end_turn", None))
+            .unwrap_or_else(|| panic!("no record"));
         assert!(record.reconnected);
         assert!(!record.joined);
         assert_eq!(record.duration_ms, 50);
@@ -711,7 +836,9 @@ mod tests {
     fn a_turn_running_before_the_pane_joined_is_marked() {
         let mut clock = Clock::ready();
         clock.at(10, SessionEvent::TurnRunning);
-        let record = clock.at(30, ended("end_turn", None)).unwrap();
+        let record = clock
+            .at(30, ended("end_turn", None))
+            .unwrap_or_else(|| panic!("no record"));
         assert!(record.joined);
         assert_eq!(record.duration_ms, 20);
     }
@@ -727,7 +854,7 @@ mod tests {
     ) {
         let mut clock = Clock::ready();
         clock.at(0, SessionEvent::TurnStarted);
-        let record = clock.at(10, event).unwrap();
+        let record = clock.at(10, event).unwrap_or_else(|| panic!("no record"));
         assert_eq!(record.outcome, outcome);
         assert_eq!(record.error.as_deref(), error);
     }
@@ -754,46 +881,59 @@ mod tests {
             SessionEvent::Usage(Usage {
                 used: 53_000,
                 size: 200_000,
-                cost: Some(ukai_acp::Cost {
+                cost: Some(crate::Cost {
                     amount: 0.05,
                     currency: "USD".into(),
                 }),
             }),
         );
-        let record = clock.at(4, ended("end_turn", None)).unwrap();
+        let record = clock
+            .at(4, ended("end_turn", None))
+            .unwrap_or_else(|| panic!("no record"));
         assert_eq!(record.model.as_deref(), Some("sonnet"));
         assert_eq!(record.effort.as_deref(), Some("high"));
-        let context = record.context.unwrap();
+        let context = record.context.unwrap_or_else(|| panic!("no record"));
         assert_eq!(
             (context.used, context.size, context.cost),
             (53_000, 200_000, Some(0.05))
         );
     }
 
-    #[rstest]
-    #[case::plain(Some("abc-123_x"), "abc-123_x.jsonl")]
-    #[case::unsafe_chars(Some("../a/b c"), "___a_b_c.jsonl")]
-    #[case::none(None, "unknown.jsonl")]
-    #[case::empty(Some(""), "unknown.jsonl")]
-    fn names_a_sessions_file(#[case] id: Option<&str>, #[case] name: &str) {
-        assert_eq!(file_for(Path::new("/m"), id), Path::new("/m").join(name));
+    #[test]
+    fn a_relay_measures_from_the_start() {
+        let mut recorder = Recorder::of_session("s1");
+        let start = Instant::now();
+        recorder.observe(&SessionEvent::TurnStarted, start, UNIX_EPOCH);
+        let record = recorder
+            .observe(
+                &ended("end_turn", None),
+                start + Duration::from_millis(5),
+                UNIX_EPOCH,
+            )
+            .unwrap_or_else(|| panic!("no record"));
+        assert_eq!(record.session_id.as_deref(), Some("s1"));
+        assert_eq!(record.duration_ms, 5);
     }
 
     #[test]
-    fn appends_one_line_per_turn() {
-        let dir = tempfile::tempdir().unwrap();
+    fn a_turn_crosses_the_wire_unchanged() {
         let mut clock = Clock::ready();
-        let mut records = Vec::new();
-        for start in [0, 100] {
-            clock.at(start, SessionEvent::TurnStarted);
-            records.push(clock.at(start + 50, ended("end_turn", None)).unwrap());
-        }
-        let metrics = dir.path().join("metrics");
-        for record in &records {
-            append(&metrics, record).unwrap();
-        }
-        let path = file_for(&metrics, Some("s1"));
-        assert_eq!(read(&path).unwrap(), records);
-        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 2);
+        clock.at(0, SessionEvent::TurnStarted);
+        clock.at(10, thought());
+        clock.at(20, tool("t1", ToolStatus::InProgress));
+        clock.at(30, update("t1", ToolStatus::Completed));
+        let tokens = TokenUsage {
+            total: 3,
+            input: 2,
+            output: 1,
+            thought: None,
+            cached_read: Some(1),
+            cached_write: None,
+        };
+        let record = clock
+            .at(40, ended("end_turn", Some(tokens)))
+            .unwrap_or_else(|| panic!("no record"));
+        let wire: ukai_proto::metrics::v1::Turn = record.clone().into();
+        assert_eq!(TurnRecord::from(wire), record);
     }
 }

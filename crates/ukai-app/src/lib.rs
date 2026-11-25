@@ -15,7 +15,6 @@ mod icons;
 mod knowledge;
 mod layout;
 mod markdown;
-mod metrics;
 mod palette;
 mod persist;
 mod ports;
@@ -68,7 +67,6 @@ pub fn run() {
         state_file: ukai_config::state_dir(env).map(|d| d.join("state.json")),
     };
     let state = persist::load(paths.state_file.as_deref());
-    metrics::init(ukai_config::state_dir(env).map(|d| d.join("metrics")));
 
     // `ukai PROJECT_DIR` opens that directory; with no argument, the nearest
     // ancestor of the working directory with a ukai.toml (if any).

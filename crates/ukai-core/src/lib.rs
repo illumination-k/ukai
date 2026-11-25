@@ -14,7 +14,6 @@ pub mod launch;
 mod layout;
 pub mod markdown;
 pub mod mention;
-pub mod metrics;
 pub mod palette;
 mod project;
 pub mod publication;

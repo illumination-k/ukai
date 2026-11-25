@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 use ukai_acp::secretary::{Entry, SessionSummary};
+use ukai_acp::{SessionEvent, config_event, turn_end_event, update_event};
 
 /// A client connection, numbered by the caller.
 pub type ConnId = u64;
@@ -64,6 +65,12 @@ pub enum Output {
     SessionKey {
         key: String,
         session: String,
+    },
+    /// What `session`'s messages say happened, for measuring its turns
+    /// ([`ukai_acp::metrics`]): whoever is connected, as a client would hear it.
+    Metered {
+        session: String,
+        event: SessionEvent,
     },
     /// The session [`Hub::start_unattached`] asked for with `ticket` was
     /// set up (its id) or refused (why).
@@ -417,11 +424,15 @@ impl Hub {
                 if let Some(state) = session.as_ref().and_then(|s| self.sessions.get_mut(s)) {
                     state.record_user_turn(&message);
                 }
-                let outputs = self.forward(conn, id, method, session.clone(), message.take());
+                let mut outputs = self.forward(conn, id, method, session.clone(), message.take());
                 if let (Some(session), Some(Output::Agent(sent))) = (session, outputs.first()) {
                     let turn = sent.get("id").and_then(Value::as_u64);
                     if let Some(state) = self.sessions.get_mut(&session) {
                         state.turn = turn;
+                        outputs.push(Output::Metered {
+                            session,
+                            event: SessionEvent::TurnStarted,
+                        });
                     }
                 }
                 outputs
@@ -554,12 +565,20 @@ impl Hub {
         vec![Output::Agent(message)]
     }
 
-    fn agent_request(&mut self, id: &Value, _method: &str, message: Value) -> Vec<Output> {
+    fn agent_request(&mut self, id: &Value, method: &str, message: Value) -> Vec<Output> {
         let agent_id = id.to_string();
         let Some(session) = session_id(&message).filter(|s| self.sessions.contains_key(s)) else {
             // Nothing the relay offered asks for a request outside a session.
             return vec![Output::Agent(error(id.clone(), -32601, "method not found"))];
         };
+        let metered = (method == "session/request_permission").then(|| Output::Metered {
+            session: session.clone(),
+            event: SessionEvent::PermissionRequested {
+                id: 0,
+                title: String::new(),
+                options: Vec::new(),
+            },
+        });
         let attached = self.sessions.get_mut(&session).and_then(|state| {
             state.pending.insert(
                 agent_id.clone(),
@@ -570,15 +589,24 @@ impl Hub {
             );
             state.attached
         });
-        match attached {
-            Some(conn) => self.send_pending(&session, &agent_id, conn),
-            None => Vec::new(),
+        let mut outputs: Vec<Output> = metered.into_iter().collect();
+        if let Some(conn) = attached {
+            outputs.extend(self.send_pending(&session, &agent_id, conn));
         }
+        outputs
     }
 
     fn agent_notification(&mut self, method: &str, message: Value) -> Vec<Output> {
         let session = session_id(&message);
         let state = session.as_ref().and_then(|s| self.sessions.get_mut(s));
+        let metered = (method == "session/update")
+            .then(|| {
+                session
+                    .clone()
+                    .zip(message.get("params").and_then(update_event))
+            })
+            .flatten()
+            .map(|(session, event)| Output::Metered { session, event });
         match state {
             Some(state) => {
                 if method == "session/update" {
@@ -593,10 +621,9 @@ impl Hub {
                     }
                     state.history.push(message.clone());
                 }
-                state
-                    .attached
-                    .map(|conn| Output::Client(conn, message))
+                metered
                     .into_iter()
+                    .chain(state.attached.map(|conn| Output::Client(conn, message)))
                     .collect()
             }
             // Not about a known session: everyone connected may care.
@@ -629,6 +656,14 @@ impl Hub {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| session.clone().filter(|_| message.get("result").is_some()));
+        if let (Some(session), Some(event)) = (
+            named.clone(),
+            message
+                .pointer("/result/configOptions")
+                .and_then(config_event),
+        ) {
+            outputs.push(Output::Metered { session, event });
+        }
         if let (Some(key), Some(session)) = (key, named) {
             outputs.push(Output::SessionKey { key, session });
         }
@@ -649,6 +684,10 @@ impl Hub {
                 }
             }
             ("session/prompt", Some(sid)) => {
+                outputs.push(Output::Metered {
+                    session: sid.clone(),
+                    event: turn_end_event(&message),
+                });
                 outputs.push(Output::TurnEnded(sid.clone()));
                 if let Some(state) = self.sessions.get_mut(&sid) {
                     state.stop_reason = message

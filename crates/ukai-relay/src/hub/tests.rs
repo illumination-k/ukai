@@ -729,3 +729,58 @@ fn an_unattached_start_waits_for_the_agent() {
         }]
     ));
 }
+
+/// What the hub says happened in `outputs`, for measuring turns.
+fn metered(outputs: &[Output]) -> Vec<SessionEvent> {
+    outputs
+        .iter()
+        .filter_map(|output| match output {
+            Output::Metered { session, event } if session == SID => Some(event.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn says_what_a_turn_did_for_measuring_it() {
+    let mut hub = with_session();
+    let out = hub.from_client(
+        A,
+        req(
+            3,
+            "session/prompt",
+            json!({ "sessionId": SID, "prompt": [{ "type": "text", "text": "go" }] }),
+        ),
+    );
+    assert_eq!(metered(&out), [SessionEvent::TurnStarted]);
+    let turn = agent_id(&out);
+    assert_eq!(
+        metered(&hub.from_agent(update("hi"))),
+        [SessionEvent::AgentMessage { text: "hi".into() }]
+    );
+    let asked = hub.from_agent(json!({
+        "jsonrpc": "2.0", "id": 90, "method": "session/request_permission",
+        "params": { "sessionId": SID, "toolCall": { "toolCallId": "t" }, "options": [] }
+    }));
+    assert!(matches!(
+        metered(&asked).as_slice(),
+        [SessionEvent::PermissionRequested { .. }]
+    ));
+    let usage = json!({ "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 });
+    let ended = hub.from_agent(result(
+        json!(turn),
+        json!({ "stopReason": "end_turn", "usage": usage }),
+    ));
+    assert_eq!(
+        metered(&ended),
+        [SessionEvent::TurnEnded {
+            stop_reason: "end_turn".into(),
+            tokens: Some(ukai_acp::TokenUsage {
+                total: 3,
+                input: 2,
+                output: 1,
+                ..ukai_acp::TokenUsage::default()
+            }),
+        }]
+    );
+}

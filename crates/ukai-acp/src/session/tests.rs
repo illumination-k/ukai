@@ -1543,3 +1543,47 @@ async fn an_agent_that_cannot_load_ends_with_its_connection() {
     );
     assert_eq!(server.kept().connections, 1);
 }
+
+#[test]
+fn a_relay_reads_an_update_as_a_client_hears_it() {
+    let params = serde_json::json!({
+        "sessionId": "s1",
+        "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "hm" } }
+    });
+    assert_eq!(
+        update_event(&params),
+        Some(SessionEvent::AgentThought { text: "hm".into() })
+    );
+    assert_eq!(update_event(&serde_json::json!({ "nope": 1 })), None);
+}
+
+#[rstest::rstest]
+#[case::ended(
+    serde_json::json!({ "result": { "stopReason": "end_turn", "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 } } }),
+    SessionEvent::TurnEnded {
+        stop_reason: "end_turn".into(),
+        tokens: Some(TokenUsage { total: 3, input: 2, output: 1, ..TokenUsage::default() }),
+    },
+)]
+#[case::failed(
+    serde_json::json!({ "error": { "code": -32603, "message": "boom" } }),
+    SessionEvent::PromptFailed { message: "boom".into() },
+)]
+fn a_relay_reads_the_end_of_a_turn(
+    #[case] response: serde_json::Value,
+    #[case] expected: SessionEvent,
+) {
+    assert_eq!(turn_end_event(&response), expected);
+}
+
+#[test]
+fn a_relay_reads_the_settings() {
+    let options = serde_json::json!([{
+        "id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": "opus", "options": [{ "value": "opus", "name": "Opus" }]
+    }]);
+    let Some(SessionEvent::ConfigChanged { options }) = config_event(&options) else {
+        panic!("no settings");
+    };
+    assert_eq!(options[0].category.as_deref(), Some("model"));
+}

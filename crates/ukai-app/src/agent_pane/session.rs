@@ -1,7 +1,6 @@
 //! Starting, restarting, and continuing a pane's session.
 
 use std::rc::Rc;
-use std::time::{Instant, SystemTime};
 
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -10,13 +9,12 @@ use ukai_acp::{
     SessionOptions, UpdateCheck,
 };
 use ukai_core::config::ApplyDefaults;
-use ukai_core::metrics::Recorder;
 use ukai_core::{Alert, PaneContent, PaneId, Status, Transcript};
 
 use super::{AgentSession, Composer, Sessions, branch};
+use crate::alert;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::voice::DictationOwner;
-use crate::{alert, metrics};
 
 /// Start a session for the agent `pane` holds. With `resume`, continue the
 /// ACP session recorded for the pane (if any) instead of starting a new one.
@@ -69,13 +67,8 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
         Ok((handle, mut events)) => {
             let window = dioxus::desktop::window();
             let control = handle.clone();
-            let mut recorder = Recorder::new();
             spawn_forever(async move {
                 while let Some(event) = events.recv().await {
-                    if let Some(turn) = recorder.observe(&event, Instant::now(), SystemTime::now())
-                    {
-                        metrics::record(turn);
-                    }
                     if let SessionEvent::Ready { session_id, .. } = &event {
                         layout.write().record_session(pane, session_id.clone());
                     }

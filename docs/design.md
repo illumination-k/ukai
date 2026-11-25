@@ -561,6 +561,31 @@ workspace = { git = "https://github.com/o/r" }
   秘書の常駐ワークスペースとサイドバーの固定、秘書が立てたワークスペースをアプリの pane で開くこと
   （今は鍵を知る pane からしか開けない）、秘書の prompt の描き分け。
 
+### ターンのメトリクス
+
+エージェントの改良に使うため、gateway のエージェントのセッションについてターンごとに何にどれだけ
+かかったかを `ukai-store` に残す。測るのは Pod の `ukai-relay` で、エージェント自身のメッセージが届いた
+時刻を使うので、クライアントまでのネットワークは含まず、クライアントのいないターン（スケジュール、秘書）も
+測れる。ローカルの stdio エージェントは対象外。
+
+- 1 ターンの記録（`ukai_acp::metrics::TurnRecord`、`ukai.metrics.v1.Turn`）: セッション、エージェント
+  （gateway が Pod の Job から入れる）、モデルと推論レベル（ターン終了時の設定）、開始時刻、終わり方
+  （stop reason か `failed` / `closed` / `superseded`）、所要時間、最初の出力までの時間、思考と返答の
+  ストリーミング時間、パーミッション待ち、ツール呼び出しごとの種類・タイトル・結果・所要時間
+  （サブエージェントのものは親付き）、トークン（`session/prompt` 応答の `usage`。入力・出力・思考・キャッシュ）、
+  最新のコンテキスト使用量とコスト。フェーズは最初のイベントから別種のイベントが届くまで。
+- hub は流れるメッセージを `SessionEvent` に読んで `Output::Metered` で出し（`session/prompt` の転送で
+  `TurnStarted`、`session/update`、`session/request_permission`、`session/prompt` の応答で `TurnEnded` /
+  `PromptFailed`、設定は setup と `set_config_option` の応答の `configOptions`）、relay がセッションごとの
+  `Recorder` に畳んで、終わったターンを gateway の `WorkspaceMetrics.Record` に送る（relay のトークンで
+  Pod を特定し、ワークスペースとエージェントは要求ではなく Job から取る）。gateway は `ukai-store` の
+  `MetricsStore.Record` に渡す。store を持たない gateway では送らない。
+- `ukai-store` は `metrics` データベースの `turn` テーブル（schemaless。ワークスペース + 開始時刻と
+  セッションに索引）に 1 ターン 1 レコードで追記する。セッションか終わり方がない、ツール呼び出しが多すぎる
+  記録は理由をすべて返して断り、長いツールのタイトルは切る。`MetricsStore.List` はワークスペースの
+  （セッションで絞れる）ターンを新しい順に返す。集計は SurrealQL で行う。
+- 未定: クライアントから読む API と表示、保持期間。
+
 ### ワークスペース Pod
 
 - gateway の `job`（Job spec を作る純粋関数）と `cluster`（Job の確保・Pod の待機）が扱う。
@@ -717,7 +742,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   サイドバーでフォルダ選択ダイアログから追加、`ukai <dir>` でも追加（引数なしなら cwd から `ukai.toml` を
   遡って探す）。閉じるとそのプロジェクトの pane とセッションも閉じる。
 - **DB は使わない。** 永続化するのはプロジェクトの登録（エージェントごとのモデル・推論レベルの既定を含む）と
-  タブ/pane の配置（各 agent pane の ACP セッション id を含む）だけで（ほかにターンのメトリクスを別ファイルに追記する。下記）、`~/.local/state/ukai/state.json`（`$UKAI_STATE_DIR` / `$XDG_STATE_HOME/ukai`）の 1 ドキュメント。
+  タブ/pane の配置（各 agent pane の ACP セッション id を含む）だけで、`~/.local/state/ukai/state.json`（`$UKAI_STATE_DIR` / `$XDG_STATE_HOME/ukai`）の 1 ドキュメント。
   - `version` 付き。新しい版のファイルや壊れたファイル、不変条件を満たさない配置は読まずに
     `state.json.broken-<unix秒>` へ退避して空の状態で起動する。
   - 変更から 500ms デバウンスして、一時ファイル → `fsync` → `rename` → ディレクトリ `fsync` で書く。
@@ -726,13 +751,6 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   `session/load`（履歴を再送してくれる）→ なければ `session/resume`（履歴なしで継続）→ どちらもなければ新規、
   の順で試し、欠けた分は pane に注記する。エージェントがそのセッションを持っていない（`-32002` resource not
   found。gateway のポッドが作り直されたときなど）ときも切断せず新規にして注記する。
-- **ターンのメトリクス:** 改良のための計測として、agent pane は届いたイベントの時刻からターンごとに
-  所要時間・最初の出力までの時間・思考と返答のストリーミング時間・パーミッション待ち・ツール呼び出しごとの
-  種類/タイトル/結果/所要時間（サブエージェントのものは親付き）・トークン・最新のコンテキスト使用量とコスト・
-  モデルと推論レベルを測り（`ukai_core::metrics::Recorder`）、`<state dir>/metrics/<session id>.jsonl` に
-  1 ターン 1 行で追記する。時間はクライアントから見たもので、フェーズは最初のイベントから別種のイベントが
-  届くまでとする。`session/load` や再接続で再生される履歴は数えない（`Ready` まで無視し、再接続を挟んだ
-  ターンは `reconnected`、pane が途中から加わったターンは `joined` を付ける）。手元にだけ残し、送らない。
 - **SQLite を入れる条件:** `session/load` を持たないエージェントの会話も残したい、横断検索、レポート索引が
   必要になったとき。そのときは orca と同じく追記専用の会話ジャーナルを別ファイルにする。
 - **今後:** herdr / orca はどちらも常駐プロセスがエージェントを持ち、UI の再起動ではエージェントが死なない。

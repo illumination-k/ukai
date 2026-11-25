@@ -22,13 +22,13 @@ use agent_client_protocol::schema::v1::{
     ClientSessionCapabilities, ContentBlock, ContentChunk, EmbeddedResource,
     EmbeddedResourceResource, FileSystemCapabilities, ImageContent, Implementation,
     InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, PlanEntryStatus, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
-    SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    TextResourceContents, ToolCallContent, ToolCallStatus, WriteTextFileRequest,
-    WriteTextFileResponse,
+    NewSessionRequest, PlanEntryStatus, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, TextResourceContents, ToolCallContent,
+    ToolCallStatus, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder, UntypedMessage};
@@ -603,6 +603,44 @@ impl Events {
 /// or `_ukai/heartbeat` (e.g. while its pod starts) restarts the clock each
 /// time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What a relay, which passes the agent's messages on as they are, makes of
+/// them to measure turns ([`crate::metrics`]): the event of a
+/// `session/update` notification's params, as a client would hear it live.
+pub fn update_event(params: &serde_json::Value) -> Option<SessionEvent> {
+    let notification = serde_json::from_value::<SessionNotification>(params.clone()).ok()?;
+    translate_update(notification.update, false)
+}
+
+/// Likewise, the settings in a session setup's or `session/set_config_option`'s
+/// `configOptions`.
+pub fn config_event(options: &serde_json::Value) -> Option<SessionEvent> {
+    let options = serde_json::from_value::<Vec<SessionConfigOption>>(options.clone()).ok()?;
+    Some(SessionEvent::ConfigChanged {
+        options: config_options(options),
+    })
+}
+
+/// Likewise, the end of a turn from its `session/prompt` response: its
+/// `result`, else its `error`'s message.
+pub fn turn_end_event(response: &serde_json::Value) -> SessionEvent {
+    match response
+        .get("result")
+        .and_then(|result| serde_json::from_value::<PromptResponse>(result.clone()).ok())
+    {
+        Some(result) => SessionEvent::TurnEnded {
+            stop_reason: serde_label(&result.stop_reason),
+            tokens: result.usage.map(TokenUsage::from),
+        },
+        None => SessionEvent::PromptFailed {
+            message: response
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the agent did not answer the prompt")
+                .to_owned(),
+        },
+    }
+}
 
 /// Progress before the agent is reachable: `{ "message": string }`.
 pub const PROGRESS_METHOD: &str = "_ukai/progress";

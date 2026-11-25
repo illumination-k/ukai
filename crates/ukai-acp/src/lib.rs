@@ -24,6 +24,7 @@ mod gateway;
 pub mod gateways;
 mod grpc;
 pub mod knowledge;
+pub mod metrics;
 pub mod ports;
 pub mod reconnect;
 pub mod reports;
@@ -46,8 +47,8 @@ pub use session::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, Cost, FileDiff,
     PROGRESS_METHOD, PastSession, PermissionChoice, PermissionId, PlanItem, Prompt, PromptCaps,
     RestoreOutcome, STEER_METHOD, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
-    SlashCommand, TURN_STATE_METHOD, TokenUsage, ToolStatus, Usage, spawn_session,
-    spawn_session_with,
+    SlashCommand, TURN_STATE_METHOD, TokenUsage, ToolStatus, Usage, config_event, spawn_session,
+    spawn_session_with, turn_end_event, update_event,
 };
 pub use updates::{RestartEndpoint, Update, UpdateCheck};
 
