@@ -111,7 +111,7 @@ impl Metrics {
             limit.min(LIST_MAX)
         };
         let filter = if session.is_some() {
-            "WHERE workspace = $workspace AND session_id = $session"
+            "WHERE workspace = $workspace AND session_id = $sid"
         } else {
             "WHERE workspace = $workspace"
         };
@@ -121,7 +121,7 @@ impl Metrics {
                 "SELECT * OMIT id, workspace FROM turn {filter} \
                  ORDER BY started_at_ms DESC LIMIT $limit"
             ))
-            .bind(json!({ "workspace": workspace, "session": session, "limit": limit }))
+            .bind(json!({ "workspace": workspace, "sid": session, "limit": limit }))
             .await?
             .check()?
             .take(0)?;
