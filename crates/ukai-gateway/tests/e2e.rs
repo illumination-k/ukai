@@ -276,6 +276,31 @@ async fn the_gateway_answers_its_tokens_only() {
     assert_eq!(old.status().as_u16(), 404);
 }
 
+/// The secretary pane's overview: the running workspaces, for the
+/// gateway's token only.
+#[tokio::test]
+#[ignore = "needs a cluster: e2e/gateway/run.sh"]
+async fn the_app_lists_the_running_workspaces() {
+    use ukai_acp::secretary::OverviewEndpoint;
+
+    let overview = |token: &str| {
+        OverviewEndpoint::resolve(&agent_spec(token), |_, _| None)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("a gateway agent has an overview"))
+    };
+    let wrong = overview("nope").list().await;
+    assert!(wrong.is_err(), "{wrong:?}");
+    let listed = overview(&env("UKAI_E2E_GATEWAY_TOKEN"))
+        .list()
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    // Every pod the e2e runs is the one agent's, and none is a secretary's.
+    assert!(
+        listed.iter().all(|workspace| workspace.agent == AGENT),
+        "{listed:?}"
+    );
+}
+
 /// The e2e agent as the app declares it, with `token`.
 fn agent_spec(token: &str) -> AgentSpec {
     let url = env("UKAI_E2E_GATEWAY").replacen("http", "ws", 1);

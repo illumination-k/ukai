@@ -69,11 +69,21 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
     let app = use_context::<AppSignals>();
     let sessions = app.sessions;
     match entry {
-        Entry::User { text, attachments } => rsx! {
-            div { class: "msg user",
-                "{text}"
-                Attachments { attachments }
-            }
+        Entry::User { text, attachments } => match ukai_acp::secretary::unmarked(&text) {
+            // Sent by a secretary, not typed here: said so, and drawn apart.
+            Some((secretary, prompt)) => rsx! {
+                div { class: "msg user from-secretary",
+                    span { class: "from", title: "Sent by the secretary agent `{secretary}`", "Secretary" }
+                    "{prompt}"
+                    Attachments { attachments }
+                }
+            },
+            None => rsx! {
+                div { class: "msg user",
+                    "{text}"
+                    Attachments { attachments }
+                }
+            },
         },
         Entry::Agent { text } => rsx! {
             AgentMessage { text }

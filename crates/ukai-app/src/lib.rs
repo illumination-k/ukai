@@ -22,6 +22,7 @@ mod projects;
 mod remote_reports;
 mod report_pane;
 mod schedules;
+mod secretary;
 mod shortcuts;
 mod sidebar;
 mod terminal_pane;

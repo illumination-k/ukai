@@ -22,6 +22,7 @@ pub mod report;
 pub mod review;
 pub mod schedule;
 pub mod secret;
+pub mod secretary;
 pub mod shell;
 pub mod sidebar;
 pub mod slash;

@@ -11,7 +11,7 @@ use std::time::Duration;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::StatusCode;
 use tonic::{Request, Response, Status};
-use ukai_acp::secretary::{Entry, PromptBody, SessionSummary, Started};
+use ukai_acp::secretary::{Entry, PromptBody, SessionSummary, Started, marked};
 use ukai_proto::gateway::v1 as gw;
 
 use crate::Gateway;
@@ -33,14 +33,6 @@ pub struct PodSecretary {
 struct Asking {
     agent: String,
     workspace: String,
-}
-
-/// `prompt` as the secretary `agent` sends it: marked, so the agent
-/// receiving it and the user reading the session both see whose it is.
-pub fn marked(agent: &str, prompt: &str) -> String {
-    format!(
-        "[ukai] This prompt is from `{agent}`, the user's secretary agent, not from the user.\n\n{prompt}"
-    )
 }
 
 impl PodSecretary {
@@ -137,37 +129,51 @@ fn workspace_of(pane: Option<String>) -> gw::Workspace {
     }
 }
 
-impl PodSecretary {
-    async fn sessions(&self, pod: RunningPod) -> gw::RunningWorkspace {
-        let asked = self
-            .gateway
-            .http
-            .get(pod.relay.sessions_url(""))
-            .bearer_auth(&pod.relay.token)
-            .timeout(LIST_TIMEOUT)
-            .send()
+/// The running workspaces `keep` lets through, each with its sessions as
+/// its relay lists them (or why it did not), asked all at once.
+pub async fn workspaces(
+    gateway: &Gateway,
+    keep: impl Fn(&RunningPod) -> bool,
+) -> Result<Vec<gw::RunningWorkspace>, Status> {
+    let pods = gateway.cluster.running_pods().await.map_err(|error| {
+        tracing::warn!(%error, "cannot list the running workspaces");
+        Status::unavailable("cannot list the workspaces")
+    })?;
+    let listed = pods
+        .into_iter()
+        .filter(|pod| keep(pod))
+        .map(|pod| sessions(gateway, pod));
+    Ok(futures::future::join_all(listed).await)
+}
+
+async fn sessions(gateway: &Gateway, pod: RunningPod) -> gw::RunningWorkspace {
+    let asked = gateway
+        .http
+        .get(pod.relay.sessions_url(""))
+        .bearer_auth(&pod.relay.token)
+        .timeout(LIST_TIMEOUT)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status);
+    let listed = match asked {
+        Ok(response) => response
+            .json::<Vec<SessionSummary>>()
             .await
-            .and_then(reqwest::Response::error_for_status);
-        let listed = match asked {
-            Ok(response) => response
-                .json::<Vec<SessionSummary>>()
-                .await
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
-        let (sessions, unreachable) = match listed {
-            Ok(sessions) => (sessions.into_iter().map(Into::into).collect(), None),
-            Err(error) => {
-                tracing::warn!(workspace = %pod.workspace, %error, "cannot list a workspace's sessions");
-                (Vec::new(), Some("its relay did not answer".to_owned()))
-            }
-        };
-        gw::RunningWorkspace {
-            agent: pod.agent,
-            workspace: Some(workspace_of(pod.pane)),
-            sessions,
-            unreachable,
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    let (sessions, unreachable) = match listed {
+        Ok(sessions) => (sessions.into_iter().map(Into::into).collect(), None),
+        Err(error) => {
+            tracing::warn!(workspace = %pod.workspace, %error, "cannot list a workspace's sessions");
+            (Vec::new(), Some("its relay did not answer".to_owned()))
         }
+    };
+    gw::RunningWorkspace {
+        agent: pod.agent,
+        workspace: Some(workspace_of(pod.pane)),
+        sessions,
+        unreachable,
     }
 }
 
@@ -178,16 +184,8 @@ impl gw::workspace_secretary_server::WorkspaceSecretary for PodSecretary {
         request: Request<gw::ListWorkspacesRequest>,
     ) -> Result<Response<gw::ListWorkspacesResponse>, Status> {
         let asking = self.asking(&request).await?;
-        let pods = self.gateway.cluster.running_pods().await.map_err(|error| {
-            tracing::warn!(%error, "cannot list the workspaces for a secretary");
-            Status::unavailable("cannot list the workspaces")
-        })?;
-        let others = pods
-            .into_iter()
-            .filter(|pod| pod.workspace != asking.workspace)
-            .map(|pod| self.sessions(pod));
         Ok(Response::new(gw::ListWorkspacesResponse {
-            workspaces: futures::future::join_all(others).await,
+            workspaces: workspaces(&self.gateway, |pod| pod.workspace != asking.workspace).await?,
         }))
     }
 
@@ -302,16 +300,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-
-    #[test]
-    fn a_prompt_says_it_is_the_secretarys() {
-        let text = marked("aide", "rebase on main");
-        assert!(
-            text.starts_with("[ukai] This prompt is from `aide`"),
-            "{text}"
-        );
-        assert!(text.ends_with("\n\nrebase on main"), "{text}");
-    }
 
     #[rstest]
     #[case::fine("rebase", true)]
