@@ -277,7 +277,10 @@ impl Hub {
                     }),
                 ),
             ));
-            outputs.push(Output::Client(conn, turn_state(session, "running", None)));
+            outputs.push(Output::Client(
+                conn,
+                turn_state(session, "running", None, None),
+            ));
         }
         Ok(outputs)
     }
@@ -501,7 +504,10 @@ impl Hub {
         }
         outputs.push(Output::Client(conn, result(id, setup)));
         if state.turn.is_some() {
-            outputs.push(Output::Client(conn, turn_state(session, "running", None)));
+            outputs.push(Output::Client(
+                conn,
+                turn_state(session, "running", None, None),
+            ));
         }
         let resend: Vec<String> = state.pending.keys().cloned().collect();
         for agent_id in resend {
@@ -654,9 +660,10 @@ impl Hub {
                 if let Some(attached) = self.end_turn(&sid, conn) {
                     // The client that asked is gone; tell whoever is here.
                     let stop = message.pointer("/result/stopReason").cloned();
-                    outputs.extend(
-                        attached.map(|other| Output::Client(other, turn_state(&sid, "idle", stop))),
-                    );
+                    let usage = message.pointer("/result/usage").cloned();
+                    outputs.extend(attached.map(|other| {
+                        Output::Client(other, turn_state(&sid, "idle", stop.clone(), usage.clone()))
+                    }));
                     return outputs;
                 }
             }
@@ -805,12 +812,21 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn turn_state(session: &str, state: &str, stop_reason: Option<Value>) -> Value {
+/// `usage`: the tokens the turn took, as the agent's `session/prompt` result had them.
+fn turn_state(
+    session: &str,
+    state: &str,
+    stop_reason: Option<Value>,
+    usage: Option<Value>,
+) -> Value {
     let mut params = Map::new();
     params.insert("sessionId".to_owned(), json!(session));
     params.insert("state".to_owned(), json!(state));
     if let Some(stop) = stop_reason {
         params.insert("stopReason".to_owned(), stop);
+    }
+    if let Some(usage) = usage {
+        params.insert("usage".to_owned(), usage);
     }
     notification(TURN_STATE, Value::Object(params))
 }

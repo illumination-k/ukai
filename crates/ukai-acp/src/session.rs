@@ -134,8 +134,14 @@ pub enum SessionEvent {
     /// the client reattached to a session whose turn went on while it was
     /// away, or a [`SessionHandle::steer`] found the turn over and started one.
     TurnRunning,
+    /// A prompt sent with [`SessionHandle::prompt`] went out: its turn starts.
+    TurnStarted,
     /// The prompt turn finished, e.g. with `end_turn` or `cancelled`.
-    TurnEnded { stop_reason: String },
+    TurnEnded {
+        stop_reason: String,
+        /// The tokens the turn took, if the agent says.
+        tokens: Option<TokenUsage>,
+    },
     /// The agent rejected the prompt; the session is still usable.
     PromptFailed { message: String },
     /// The agent rejected a [`SessionHandle::steer`]; the turn goes on without it.
@@ -197,6 +203,31 @@ pub struct Usage {
     /// The context window, in tokens.
     pub size: u64,
     pub cost: Option<Cost>,
+}
+
+/// The tokens an agent reports a turn took, in its `session/prompt` response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub total: u64,
+    pub input: u64,
+    pub output: u64,
+    /// Reasoning tokens, when the agent counts them apart.
+    pub thought: Option<u64>,
+    pub cached_read: Option<u64>,
+    pub cached_write: Option<u64>,
+}
+
+impl From<agent_client_protocol::schema::v1::Usage> for TokenUsage {
+    fn from(usage: agent_client_protocol::schema::v1::Usage) -> Self {
+        Self {
+            total: usage.total_tokens,
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+            thought: usage.thought_tokens,
+            cached_read: usage.cached_read_tokens,
+            cached_write: usage.cached_write_tokens,
+        }
+    }
 }
 
 /// Cumulative cost of a session.
@@ -1299,11 +1330,13 @@ fn send_prompt(
 ) -> Result<(), agent_client_protocol::Error> {
     let events = events.clone();
     events.turn_started();
+    let _ = events.send(SessionEvent::TurnStarted);
     cx.prepare_request(PromptRequest::new(session_id.clone(), blocks))
         .on_receiving_result(async move |result| {
             let event = match result {
                 Ok(response) => SessionEvent::TurnEnded {
                     stop_reason: serde_label(&response.stop_reason),
+                    tokens: response.usage.map(TokenUsage::from),
                 },
                 // The connection dropped, not the turn: a new connection
                 // hears how it goes.
@@ -1365,6 +1398,15 @@ fn translate_extension(message: &UntypedMessage) -> Option<SessionEvent> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("end_turn")
                     .to_owned(),
+                tokens: params
+                    .get("usage")
+                    .and_then(|usage| {
+                        serde_json::from_value::<agent_client_protocol::schema::v1::Usage>(
+                            usage.clone(),
+                        )
+                        .ok()
+                    })
+                    .map(TokenUsage::from),
             }),
             _ => None,
         },

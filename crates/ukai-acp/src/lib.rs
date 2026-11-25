@@ -46,7 +46,8 @@ pub use session::{
     Attachment, ConfigChoice, ConfigInput, ConfigOption, ConfigValue, Cost, FileDiff,
     PROGRESS_METHOD, PastSession, PermissionChoice, PermissionId, PlanItem, Prompt, PromptCaps,
     RestoreOutcome, STEER_METHOD, SessionEvent, SessionEvents, SessionHandle, SessionOptions,
-    SlashCommand, TURN_STATE_METHOD, ToolStatus, Usage, spawn_session, spawn_session_with,
+    SlashCommand, TURN_STATE_METHOD, TokenUsage, ToolStatus, Usage, spawn_session,
+    spawn_session_with,
 };
 pub use updates::{RestartEndpoint, Update, UpdateCheck};
 

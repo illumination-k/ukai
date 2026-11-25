@@ -234,7 +234,7 @@ fn a_client_attaching_mid_turn_hears_it_running_and_ending() {
     let out = hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
     assert_eq!(
         client_messages(&out, B).last(),
-        Some(&turn_state(SID, "running", None))
+        Some(&turn_state(SID, "running", None, None))
     );
     assert_eq!(
         client_messages(&hub.from_agent(update("more")), B),
@@ -243,7 +243,30 @@ fn a_client_attaching_mid_turn_hears_it_running_and_ending() {
     let out = hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
     assert_eq!(
         client_messages(&out, B),
-        [turn_state(SID, "idle", Some(json!("end_turn")))]
+        [turn_state(SID, "idle", Some(json!("end_turn")), None)]
+    );
+}
+
+#[test]
+fn a_client_attaching_mid_turn_hears_the_tokens_it_took() {
+    let mut hub = with_session();
+    let turn = prompt(&mut hub, A, 3, "long job");
+    hub.disconnect(A);
+    hub.connect(B);
+    hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
+    let usage = json!({ "totalTokens": 30, "inputTokens": 20, "outputTokens": 10 });
+    let out = hub.from_agent(result(
+        json!(turn),
+        json!({ "stopReason": "end_turn", "usage": usage }),
+    ));
+    assert_eq!(
+        client_messages(&out, B),
+        [turn_state(
+            SID,
+            "idle",
+            Some(json!("end_turn")),
+            Some(usage)
+        )]
     );
 }
 
@@ -633,7 +656,7 @@ fn an_unattached_prompt_runs_a_turn_the_attached_client_follows() {
         heard[0]["params"]["update"]["sessionUpdate"],
         "user_message_chunk"
     );
-    assert_eq!(heard[1], turn_state(SID, "running", None));
+    assert_eq!(heard[1], turn_state(SID, "running", None, None));
     assert!(hub.sessions()[0].running);
     // ...a second prompt is refused while it runs...
     assert_eq!(
@@ -644,7 +667,7 @@ fn an_unattached_prompt_runs_a_turn_the_attached_client_follows() {
     let ended = hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
     assert_eq!(
         client_messages(&ended, A),
-        [turn_state(SID, "idle", Some(json!("end_turn")))]
+        [turn_state(SID, "idle", Some(json!("end_turn")), None)]
     );
     assert_eq!(
         replayed_texts(&mut hub),

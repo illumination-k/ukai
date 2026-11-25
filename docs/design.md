@@ -139,7 +139,7 @@ UI は「再起動して更新」か「そのまま開始」（`SessionHandle::p
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
 `Preparing` / `UpdateAvailable` / `UpdateMissed` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
-`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
+`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnStarted` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
 UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `resolve_permission` / `set_config`）で操作する。
 
@@ -165,6 +165,9 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
   同じ feed に `_meta.claudeCode.parentToolUseId` 付きで流れ、並列に走るサブエージェント同士で混ざる。これは
   `Subagent { parent, event }` で包んで運び、`Transcript` は起動したツール呼び出しの `Entry::Tool::children` に
   畳み込む（親が見つからなければエージェント自身のものとして扱う）。pane ではそのツール呼び出しの行を開くと見える。
+- `TurnStarted` は `prompt` が出た時点、`TurnEnded` は `session/prompt` の応答で、応答の `usage`（ACP の unstable
+  `unstable_end_turn_token_usage`。入力・出力・思考・キャッシュ読み書きのトークン）を `TokenUsage` として運ぶ。
+  relay はクライアント不在で終わったターンの `_ukai/turn_state` の `idle` にも同じ `usage` を載せる。
 - `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、
   届くたびに前の一覧を置き換える。ACP にコマンド実行の専用メソッドはなく、`/name 入力` で始まる prompt がそれになる。
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
@@ -714,7 +717,7 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   サイドバーでフォルダ選択ダイアログから追加、`ukai <dir>` でも追加（引数なしなら cwd から `ukai.toml` を
   遡って探す）。閉じるとそのプロジェクトの pane とセッションも閉じる。
 - **DB は使わない。** 永続化するのはプロジェクトの登録（エージェントごとのモデル・推論レベルの既定を含む）と
-  タブ/pane の配置（各 agent pane の ACP セッション id を含む）だけで、`~/.local/state/ukai/state.json`（`$UKAI_STATE_DIR` / `$XDG_STATE_HOME/ukai`）の 1 ドキュメント。
+  タブ/pane の配置（各 agent pane の ACP セッション id を含む）だけで（ほかにターンのメトリクスを別ファイルに追記する。下記）、`~/.local/state/ukai/state.json`（`$UKAI_STATE_DIR` / `$XDG_STATE_HOME/ukai`）の 1 ドキュメント。
   - `version` 付き。新しい版のファイルや壊れたファイル、不変条件を満たさない配置は読まずに
     `state.json.broken-<unix秒>` へ退避して空の状態で起動する。
   - 変更から 500ms デバウンスして、一時ファイル → `fsync` → `rename` → ディレクトリ `fsync` で書く。
@@ -723,6 +726,13 @@ herdr（JSON 1 ファイル）と orca（SQLite のドキュメントストア +
   `session/load`（履歴を再送してくれる）→ なければ `session/resume`（履歴なしで継続）→ どちらもなければ新規、
   の順で試し、欠けた分は pane に注記する。エージェントがそのセッションを持っていない（`-32002` resource not
   found。gateway のポッドが作り直されたときなど）ときも切断せず新規にして注記する。
+- **ターンのメトリクス:** 改良のための計測として、agent pane は届いたイベントの時刻からターンごとに
+  所要時間・最初の出力までの時間・思考と返答のストリーミング時間・パーミッション待ち・ツール呼び出しごとの
+  種類/タイトル/結果/所要時間（サブエージェントのものは親付き）・トークン・最新のコンテキスト使用量とコスト・
+  モデルと推論レベルを測り（`ukai_core::metrics::Recorder`）、`<state dir>/metrics/<session id>.jsonl` に
+  1 ターン 1 行で追記する。時間はクライアントから見たもので、フェーズは最初のイベントから別種のイベントが
+  届くまでとする。`session/load` や再接続で再生される履歴は数えない（`Ready` まで無視し、再接続を挟んだ
+  ターンは `reconnected`、pane が途中から加わったターンは `joined` を付ける）。手元にだけ残し、送らない。
 - **SQLite を入れる条件:** `session/load` を持たないエージェントの会話も残したい、横断検索、レポート索引が
   必要になったとき。そのときは orca と同じく追記専用の会話ジャーナルを別ファイルにする。
 - **今後:** herdr / orca はどちらも常駐プロセスがエージェントを持ち、UI の再起動ではエージェントが死なない。

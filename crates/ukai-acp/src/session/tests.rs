@@ -211,6 +211,13 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                 say(&offered_fs)?;
                             } else if text == "blocks" {
                                 say(&blocks)?;
+                            } else if text == "tokens" {
+                                return responder.respond(
+                                    PromptResponse::new(StopReason::EndTurn).usage(
+                                        agent_client_protocol::schema::v1::Usage::new(30, 20, 10)
+                                            .thought_tokens(4),
+                                    ),
+                                );
                             } else if text == "usage" {
                                 cx.send_notification(SessionNotification::new(
                                     session.clone(),
@@ -530,6 +537,10 @@ impl Harness {
         let mut seen = Vec::new();
         loop {
             let event = self.next().await;
+            // Every prompt starts with one; `announces_the_turn_start` checks it.
+            if event == SessionEvent::TurnStarted {
+                continue;
+            }
             let last = matches!(
                 event,
                 SessionEvent::TurnEnded { .. }
@@ -547,6 +558,7 @@ impl Harness {
 fn end_turn() -> SessionEvent {
     SessionEvent::TurnEnded {
         stop_reason: "end_turn".into(),
+        tokens: None,
     }
 }
 
@@ -870,6 +882,33 @@ async fn reports_usage() {
             }),
             end_turn(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn announces_the_turn_start() {
+    let mut harness = Harness::start().await;
+    assert!(harness.handle.prompt("hello"));
+    assert_eq!(harness.next().await, SessionEvent::TurnStarted);
+}
+
+#[tokio::test]
+async fn reports_the_tokens_a_turn_took() {
+    let mut harness = Harness::start().await;
+    let events = harness.turn("tokens").await;
+    assert_eq!(
+        events,
+        vec![SessionEvent::TurnEnded {
+            stop_reason: "end_turn".into(),
+            tokens: Some(TokenUsage {
+                total: 30,
+                input: 20,
+                output: 10,
+                thought: Some(4),
+                cached_read: None,
+                cached_write: None,
+            }),
+        }]
     );
 }
 

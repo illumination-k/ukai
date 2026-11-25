@@ -497,7 +497,7 @@ async fn run_prompt(
                     &format!("\n⏸ Waiting for permission: {title}. Open the session to answer.\n"),
                 );
             }
-            SessionEvent::TurnEnded { stop_reason } => {
+            SessionEvent::TurnEnded { stop_reason, .. } => {
                 return if stop_reason == "end_turn" {
                     Outcome::Succeeded
                 } else {
