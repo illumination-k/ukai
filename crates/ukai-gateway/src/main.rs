@@ -264,6 +264,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::commands_server::CommandsServer;
     use ukai_proto::gateway::v1::files_server::FilesServer;
     use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
+    use ukai_proto::gateway::v1::metrics_server::MetricsServer;
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
@@ -296,6 +297,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     )
     .add_service(web.layer(AgentsServer::new(api.clone())))
     .add_service(web.layer(PortsServer::new(api.clone())))
+    .add_service(web.layer(MetricsServer::new(api.clone())))
     .add_service(
         web.layer(
             // An upload carries a file, past tonic's 4 MiB of a message.

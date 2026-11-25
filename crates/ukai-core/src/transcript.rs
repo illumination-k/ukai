@@ -842,7 +842,7 @@ pub fn usage_label(usage: &Usage) -> String {
 }
 
 /// A token count rounded for display: `950`, `1.2k`, `53k`, `1.5M`.
-fn tokens(count: u64) -> String {
+pub(crate) fn tokens(count: u64) -> String {
     let (value, unit) = match count {
         0..1_000 => return count.to_string(),
         // Below 999.5k so rounding never shows `1000k`.
