@@ -2,7 +2,8 @@
 //! where agents spend their turns (see "ターンのメトリクス" in
 //! `docs/design.md`). A gateway agent's relay folds its sessions' events into
 //! a [`TurnRecord`] per turn with [`Recorder`] and sends each to the gateway
-//! ([`MetricsEndpoint`]), which has `ukai-store` keep it.
+//! ([`MetricsEndpoint`]), which has `ukai-store` keep it. The app reads a
+//! workspace's turns back through the gateway ([`MetricsReader`]).
 //!
 //! Times are taken as events arrive: a phase runs from its first event until
 //! the next event of another kind.
@@ -485,7 +486,7 @@ pub enum RecordError {
     Refused(Vec<String>),
     #[error("the gateway keeps no metrics")]
     Unavailable,
-    #[error("cannot record the turn through the gateway: {0}")]
+    #[error("the gateway's metrics failed: {0}")]
     Failed(String),
 }
 
@@ -519,6 +520,58 @@ impl MetricsEndpoint {
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Reading the turns of a gateway agent's workspace, as the app does.
+#[derive(Debug, Clone)]
+pub struct MetricsReader {
+    channel: crate::grpc::Channel,
+    agent: String,
+    workspace: ukai_proto::gateway::v1::Workspace,
+}
+
+impl MetricsReader {
+    /// The turns of `workspace` for `spec`, or `None` when the agent is not
+    /// a gateway agent: only a gateway's relays measure turns.
+    pub fn resolve(
+        spec: &ukai_config::AgentSpec,
+        lookup: impl Fn(ukai_config::Source, &str) -> Option<String> + Copy,
+        workspace: Option<&crate::PaneWorkspace>,
+    ) -> Result<Option<Self>, ResolveError> {
+        let Some(agent) = crate::gateway::GatewayAgent::resolve(spec, lookup)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            channel: agent.channel(TIMEOUT)?,
+            workspace: agent.gateway.workspace(workspace),
+            agent: agent.id,
+        }))
+    }
+
+    /// The workspace's turns (only `session`'s, if given), newest first, at
+    /// most `limit` (0 for the store's limit).
+    pub async fn list(
+        &self,
+        session: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<TurnRecord>, RecordError> {
+        use ukai_proto::gateway::v1 as gw;
+        use ukai_proto::gateway::v1::metrics_client::MetricsClient;
+        let listed = MetricsClient::new(self.channel.clone())
+            .list(gw::ListTurnsRequest {
+                agent: self.agent.clone(),
+                workspace: Some(self.workspace.clone()),
+                session: session.map(str::to_owned),
+                limit,
+            })
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable => RecordError::Unavailable,
+                _ => RecordError::Failed(status.message().to_owned()),
+            })?
+            .into_inner();
+        Ok(listed.turns.into_iter().map(Into::into).collect())
+    }
+}
 
 /// The wire form of a turn, as `ukai.metrics.v1` carries it.
 pub mod wire {
