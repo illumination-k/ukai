@@ -354,8 +354,12 @@ mod tests {
     #[rstest]
     #[case::the_users("rebase on main")]
     #[case::only_the_start("[ukai] This prompt is from `aide`")]
-    #[case::no_agent("[ukai] This prompt is from ``, the user's secretary agent, not from the user.\n\nx")]
-    #[case::quoted_further_in("see: [ukai] This prompt is from `aide`, the user's secretary agent, not from the user.\n\nx")]
+    #[case::no_agent(
+        "[ukai] This prompt is from ``, the user's secretary agent, not from the user.\n\nx"
+    )]
+    #[case::quoted_further_in(
+        "see: [ukai] This prompt is from `aide`, the user's secretary agent, not from the user.\n\nx"
+    )]
     fn other_text_is_not_marked(#[case] text: &str) {
         assert_eq!(unmarked(text), None);
     }

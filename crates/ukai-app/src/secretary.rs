@@ -57,7 +57,8 @@ pub fn secretaries(app: AppSignals) -> Vec<Secretary> {
     let mut seen = Vec::new();
     let mut found = Vec::new();
     for project in projects.iter() {
-        let (Some(Ok(config)), Some(listed)) = (configs.get(&project.id), listings.get(&project.id))
+        let (Some(Ok(config)), Some(listed)) =
+            (configs.get(&project.id), listings.get(&project.id))
         else {
             continue;
         };
@@ -81,9 +82,10 @@ pub fn secretaries(app: AppSignals) -> Vec<Secretary> {
 }
 
 fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<OverviewEndpoint, String> {
-    follow::found(OverviewEndpoint::resolve(spec, ukai_acp::system_lookup), || {
-        format!("agent `{}` is not a gateway agent", workspace.agent)
-    })
+    follow::found(
+        OverviewEndpoint::resolve(spec, ukai_acp::system_lookup),
+        || format!("agent `{}` is not a gateway agent", workspace.agent),
+    )
 }
 
 /// Reads every secretary's overview, over and over, and as soon as a
@@ -132,11 +134,15 @@ pub fn FollowSecretaries() -> Element {
 
 /// The overview of `secretary`, or why there is none yet.
 fn items(app: AppSignals, secretary: &Secretary) -> Option<Result<Vec<Item>, String>> {
-    let own = secretary.1.split_once('/').map_or(secretary.1.as_str(), |(_, id)| id);
-    app.secretaries
-        .read()
-        .get(secretary)
-        .map(|listed| listed.clone().map(|workspaces| secretary::overview(&workspaces, own)))
+    let own = secretary
+        .1
+        .split_once('/')
+        .map_or(secretary.1.as_str(), |(_, id)| id);
+    app.secretaries.read().get(secretary).map(|listed| {
+        listed
+            .clone()
+            .map(|workspaces| secretary::overview(&workspaces, own))
+    })
 }
 
 /// The pane showing `agent` of `project`, nearest the user.
@@ -220,7 +226,11 @@ pub fn SecretaryPins() -> Element {
     rsx! {
         div { class: "secretary-pins",
             for secretary in found {
-                SecretaryPin { key: "{secretary.0}/{secretary.1}", secretary, several }
+                SecretaryPin {
+                    key: "{secretary.0}/{secretary.1}",
+                    secretary,
+                    several,
+                }
             }
         }
     }
@@ -243,7 +253,11 @@ fn SecretaryPin(secretary: Secretary, several: bool) -> Element {
         Some(Err(error)) => (0, 0, Some(error.clone())),
         None => (0, 0, None),
     };
-    let name = if several { secretary.1.clone() } else { "Secretary".to_owned() };
+    let name = if several {
+        secretary.1.clone()
+    } else {
+        "Secretary".to_owned()
+    };
     let class = match (focused, unread) {
         (true, _) => "row secretary-pin focused",
         (false, true) => "row secretary-pin unread",
@@ -285,7 +299,12 @@ fn SecretaryPin(secretary: Secretary, several: bool) -> Element {
 
 /// The secretary's pane: its conversation, and the overview beside it.
 #[component]
-pub fn SecretaryPane(pane: PaneId, project: ProjectId, agent: String, has_saved_session: bool) -> Element {
+pub fn SecretaryPane(
+    pane: PaneId,
+    project: ProjectId,
+    agent: String,
+    has_saved_session: bool,
+) -> Element {
     rsx! {
         div { class: "secretary-pane",
             div { class: "secretary-chat",
@@ -296,9 +315,11 @@ pub fn SecretaryPane(pane: PaneId, project: ProjectId, agent: String, has_saved_
     }
 }
 
-/// The overview's sections, those with something in them, in order: their
-/// heading, class, and rows with their keys.
-fn sections(items: Vec<Item>) -> Vec<(String, &'static str, Vec<(String, Item)>)> {
+/// A section of the overview: its heading, class, and rows with their keys.
+type Section = (String, &'static str, Vec<(String, Item)>);
+
+/// The overview's sections, those with something in them, in order.
+fn sections(items: Vec<Item>) -> Vec<Section> {
     [
         (Standing::Waiting, "Waiting on you", "waiting"),
         (Standing::Running, "Working", ""),
@@ -311,7 +332,10 @@ fn sections(items: Vec<Item>) -> Vec<(String, &'static str, Vec<(String, Item)>)
             .iter()
             .filter(|item| item.standing == standing)
             .map(|item| {
-                let session = item.session.as_ref().map_or("", |session| session.id.as_str());
+                let session = item
+                    .session
+                    .as_ref()
+                    .map_or("", |session| session.id.as_str());
                 (format!("{}/{session}", item.place()), item.clone())
             })
             .collect();
@@ -340,7 +364,11 @@ fn Overview(secretary: Secretary) -> Element {
                 section { key: "{heading}", class: "overview-section {class}",
                     h3 { "{heading}" }
                     for (key, item) in rows {
-                        OverviewItem { key: "{key}", secretary: secretary.clone(), item }
+                        OverviewItem {
+                            key: "{key}",
+                            secretary: secretary.clone(),
+                            item,
+                        }
                     }
                 }
             }

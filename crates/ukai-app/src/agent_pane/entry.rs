@@ -73,7 +73,11 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
             // Sent by a secretary, not typed here: said so, and drawn apart.
             Some((secretary, prompt)) => rsx! {
                 div { class: "msg user from-secretary",
-                    span { class: "from", title: "Sent by the secretary agent `{secretary}`", "Secretary" }
+                    span {
+                        class: "from",
+                        title: "Sent by the secretary agent `{secretary}`",
+                        "Secretary"
+                    }
                     "{prompt}"
                     Attachments { attachments }
                 }

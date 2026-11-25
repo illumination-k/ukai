@@ -71,7 +71,9 @@ impl Item {
 
 /// A pane key as far as the user needs it to tell workspaces apart.
 fn short(key: &str) -> &str {
-    key.char_indices().nth(8).map_or(key, |(end, _)| &key[..end])
+    key.char_indices()
+        .nth(8)
+        .map_or(key, |(end, _)| &key[..end])
 }
 
 /// Every session of `workspaces` but the secretary's own, waiting ones
@@ -105,7 +107,10 @@ pub fn overview(workspaces: &[RunningWorkspace], secretary: &str) -> Vec<Item> {
 
 /// How many of `items` stand at `standing`.
 pub fn count(items: &[Item], standing: Standing) -> usize {
-    items.iter().filter(|item| item.standing == standing).count()
+    items
+        .iter()
+        .filter(|item| item.standing == standing)
+        .count()
 }
 
 #[cfg(test)]
@@ -123,7 +128,11 @@ mod tests {
         }
     }
 
-    fn workspace(agent: &str, pane: Option<&str>, sessions: Vec<SessionSummary>) -> RunningWorkspace {
+    fn workspace(
+        agent: &str,
+        pane: Option<&str>,
+        sessions: Vec<SessionSummary>,
+    ) -> RunningWorkspace {
         RunningWorkspace {
             agent: agent.into(),
             pane: pane.map(str::to_owned),
@@ -135,7 +144,11 @@ mod tests {
     #[test]
     fn waiting_comes_first_and_the_secretary_is_left_out() {
         let workspaces = [
-            workspace("cloud", None, vec![session("done", false, false), session("busy", true, false)]),
+            workspace(
+                "cloud",
+                None,
+                vec![session("done", false, false), session("busy", true, false)],
+            ),
             workspace("aide", None, vec![session("own", false, true)]),
             RunningWorkspace {
                 unreachable: Some("its relay did not answer".into()),
@@ -147,7 +160,12 @@ mod tests {
         let items = overview(&workspaces, "aide");
         let shown: Vec<_> = items
             .iter()
-            .map(|item| (item.standing, item.session.as_ref().map(|session| session.id.as_str())))
+            .map(|item| {
+                (
+                    item.standing,
+                    item.session.as_ref().map(|session| session.id.as_str()),
+                )
+            })
             .collect();
         assert_eq!(
             shown,
@@ -165,9 +183,19 @@ mod tests {
     #[rstest]
     #[case::titled(Some("Fix CI"), Some("ignored"), "Fix CI")]
     #[case::first_line_of_the_prompt(None, Some("\n fix the build\nplease"), "fix the build")]
-    #[case::secretarys_prompt(None, Some(&ukai_acp::secretary::marked("aide", "fix #123")), "fix #123")]
+    #[case::secretarys_prompt(
+        None,
+        Some(
+            "[ukai] This prompt is from `aide`, the user's secretary agent, not from the user.\n\nfix #123"
+        ),
+        "fix #123"
+    )]
     #[case::nothing(None, None, "Untitled session")]
-    fn an_item_is_titled(#[case] title: Option<&str>, #[case] prompt: Option<&str>, #[case] expected: &str) {
+    fn an_item_is_titled(
+        #[case] title: Option<&str>,
+        #[case] prompt: Option<&str>,
+        #[case] expected: &str,
+    ) {
         let item = Item {
             agent: "cloud".into(),
             pane: None,

@@ -27,9 +27,9 @@ use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
 use crate::ports::{PortPrompt, open_browser};
 use crate::projects::AppSignals;
-use crate::secretary::{SecretaryPane, is_secretary};
 use crate::report_pane::{ReportView, delete_report, download_report, pick_report};
 use crate::schedules::{ScheduleView, schedule_label};
+use crate::secretary::{SecretaryPane, is_secretary};
 use crate::shortcuts::Shortcuts;
 use crate::terminal_pane::{TerminalPane, open_terminal_in};
 
@@ -780,7 +780,12 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Empty => rsx! {
                     Picker { pane }
                 },
-                PaneContent::Agent { session, project, agent, .. } if is_secretary(app, &project, &agent) => rsx! {
+                PaneContent::Agent {
+                    session,
+                    project,
+                    agent,
+                    ..
+                } if is_secretary(app, &project, &agent) => rsx! {
                     SecretaryPane {
                         pane,
                         project,
@@ -791,9 +796,6 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Agent { session, .. } => rsx! {
                     AgentView { pane, has_saved_session: session.is_some() }
                 },
-                // A key counts only among a list's siblings, so each keyed
-                // view goes in a list of one: showing another schedule, note,
-                // or diff in the pane then starts its view afresh.
                 PaneContent::Schedule { project, agent, schedule } => rsx! {
                     for (project, agent, schedule) in [(project, agent, schedule)] {
                         ScheduleView {

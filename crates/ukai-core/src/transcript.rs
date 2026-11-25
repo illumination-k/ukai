@@ -275,7 +275,8 @@ impl Transcript {
             entries.iter().find_map(|entry| match entry {
                 Entry::User { text, .. } => {
                     // A secretary's prompt is titled by what it asks.
-                    let text = ukai_acp::secretary::unmarked(text).map_or(text.as_str(), |(_, prompt)| prompt);
+                    let text = ukai_acp::secretary::unmarked(text)
+                        .map_or(text.as_str(), |(_, prompt)| prompt);
                     text.lines().map(str::trim).find(|line| !line.is_empty())
                 }
                 _ => None,
