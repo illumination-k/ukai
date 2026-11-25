@@ -144,9 +144,7 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
         div { class: "pane-body metrics-pane",
             div { class: "diff-toolbar",
                 if summary.turns > 0 {
-                    span { class: "muted",
-                        "{summary.turns} turns · {summary.sessions} sessions"
-                    }
+                    span { class: "muted", "{summary.turns} turns · {summary.sessions} sessions" }
                 }
                 span { class: "spacer" }
                 button {
@@ -189,13 +187,15 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                 label: "Tokens",
                                 value: format!("{} in · {} out", count_label(tokens.input), count_label(tokens.output)),
                                 detail: match tokens.cache_share() {
-                                    Some(share) => format!(
-                                        "{} thinking · {:.0}% of input cached · {} of {} turns",
-                                        count_label(tokens.thought),
-                                        share * 100.0,
-                                        tokens.turns,
-                                        summary.turns,
-                                    ),
+                                    Some(share) => {
+                                        format!(
+                                            "{} thinking · {:.0}% of input cached · {} of {} turns",
+                                            count_label(tokens.thought),
+                                            share * 100.0,
+                                            tokens.turns,
+                                            summary.turns,
+                                        )
+                                    }
                                     None => "the agent reports none".to_owned(),
                                 },
                             }
@@ -266,9 +266,7 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                             tr { key: "{kind.kind}",
                                                 td { "{kind.kind}" }
                                                 td { class: "num", "{kind.calls}" }
-                                                td { class: if kind.failed > 0 { "num failed" } else { "num" },
-                                                    "{kind.failed}"
-                                                }
+                                                td { class: if kind.failed > 0 { "num failed" } else { "num" }, "{kind.failed}" }
                                                 td { class: "num", "{duration_label(kind.spread.total)}" }
                                                 td { class: "num", "{duration_label(kind.spread.median)}" }
                                                 td { class: "num", "{duration_label(kind.spread.p90)}" }
@@ -327,13 +325,17 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                                 {turn.first_output_ms.map(duration_label).unwrap_or_else(|| "—".to_owned())}
                                             }
                                             td { class: "num",
-                                                {turn.tokens.map_or_else(
-                                                    || "—".to_owned(),
-                                                    |t| format!("{} / {}", count_label(t.input), count_label(t.output)),
-                                                )}
+                                                {
+                                                    turn.tokens
+                                                        .map_or_else(
+                                                            || "—".to_owned(),
+                                                            |t| format!("{} / {}", count_label(t.input), count_label(t.output)),
+                                                        )
+                                                }
                                             }
                                             td { class: "num", "{turn.tools.len()}" }
-                                            td { class: if turn.error.is_some() { "failed" } else { "" },
+                                            td {
+                                                class: if turn.error.is_some() { "failed" } else { "" },
                                                 title: turn.error.clone().unwrap_or_default(),
                                                 "{turn.outcome}"
                                             }
@@ -395,7 +397,9 @@ fn TurnDetail(turn: TurnRecord) -> Element {
                 div { class: "muted", "No tool calls." }
             }
             for (index, tool) in turn.tools.iter().cloned().enumerate() {
-                div { key: "{index}", class: if tool.parent.is_some() { "turn-tool sub" } else { "turn-tool" },
+                div {
+                    key: "{index}",
+                    class: if tool.parent.is_some() { "turn-tool sub" } else { "turn-tool" },
                     span { class: "num",
                         {tool.duration_ms.map(duration_label).unwrap_or_else(|| "—".to_owned())}
                     }
