@@ -32,6 +32,7 @@ pub enum Icon {
     Trash,
     Sidebar,
     SidebarDetail,
+    Secretary,
     Chart,
 }
 
@@ -89,6 +90,12 @@ impl Icon {
             ],
             Self::Sidebar => &["M2.5 3.5h11v9h-11z", "M6 3.5v9"],
             Self::SidebarDetail => &["M2.5 3.5h11v9h-11z", "M6 3.5v9", "M9.5 3.5v9"],
+            Self::Secretary => &[
+                "M2.5 4.5h11",
+                "M2.5 8h6",
+                "M2.5 11.5h4",
+                "M11.5 9a2 2 0 1 0 0 4 2 2 0 1 0 0-4z",
+            ],
             Self::Diff => &["M5 2.5v5", "M2.5 5h5", "M8.5 11h5", "M3.5 13.5l9-9"],
             Self::Globe => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",

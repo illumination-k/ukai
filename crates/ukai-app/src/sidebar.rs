@@ -27,6 +27,7 @@ use crate::ports::PortGroup;
 use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, remove_project};
 use crate::report_pane::ReportGroup;
 use crate::schedules::ScheduleNode;
+use crate::secretary::SecretaryPins;
 use crate::shortcuts::Shortcuts;
 use crate::terminal_pane::open_terminal;
 
@@ -107,6 +108,7 @@ pub fn Sidebar() -> Element {
 
     rsx! {
         nav { class,
+            SecretaryPins {}
             div { class: "sidebar-header",
                 if let Some(id) = selected.clone() {
                     ProjectSelect {

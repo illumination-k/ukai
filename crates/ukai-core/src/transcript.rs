@@ -274,6 +274,9 @@ impl Transcript {
             };
             entries.iter().find_map(|entry| match entry {
                 Entry::User { text, .. } => {
+                    // A secretary's prompt is titled by what it asks.
+                    let text = ukai_acp::secretary::unmarked(text)
+                        .map_or(text.as_str(), |(_, prompt)| prompt);
                     text.lines().map(str::trim).find(|line| !line.is_empty())
                 }
                 _ => None,
@@ -926,6 +929,7 @@ mod tests {
     #[case::unnamed(vec![], None)]
     #[case::first_prompt(vec![user_said("\n fix the build \nplease"), user_said("and the docs")], Some("fix the build"))]
     #[case::named(vec![user_said("fix the build"), named(Some(" Build fix "))], Some("Build fix"))]
+    #[case::secretarys_prompt(vec![user_said(&ukai_acp::secretary::marked("aide", "fix #123"))], Some("fix #123"))]
     #[case::renamed(vec![named(Some("a")), named(Some("b"))], Some("b"))]
     #[case::blank_name(vec![user_said("fix the build"), named(Some("  "))], Some("fix the build"))]
     #[case::name_taken_back(vec![user_said("fix the build"), named(Some("a")), named(None)], Some("fix the build"))]

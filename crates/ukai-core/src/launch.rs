@@ -181,6 +181,7 @@ mod tests {
                     id: (*id).into(),
                     command: (*id).into(),
                     args: vec!["acp".into()],
+                    secretary: false,
                 })
                 .collect(),
         )

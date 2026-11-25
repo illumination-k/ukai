@@ -1477,6 +1477,22 @@ button.new-tab {
   color: var(--chat-strong);
 }
 
+/* A prompt a secretary agent sent, not the user: an outline instead of the
+   user's fill, under its name. */
+.msg.user.from-secretary {
+  border-style: dashed;
+  border-color: var(--ring);
+  background: transparent;
+}
+
+.msg.user .from {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-fg);
+}
+
 .thought {
   color: var(--muted-fg);
 }
@@ -3410,6 +3426,204 @@ button.outline.danger {
   color: var(--muted-fg);
   font-size: 11px;
 }
+
+/* ---- the secretary ---------------------------------------------------- */
+
+/* Pinned above the project dropdown: the secretary spans projects. */
+.secretary-pins {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 8px 8px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.secretary-pin .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secretary-pin.unread .name::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--unread);
+  vertical-align: middle;
+}
+
+.secretary-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: var(--primary-fg);
+}
+
+.secretary-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.secretary-count .dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* Too small for the spinning ring: a plain dot of the working color. */
+.secretary-count .dot.busy {
+  border: none;
+  background: var(--working);
+  animation: none;
+}
+
+.secretary-count.waiting {
+  color: var(--attention);
+  font-weight: 600;
+}
+
+/* The conversation, and the overview beside it. */
+.secretary-pane {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.secretary-chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.secretary-overview {
+  display: flex;
+  flex: 0 0 280px;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  padding-bottom: 12px;
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.secretary-overview header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.secretary-overview header .title {
+  flex: 1;
+  font-weight: 600;
+}
+
+.secretary-overview .meta,
+.secretary-pin .meta {
+  color: var(--muted-fg);
+  font-size: 11px;
+}
+
+.secretary-overview .empty {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+}
+
+.overview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 8px;
+}
+
+.overview-section h3 {
+  margin: 10px 4px 2px;
+  color: var(--muted-fg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.overview-section.waiting h3 {
+  color: var(--attention);
+}
+
+.overview-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.overview-item:hover:not(:disabled) {
+  border-color: var(--ring);
+  background: var(--card);
+}
+
+.overview-item:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.overview-section.waiting .overview-item {
+  border-color: color-mix(in srgb, var(--attention) 45%, transparent);
+}
+
+.overview-item .line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.overview-item .name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-item .place,
+.overview-item .detail {
+  overflow: hidden;
+  color: var(--muted-fg);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 
 /* The metrics pane: a workspace's turns (`metrics_pane.rs`). */
 .metrics-pane {

@@ -1,7 +1,10 @@
 //! A secretary agent's view of the other workspaces (see "秘書" in
 //! `docs/design.md`): what a relay answers about its sessions at
 //! [`SESSIONS_PATH`], which the gateway reads, and [`SecretaryEndpoint`],
-//! the secretary pod's client of the gateway's `WorkspaceSecretary`.
+//! the secretary pod's client of the gateway's `WorkspaceSecretary`, and
+//! [`OverviewEndpoint`], the app's view of the same through `Agents`, for
+//! the secretary pane. [`marked`] is how a secretary's prompt reads in the
+//! session it goes to, and [`unmarked`] how the app tells it apart.
 
 use std::time::Duration;
 
@@ -9,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use ukai_proto::gateway::v1 as gw;
 
 use crate::ResolveError;
+use crate::gateway::GatewayAgent;
+use ukai_config::{AgentSpec, Source};
 
 /// Where a relay lists its sessions (`GET`) and starts one (`POST`, with a
 /// [`PromptBody`]). One session is `<it>/<id>`: `GET <it>/<id>/transcript`
@@ -81,6 +86,24 @@ pub struct Started {
     pub session: String,
 }
 
+/// The start of the line [`marked`] puts first.
+const MARK_START: &str = "[ukai] This prompt is from `";
+const MARK_END: &str = "`, the user's secretary agent, not from the user.\n\n";
+
+/// `prompt` as the secretary `agent` sends it: marked, so the agent
+/// receiving it and the user reading the session both see whose it is.
+pub fn marked(agent: &str, prompt: &str) -> String {
+    format!("{MARK_START}{agent}{MARK_END}{prompt}")
+}
+
+/// The secretary and the prompt of a text [`marked`] made; `None` for any
+/// other text, such as the user's own.
+pub fn unmarked(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix(MARK_START)?;
+    let (agent, prompt) = rest.split_once(MARK_END)?;
+    (!agent.is_empty() && !agent.contains('`')).then_some((agent, prompt))
+}
+
 /// `text` cut to `max` characters, marked when cut.
 pub fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
@@ -100,6 +123,47 @@ impl From<SessionSummary> for gw::SessionSummary {
             waiting: summary.waiting,
             last_prompt: summary.last_prompt,
             last_reply: summary.last_reply,
+        }
+    }
+}
+
+impl From<gw::SessionSummary> for SessionSummary {
+    fn from(summary: gw::SessionSummary) -> Self {
+        Self {
+            id: summary.id,
+            title: summary.title,
+            running: summary.running,
+            stop_reason: summary.stop_reason,
+            waiting: summary.waiting,
+            last_prompt: summary.last_prompt,
+            last_reply: summary.last_reply,
+        }
+    }
+}
+
+/// A workspace with a running pod, as the app's secretary pane lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningWorkspace {
+    /// The agent's id in `gateway.toml`.
+    pub agent: String,
+    /// The pane key of a workspace of its own; `None` for the shared one.
+    pub pane: Option<String>,
+    pub sessions: Vec<SessionSummary>,
+    /// Why its relay could not list its sessions.
+    pub unreachable: Option<String>,
+}
+
+impl From<gw::RunningWorkspace> for RunningWorkspace {
+    fn from(workspace: gw::RunningWorkspace) -> Self {
+        let pane = workspace
+            .workspace
+            .filter(|workspace| workspace.scope() == gw::WorkspaceScope::Pod)
+            .map(|workspace| workspace.key);
+        Self {
+            agent: workspace.agent,
+            pane,
+            sessions: workspace.sessions.into_iter().map(Into::into).collect(),
+            unreachable: workspace.unreachable,
         }
     }
 }
@@ -223,6 +287,43 @@ impl SecretaryEndpoint {
     }
 }
 
+/// How long the overview may take: the gateway asks every relay, each
+/// within 5 seconds, at once.
+const OVERVIEW_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The running workspaces of a gateway agent's gateway, for the app
+/// (`Agents.Workspaces`, with the gateway's token).
+#[derive(Debug, Clone)]
+pub struct OverviewEndpoint {
+    channel: crate::grpc::Channel,
+}
+
+impl OverviewEndpoint {
+    /// The gateway of `spec`, or `None` when it is not a gateway agent.
+    pub fn resolve(
+        spec: &AgentSpec,
+        lookup: impl Fn(Source, &str) -> Option<String> + Copy,
+    ) -> Result<Option<Self>, ResolveError> {
+        let Some(agent) = GatewayAgent::resolve(spec, lookup)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            channel: agent.channel(OVERVIEW_TIMEOUT)?,
+        }))
+    }
+
+    pub async fn list(&self) -> Result<Vec<RunningWorkspace>, SecretaryError> {
+        Ok(gw::agents_client::AgentsClient::new(self.channel.clone())
+            .workspaces(gw::ListWorkspacesRequest {})
+            .await?
+            .into_inner()
+            .workspaces
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -237,6 +338,53 @@ mod tests {
     #[case::trimmed("  hi \n", 5, "hi")]
     fn clips(#[case] text: &str, #[case] max: usize, #[case] expected: &str) {
         assert_eq!(clip(text, max), expected);
+    }
+
+    #[test]
+    fn a_marked_prompt_says_whose_it_is() {
+        let text = marked("aide", "rebase on main");
+        assert!(
+            text.starts_with("[ukai] This prompt is from `aide`"),
+            "{text}"
+        );
+        assert!(text.ends_with("\n\nrebase on main"), "{text}");
+        assert_eq!(unmarked(&text), Some(("aide", "rebase on main")));
+    }
+
+    #[rstest]
+    #[case::the_users("rebase on main")]
+    #[case::only_the_start("[ukai] This prompt is from `aide`")]
+    #[case::no_agent(
+        "[ukai] This prompt is from ``, the user's secretary agent, not from the user.\n\nx"
+    )]
+    #[case::quoted_further_in(
+        "see: [ukai] This prompt is from `aide`, the user's secretary agent, not from the user.\n\nx"
+    )]
+    fn other_text_is_not_marked(#[case] text: &str) {
+        assert_eq!(unmarked(text), None);
+    }
+
+    #[test]
+    fn a_workspace_of_its_own_keeps_its_key() {
+        let listed = |scope: gw::WorkspaceScope| {
+            RunningWorkspace::from(gw::RunningWorkspace {
+                agent: "cloud".into(),
+                workspace: Some(gw::Workspace {
+                    scope: scope.into(),
+                    key: "k1".into(),
+                }),
+                sessions: vec![gw::SessionSummary {
+                    id: "s1".into(),
+                    waiting: true,
+                    ..gw::SessionSummary::default()
+                }],
+                unreachable: None,
+            })
+        };
+        let own = listed(gw::WorkspaceScope::Pod);
+        assert_eq!(own.pane.as_deref(), Some("k1"));
+        assert!(own.sessions[0].waiting);
+        assert_eq!(listed(gw::WorkspaceScope::Shared).pane, None);
     }
 
     #[test]
