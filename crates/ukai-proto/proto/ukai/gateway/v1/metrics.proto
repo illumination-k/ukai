@@ -1,0 +1,19 @@
+// What the gateway takes from its agent pods about their turns, over gRPC
+// and gRPC-Web on its own port. See "ターンのメトリクス" in docs/design.md.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/metrics/v1/metrics.proto";
+
+// Recording a turn of an agent pod's own workspace, with its relay's token:
+// the gateway finds the pod by it, and the workspace and agent from the
+// pod's Job, never from the request. UNAVAILABLE, a gateway that keeps no
+// store, or cannot reach it now.
+service WorkspaceMetrics {
+  rpc Record(WorkspaceRecordRequest) returns (ukai.metrics.v1.RecordResponse);
+}
+
+message WorkspaceRecordRequest {
+  ukai.metrics.v1.Turn turn = 1;
+}

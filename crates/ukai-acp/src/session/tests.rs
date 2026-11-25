@@ -211,6 +211,13 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                 say(&offered_fs)?;
                             } else if text == "blocks" {
                                 say(&blocks)?;
+                            } else if text == "tokens" {
+                                return responder.respond(
+                                    PromptResponse::new(StopReason::EndTurn).usage(
+                                        agent_client_protocol::schema::v1::Usage::new(30, 20, 10)
+                                            .thought_tokens(4),
+                                    ),
+                                );
                             } else if text == "usage" {
                                 cx.send_notification(SessionNotification::new(
                                     session.clone(),
@@ -512,7 +519,18 @@ impl Harness {
         }
     }
 
+    /// The next event, past the `TurnStarted` every prompt sends first
+    /// (`announces_the_turn_start` checks it with [`Self::next_raw`]).
     async fn next(&mut self) -> SessionEvent {
+        loop {
+            let event = self.next_raw().await;
+            if event != SessionEvent::TurnStarted {
+                return event;
+            }
+        }
+    }
+
+    async fn next_raw(&mut self) -> SessionEvent {
         match tokio::time::timeout(Duration::from_secs(5), self.events.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => panic!("event channel closed"),
@@ -547,6 +565,7 @@ impl Harness {
 fn end_turn() -> SessionEvent {
     SessionEvent::TurnEnded {
         stop_reason: "end_turn".into(),
+        tokens: None,
     }
 }
 
@@ -870,6 +889,33 @@ async fn reports_usage() {
             }),
             end_turn(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn announces_the_turn_start() {
+    let mut harness = Harness::start().await;
+    assert!(harness.handle.prompt("hello"));
+    assert_eq!(harness.next_raw().await, SessionEvent::TurnStarted);
+}
+
+#[tokio::test]
+async fn reports_the_tokens_a_turn_took() {
+    let mut harness = Harness::start().await;
+    let events = harness.turn("tokens").await;
+    assert_eq!(
+        events,
+        vec![SessionEvent::TurnEnded {
+            stop_reason: "end_turn".into(),
+            tokens: Some(TokenUsage {
+                total: 30,
+                input: 20,
+                output: 10,
+                thought: Some(4),
+                cached_read: None,
+                cached_write: None,
+            }),
+        }]
     );
 }
 
@@ -1496,4 +1542,48 @@ async fn an_agent_that_cannot_load_ends_with_its_connection() {
         "{closed:?}"
     );
     assert_eq!(server.kept().connections, 1);
+}
+
+#[test]
+fn a_relay_reads_an_update_as_a_client_hears_it() {
+    let params = serde_json::json!({
+        "sessionId": "s1",
+        "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "hm" } }
+    });
+    assert_eq!(
+        update_event(&params),
+        Some(SessionEvent::AgentThought { text: "hm".into() })
+    );
+    assert_eq!(update_event(&serde_json::json!({ "nope": 1 })), None);
+}
+
+#[rstest::rstest]
+#[case::ended(
+    serde_json::json!({ "result": { "stopReason": "end_turn", "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 } } }),
+    SessionEvent::TurnEnded {
+        stop_reason: "end_turn".into(),
+        tokens: Some(TokenUsage { total: 3, input: 2, output: 1, ..TokenUsage::default() }),
+    },
+)]
+#[case::failed(
+    serde_json::json!({ "error": { "code": -32603, "message": "boom" } }),
+    SessionEvent::PromptFailed { message: "boom".into() },
+)]
+fn a_relay_reads_the_end_of_a_turn(
+    #[case] response: serde_json::Value,
+    #[case] expected: SessionEvent,
+) {
+    assert_eq!(turn_end_event(&response), expected);
+}
+
+#[test]
+fn a_relay_reads_the_settings() {
+    let options = serde_json::json!([{
+        "id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": "opus", "options": [{ "value": "opus", "name": "Opus" }]
+    }]);
+    let Some(SessionEvent::ConfigChanged { options }) = config_event(&options) else {
+        panic!("no settings");
+    };
+    assert_eq!(options[0].category.as_deref(), Some("model"));
 }

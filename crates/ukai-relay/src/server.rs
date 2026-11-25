@@ -147,6 +147,13 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     let mut conns: HashMap<ConnId, UnboundedSender<TransportFrame>> = HashMap::new();
     let trigger = options.snapshot_trigger.clone();
     let mut answers = crate::sessions::Answers::default();
+    // What each turn took, for the gateway to keep; see `crate::metrics`.
+    let meter = crate::metrics::Meter::new(match (&options.gateway, &options.token) {
+        (Some(url), Some(token)) => ukai_acp::metrics::MetricsEndpoint::for_workspace(url, token)
+            .inspect_err(|error| tracing::warn!(%error, "cannot reach the gateway for metrics"))
+            .ok(),
+        _ => None,
+    });
     let dispatch = |outputs: Vec<Output>,
                     conns: &HashMap<ConnId, UnboundedSender<TransportFrame>>,
                     answers: &mut crate::sessions::Answers| {
@@ -164,6 +171,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                     }
                 }
                 Output::Started { ticket, outcome } => answers.started(ticket, outcome),
+                Output::Metered { session, event } => meter.observe(&session, &event),
                 Output::TurnEnded(session) => {
                     if let Some(path) = &trigger
                         && let Err(error) = std::fs::write(path, session.as_bytes())

@@ -139,7 +139,7 @@ UI は「再起動して更新」か「そのまま開始」（`SessionHandle::p
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
 `Preparing` / `UpdateAvailable` / `UpdateMissed` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
-`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
+`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnStarted` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
 UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `resolve_permission` / `set_config`）で操作する。
 
@@ -165,6 +165,9 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
   同じ feed に `_meta.claudeCode.parentToolUseId` 付きで流れ、並列に走るサブエージェント同士で混ざる。これは
   `Subagent { parent, event }` で包んで運び、`Transcript` は起動したツール呼び出しの `Entry::Tool::children` に
   畳み込む（親が見つからなければエージェント自身のものとして扱う）。pane ではそのツール呼び出しの行を開くと見える。
+- `TurnStarted` は `prompt` が出た時点、`TurnEnded` は `session/prompt` の応答で、応答の `usage`（ACP の unstable
+  `unstable_end_turn_token_usage`。入力・出力・思考・キャッシュ読み書きのトークン）を `TokenUsage` として運ぶ。
+  relay はクライアント不在で終わったターンの `_ukai/turn_state` の `idle` にも同じ `usage` を載せる。
 - `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、
   届くたびに前の一覧を置き換える。ACP にコマンド実行の専用メソッドはなく、`/name 入力` で始まる prompt がそれになる。
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
@@ -557,6 +560,31 @@ workspace = { git = "https://github.com/o/r" }
 - 段階: (1) 束ねる（済み）、(2) MCP サーバーの設定、(3) GitHub の webhook、(4) メール。残りの (1) の UI:
   秘書の常駐ワークスペースとサイドバーの固定、秘書が立てたワークスペースをアプリの pane で開くこと
   （今は鍵を知る pane からしか開けない）、秘書の prompt の描き分け。
+
+### ターンのメトリクス
+
+エージェントの改良に使うため、gateway のエージェントのセッションについてターンごとに何にどれだけ
+かかったかを `ukai-store` に残す。測るのは Pod の `ukai-relay` で、エージェント自身のメッセージが届いた
+時刻を使うので、クライアントまでのネットワークは含まず、クライアントのいないターン（スケジュール、秘書）も
+測れる。ローカルの stdio エージェントは対象外。
+
+- 1 ターンの記録（`ukai_acp::metrics::TurnRecord`、`ukai.metrics.v1.Turn`）: セッション、エージェント
+  （gateway が Pod の Job から入れる）、モデルと推論レベル（ターン終了時の設定）、開始時刻、終わり方
+  （stop reason か `failed` / `closed` / `superseded`）、所要時間、最初の出力までの時間、思考と返答の
+  ストリーミング時間、パーミッション待ち、ツール呼び出しごとの種類・タイトル・結果・所要時間
+  （サブエージェントのものは親付き）、トークン（`session/prompt` 応答の `usage`。入力・出力・思考・キャッシュ）、
+  最新のコンテキスト使用量とコスト。フェーズは最初のイベントから別種のイベントが届くまで。
+- hub は流れるメッセージを `SessionEvent` に読んで `Output::Metered` で出し（`session/prompt` の転送で
+  `TurnStarted`、`session/update`、`session/request_permission`、`session/prompt` の応答で `TurnEnded` /
+  `PromptFailed`、設定は setup と `set_config_option` の応答の `configOptions`）、relay がセッションごとの
+  `Recorder` に畳んで、終わったターンを gateway の `WorkspaceMetrics.Record` に送る（relay のトークンで
+  Pod を特定し、ワークスペースとエージェントは要求ではなく Job から取る）。gateway は `ukai-store` の
+  `MetricsStore.Record` に渡す。store を持たない gateway では送らない。
+- `ukai-store` は `metrics` データベースの `turn` テーブル（schemaless。ワークスペース + 開始時刻と
+  セッションに索引）に 1 ターン 1 レコードで追記する。セッションか終わり方がない、ツール呼び出しが多すぎる
+  記録は理由をすべて返して断り、長いツールのタイトルは切る。`MetricsStore.List` はワークスペースの
+  （セッションで絞れる）ターンを新しい順に返す。集計は SurrealQL で行う。
+- 未定: クライアントから読む API と表示、保持期間。
 
 ### ワークスペース Pod
 

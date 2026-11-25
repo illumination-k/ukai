@@ -11,6 +11,15 @@ pub mod knowledge {
     }
 }
 
+/// `ukai.metrics.v1`: what each turn of a gateway agent's sessions took, as
+/// `ukai-store` keeps it for the gateway.
+pub mod metrics {
+    pub mod v1 {
+        #![allow(clippy::all, clippy::pedantic, missing_docs)]
+        tonic::include_proto!("ukai.metrics.v1");
+    }
+}
+
 /// `ukai.reports.v1`: which session published which report, as
 /// `ukai-store` keeps it for the gateway.
 pub mod reports {

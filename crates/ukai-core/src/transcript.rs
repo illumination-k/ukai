@@ -228,7 +228,7 @@ impl Alert {
     /// The alert `event` raises, if any.
     pub fn of(event: &SessionEvent) -> Option<Self> {
         match event {
-            SessionEvent::TurnEnded { stop_reason } if stop_reason != "cancelled" => {
+            SessionEvent::TurnEnded { stop_reason, .. } if stop_reason != "cancelled" => {
                 Some(Self::Finished)
             }
             SessionEvent::PermissionRequested { title, .. } => Some(Self::NeedsInput {
@@ -577,7 +577,9 @@ impl Transcript {
                 self.history_mut().push(Entry::FileWritten { path });
             }
             SessionEvent::Usage(usage) => self.usage = Some(usage),
-            SessionEvent::TurnEnded { stop_reason } => {
+            // The pane went running when it sent the prompt.
+            SessionEvent::TurnStarted => {}
+            SessionEvent::TurnEnded { stop_reason, .. } => {
                 if stop_reason != "end_turn" {
                     self.entries.push(Entry::Notice {
                         text: format!("turn ended: {stop_reason}"),
@@ -1277,9 +1279,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::finished(SessionEvent::TurnEnded { stop_reason: "end_turn".into() }, Some(Alert::Finished))]
-    #[case::refused(SessionEvent::TurnEnded { stop_reason: "refusal".into() }, Some(Alert::Finished))]
-    #[case::cancelled(SessionEvent::TurnEnded { stop_reason: "cancelled".into() }, None)]
+    #[case::finished(SessionEvent::TurnEnded { stop_reason: "end_turn".into(), tokens: None }, Some(Alert::Finished))]
+    #[case::refused(SessionEvent::TurnEnded { stop_reason: "refusal".into(), tokens: None }, Some(Alert::Finished))]
+    #[case::cancelled(SessionEvent::TurnEnded { stop_reason: "cancelled".into(), tokens: None }, None)]
     #[case::permission(
         SessionEvent::PermissionRequested { id: 0, title: "rm".into(), options: vec![] },
         Some(Alert::NeedsInput { title: "rm".into() }),
@@ -1391,6 +1393,7 @@ mod tests {
 
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "cancelled".into(),
+            tokens: None,
         });
         assert_eq!(transcript.take_queued(), Some(queued("instead", &[])));
         assert_eq!(transcript.take_queued(), None);
@@ -1473,6 +1476,7 @@ mod tests {
         assert_eq!(transcript.status, Status::Busy);
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
+            tokens: None,
         });
         assert_eq!(transcript.status, Status::Idle);
         assert_eq!(
@@ -1486,7 +1490,7 @@ mod tests {
 
     #[rstest]
     #[case::cancelled(
-        SessionEvent::TurnEnded { stop_reason: "cancelled".into() },
+        SessionEvent::TurnEnded { stop_reason: "cancelled".into(), tokens: None },
         Entry::Notice { text: "turn ended: cancelled".into(), error: false },
         Status::Idle,
     )]
@@ -1655,6 +1659,7 @@ mod tests {
         assert_eq!(transcript.connection, Connection::Connected);
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
+            tokens: None,
         });
         assert_eq!(transcript.status, Status::Idle);
     }
@@ -1683,6 +1688,7 @@ mod tests {
         transcript.apply(said("hi"));
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
+            tokens: None,
         });
         transcript.apply(SessionEvent::Detached);
         // Detached is no state for the user to act on.

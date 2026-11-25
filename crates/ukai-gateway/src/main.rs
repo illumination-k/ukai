@@ -45,7 +45,8 @@
 //! ([`knowledge`]). Agent pods reach their own scope's at
 //! `WorkspaceKnowledge`, with their relay's token instead of the gateway's;
 //! they cannot review. They publish the reports their sessions write at
-//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too. A
+//! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too, and
+//! what each turn of their sessions took at `WorkspaceMetrics` ([`metrics`]). A
 //! secretary agent's pod reads and prompts the other workspaces' sessions at
 //! `WorkspaceSecretary` ([`secretary`]).
 //!
@@ -99,6 +100,7 @@ mod cluster;
 mod config;
 mod job;
 mod knowledge;
+mod metrics;
 mod reports;
 mod schedules;
 mod secretary;
@@ -121,6 +123,8 @@ struct Gateway {
     knowledge: Option<KnowledgeClient>,
     /// `ukai-store`'s record of who published which report, likewise.
     reports: Option<reports::ReportsClient>,
+    /// `ukai-store`'s turns of the workspaces' sessions, likewise.
+    metrics: Option<metrics::MetricsClient>,
     /// The copy of the workspaces' reports, when there is a bucket for it.
     archive: Option<Arc<Archive>>,
     /// The agent pods' addresses, which the person's side refuses.
@@ -166,19 +170,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let knowledge_url = env("UKAI_STORE_URL");
-    let (knowledge, publications) = match (&knowledge_url, env("UKAI_STORE_TOKEN")) {
+    let (knowledge, publications, turns) = match (&knowledge_url, env("UKAI_STORE_TOKEN")) {
         (Some(url), Some(token)) => {
             let store = |error| format!("UKAI_STORE_URL: {error}");
             (
                 Some(KnowledgeClient::new(url, &token).map_err(store)?),
                 Some(reports::ReportsClient::new(url, &token).map_err(store)?),
+                Some(metrics::MetricsClient::new(url, &token).map_err(store)?),
             )
         }
         (Some(_), None) => {
             tracing::warn!("UKAI_STORE_URL is set without UKAI_STORE_TOKEN; keeping no store");
-            (None, None)
+            (None, None, None)
         }
-        (None, _) => (None, None),
+        (None, _) => (None, None, None),
     };
     // Agent pods are told where the gateway is only when it keeps a store.
     let gateway_url = knowledge.as_ref().map(|_| {
@@ -209,6 +214,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         schedules,
         knowledge,
         reports: publications,
+        metrics: turns,
         archive,
         agent_pods: access::AgentPods::default(),
         http: reqwest::Client::new(),
@@ -261,6 +267,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
+    use ukai_proto::gateway::v1::workspace_metrics_server::WorkspaceMetricsServer;
     use ukai_proto::gateway::v1::workspace_reports_server::WorkspaceReportsServer;
     use ukai_proto::gateway::v1::workspace_secretary_server::WorkspaceSecretaryServer;
 
@@ -277,6 +284,9 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
         })),
     )
     .add_service(web.layer(WorkspaceReportsServer::new(reports::PodReports {
+        gateway: gateway.clone(),
+    })))
+    .add_service(web.layer(WorkspaceMetricsServer::new(metrics::PodMetrics {
         gateway: gateway.clone(),
     })))
     .add_service(

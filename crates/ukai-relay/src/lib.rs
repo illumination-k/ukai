@@ -15,6 +15,7 @@ pub mod hub;
 #[cfg(target_os = "linux")]
 pub mod init;
 pub mod mcp;
+pub mod metrics;
 pub mod ports;
 pub mod reports;
 pub mod review;

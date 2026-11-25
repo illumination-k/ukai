@@ -21,7 +21,8 @@ ukai-relay = { path = "crates/ukai-relay" }
 ukai-store = { path = "crates/ukai-store" }
 ukai-voice = { path = "crates/ukai-voice" }
 
-agent-client-protocol = "3.3"
+# `unstable_end_turn_token_usage`: the tokens a turn took, in its `session/prompt` response.
+agent-client-protocol = { version = "3.3", features = ["unstable_end_turn_token_usage"] }
 agent-client-protocol-http = "3.3"
 # Images for pasting screenshots; dioxus-desktop already brings the `image` crate.
 arboard = { version = "3", default-features = false, features = ["image-data"] }

@@ -21,8 +21,22 @@ fn update(text: &str) -> Value {
     )
 }
 
+/// `outputs` without what is metered, which `says_what_a_turn_did_for_measuring_it` checks.
+fn unmetered(outputs: Vec<Output>) -> Vec<Output> {
+    outputs
+        .into_iter()
+        .filter(|output| !matches!(output, Output::Metered { .. }))
+        .collect()
+}
+
+/// The id of the one message to the agent in `outputs`, besides what is
+/// metered.
 fn agent_id(outputs: &[Output]) -> u64 {
-    match outputs {
+    let unmetered: Vec<&Output> = outputs
+        .iter()
+        .filter(|output| !matches!(output, Output::Metered { .. }))
+        .collect();
+    match unmetered.as_slice() {
         [Output::Agent(message)] => message["id"].as_u64().unwrap_or(u64::MAX),
         other => panic!("expected one message to the agent, got {other:?}"),
     }
@@ -142,9 +156,9 @@ fn a_turn_finishes_without_a_client_and_replays_on_load() {
     hub.disconnect(A);
     // The agent keeps working with nobody connected.
     assert!(hub.busy());
-    assert!(hub.from_agent(update("while away")).is_empty());
+    assert!(unmetered(hub.from_agent(update("while away"))).is_empty());
     assert_eq!(
-        hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" }))),
+        unmetered(hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })))),
         [Output::TurnEnded(SID.into())]
     );
     assert!(!hub.busy());
@@ -234,7 +248,7 @@ fn a_client_attaching_mid_turn_hears_it_running_and_ending() {
     let out = hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
     assert_eq!(
         client_messages(&out, B).last(),
-        Some(&turn_state(SID, "running", None))
+        Some(&turn_state(SID, "running", None, None))
     );
     assert_eq!(
         client_messages(&hub.from_agent(update("more")), B),
@@ -243,7 +257,30 @@ fn a_client_attaching_mid_turn_hears_it_running_and_ending() {
     let out = hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
     assert_eq!(
         client_messages(&out, B),
-        [turn_state(SID, "idle", Some(json!("end_turn")))]
+        [turn_state(SID, "idle", Some(json!("end_turn")), None)]
+    );
+}
+
+#[test]
+fn a_client_attaching_mid_turn_hears_the_tokens_it_took() {
+    let mut hub = with_session();
+    let turn = prompt(&mut hub, A, 3, "long job");
+    hub.disconnect(A);
+    hub.connect(B);
+    hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
+    let usage = json!({ "totalTokens": 30, "inputTokens": 20, "outputTokens": 10 });
+    let out = hub.from_agent(result(
+        json!(turn),
+        json!({ "stopReason": "end_turn", "usage": usage }),
+    ));
+    assert_eq!(
+        client_messages(&out, B),
+        [turn_state(
+            SID,
+            "idle",
+            Some(json!("end_turn")),
+            Some(usage)
+        )]
     );
 }
 
@@ -273,7 +310,7 @@ fn permission_requests_wait_for_a_client() {
     let mut hub = with_session();
     prompt(&mut hub, A, 3, "rm");
     hub.disconnect(A);
-    assert!(hub.from_agent(permission(99)).is_empty());
+    assert!(unmetered(hub.from_agent(permission(99))).is_empty());
 
     hub.connect(B);
     let out = hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
@@ -633,7 +670,7 @@ fn an_unattached_prompt_runs_a_turn_the_attached_client_follows() {
         heard[0]["params"]["update"]["sessionUpdate"],
         "user_message_chunk"
     );
-    assert_eq!(heard[1], turn_state(SID, "running", None));
+    assert_eq!(heard[1], turn_state(SID, "running", None, None));
     assert!(hub.sessions()[0].running);
     // ...a second prompt is refused while it runs...
     assert_eq!(
@@ -644,7 +681,7 @@ fn an_unattached_prompt_runs_a_turn_the_attached_client_follows() {
     let ended = hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
     assert_eq!(
         client_messages(&ended, A),
-        [turn_state(SID, "idle", Some(json!("end_turn")))]
+        [turn_state(SID, "idle", Some(json!("end_turn")), None)]
     );
     assert_eq!(
         replayed_texts(&mut hub),
@@ -705,4 +742,59 @@ fn an_unattached_start_waits_for_the_agent() {
             ..
         }]
     ));
+}
+
+/// What the hub says happened in `outputs`, for measuring turns.
+fn metered(outputs: &[Output]) -> Vec<SessionEvent> {
+    outputs
+        .iter()
+        .filter_map(|output| match output {
+            Output::Metered { session, event } if session == SID => Some(event.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn says_what_a_turn_did_for_measuring_it() {
+    let mut hub = with_session();
+    let out = hub.from_client(
+        A,
+        req(
+            3,
+            "session/prompt",
+            json!({ "sessionId": SID, "prompt": [{ "type": "text", "text": "go" }] }),
+        ),
+    );
+    assert_eq!(metered(&out), [SessionEvent::TurnStarted]);
+    let turn = agent_id(&out);
+    assert_eq!(
+        metered(&hub.from_agent(update("hi"))),
+        [SessionEvent::AgentMessage { text: "hi".into() }]
+    );
+    let asked = hub.from_agent(json!({
+        "jsonrpc": "2.0", "id": 90, "method": "session/request_permission",
+        "params": { "sessionId": SID, "toolCall": { "toolCallId": "t" }, "options": [] }
+    }));
+    assert!(matches!(
+        metered(&asked).as_slice(),
+        [SessionEvent::PermissionRequested { .. }]
+    ));
+    let usage = json!({ "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 });
+    let ended = hub.from_agent(result(
+        json!(turn),
+        json!({ "stopReason": "end_turn", "usage": usage }),
+    ));
+    assert_eq!(
+        metered(&ended),
+        [SessionEvent::TurnEnded {
+            stop_reason: "end_turn".into(),
+            tokens: Some(ukai_acp::TokenUsage {
+                total: 3,
+                input: 2,
+                output: 1,
+                ..ukai_acp::TokenUsage::default()
+            }),
+        }]
+    );
 }
