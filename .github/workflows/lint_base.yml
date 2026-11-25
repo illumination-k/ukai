@@ -25,7 +25,7 @@ jobs:
       # Only the tools this job runs: the full set builds cargo-audit from
       # source. `mise run` would install the rest without the job's env,
       # and a prefix of its own keeps this partial set out of other jobs' cache.
-      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           cache_key_prefix: mise-v1-lint-base
           install_args: dprint shfmt shellcheck prek
