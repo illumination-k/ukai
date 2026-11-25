@@ -21,8 +21,22 @@ fn update(text: &str) -> Value {
     )
 }
 
+/// `outputs` without what is metered, which `says_what_a_turn_did_for_measuring_it` checks.
+fn unmetered(outputs: Vec<Output>) -> Vec<Output> {
+    outputs
+        .into_iter()
+        .filter(|output| !matches!(output, Output::Metered { .. }))
+        .collect()
+}
+
+/// The id of the one message to the agent in `outputs`, besides what is
+/// metered.
 fn agent_id(outputs: &[Output]) -> u64 {
-    match outputs {
+    let unmetered: Vec<&Output> = outputs
+        .iter()
+        .filter(|output| !matches!(output, Output::Metered { .. }))
+        .collect();
+    match unmetered.as_slice() {
         [Output::Agent(message)] => message["id"].as_u64().unwrap_or(u64::MAX),
         other => panic!("expected one message to the agent, got {other:?}"),
     }
@@ -142,9 +156,9 @@ fn a_turn_finishes_without_a_client_and_replays_on_load() {
     hub.disconnect(A);
     // The agent keeps working with nobody connected.
     assert!(hub.busy());
-    assert!(hub.from_agent(update("while away")).is_empty());
+    assert!(unmetered(hub.from_agent(update("while away"))).is_empty());
     assert_eq!(
-        hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" }))),
+        unmetered(hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })))),
         [Output::TurnEnded(SID.into())]
     );
     assert!(!hub.busy());
@@ -296,7 +310,7 @@ fn permission_requests_wait_for_a_client() {
     let mut hub = with_session();
     prompt(&mut hub, A, 3, "rm");
     hub.disconnect(A);
-    assert!(hub.from_agent(permission(99)).is_empty());
+    assert!(unmetered(hub.from_agent(permission(99))).is_empty());
 
     hub.connect(B);
     let out = hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
