@@ -42,12 +42,16 @@ pub struct Item {
 }
 
 impl Item {
-    /// What the row is called: the session's title, else its last prompt.
+    /// What the row is called: the session's title, else its last prompt;
+    /// a workspace that did not answer, by its place.
     pub fn title(&self) -> String {
-        let session = self.session.as_ref();
+        let Some(session) = self.session.as_ref() else {
+            return self.place();
+        };
         session
-            .and_then(|session| session.title.as_deref())
-            .or_else(|| session.and_then(|session| session.last_prompt.as_deref()))
+            .title
+            .as_deref()
+            .or(session.last_prompt.as_deref())
             .map(|text| {
                 let text = ukai_acp::secretary::unmarked(text).map_or(text, |(_, prompt)| prompt);
                 text.lines()
@@ -207,6 +211,17 @@ mod tests {
             }),
         };
         assert_eq!(item.title(), expected);
+    }
+
+    #[test]
+    fn a_workspace_that_did_not_answer_is_titled_by_its_place() {
+        let item = Item {
+            agent: "cloud".into(),
+            pane: Some("k1".into()),
+            standing: Standing::Unreachable,
+            session: None,
+        };
+        assert_eq!(item.title(), "cloud · k1");
     }
 
     #[rstest]

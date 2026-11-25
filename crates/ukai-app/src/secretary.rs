@@ -15,7 +15,7 @@ use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_config::{AgentSpec, gateway_agent_id};
 use ukai_core::launch::GatewayListing;
 use ukai_core::secretary::{self, Item, Standing};
-use ukai_core::{PaneContent, PaneId, ProjectId};
+use ukai_core::{Layout, PaneContent, PaneId, ProjectId};
 
 use crate::agent_pane::{AgentView, agent_status, connect};
 use crate::alert::is_unread;
@@ -146,8 +146,8 @@ fn items(app: AppSignals, secretary: &Secretary) -> Option<Result<Vec<Item>, Str
 }
 
 /// The pane showing `agent` of `project`, nearest the user.
-fn pane_of(app: AppSignals, project: &ProjectId, agent: &str) -> Option<PaneId> {
-    app.layout.peek().nearest(|_, content| {
+fn pane_of(layout: &Layout, project: &ProjectId, agent: &str) -> Option<PaneId> {
+    layout.nearest(|_, content| {
         matches!(content, PaneContent::Agent { project: p, agent: a, .. } if p == project && a == agent)
     })
 }
@@ -156,7 +156,8 @@ fn pane_of(app: AppSignals, project: &ProjectId, agent: &str) -> Option<PaneId> 
 fn open_secretary(app: AppSignals, secretary: &Secretary) {
     let (project, agent) = secretary;
     let mut layout = app.layout;
-    if let Some(pane) = pane_of(app, project, agent) {
+    let open = pane_of(&layout.peek(), project, agent);
+    if let Some(pane) = open {
         layout.write().focus(pane);
         return;
     }
@@ -239,7 +240,8 @@ pub fn SecretaryPins() -> Element {
 #[component]
 fn SecretaryPin(secretary: Secretary, several: bool) -> Element {
     let app = use_context::<AppSignals>();
-    let pane = pane_of(app, &secretary.0, &secretary.1);
+    // Read, not peeked: the row follows the pane as it opens and closes.
+    let pane = pane_of(&app.layout.read(), &secretary.0, &secretary.1);
     let state = pane.map_or("idle", |pane| agent_status(app.sessions, pane).0);
     let focused = pane.is_some_and(|pane| app.layout.read().focused() == pane);
     let unread = pane.is_some_and(|pane| is_unread(app.sessions, pane));
@@ -405,8 +407,9 @@ fn OverviewItem(secretary: Secretary, item: Item) -> Element {
         (_, None) => Some("its relay did not answer".to_owned()),
     };
     let title = item.title();
-    let place = item.place();
     let openable = item.session.is_some();
+    // A workspace that did not answer is already titled by its place.
+    let place = openable.then(|| item.place());
     rsx! {
         button {
             class: "overview-item",
@@ -418,7 +421,9 @@ fn OverviewItem(secretary: Secretary, item: Item) -> Element {
                 span { class: "dot {dot}" }
                 span { class: "name", "{title}" }
             }
-            span { class: "place", "{place}" }
+            if let Some(place) = place {
+                span { class: "place", "{place}" }
+            }
             if let Some(detail) = detail {
                 span { class: "detail", "{detail}" }
             }
