@@ -1,0 +1,101 @@
+// Metrics: what each turn of a gateway agent's sessions took, measured by
+// the relay in its pod. See "ターンのメトリクス" in docs/design.md.
+syntax = "proto3";
+
+package ukai.metrics.v1;
+
+// The turns `ukai-store` keeps. Only the gateway calls it, with the token it
+// shares with it, naming the workspace and agent it found out.
+service MetricsStore {
+  // Keep one turn.
+  rpc Record(RecordRequest) returns (RecordResponse);
+  // A workspace's turns, newest first.
+  rpc List(ListRequest) returns (ListResponse);
+}
+
+// One turn of a session. Times are in milliseconds, as the relay saw the
+// agent's messages arrive.
+message Turn {
+  // The ACP session; empty if it was not known.
+  string session = 1;
+  // The gateway's id of the agent. Set by the gateway.
+  optional string agent = 2;
+  // The model and reasoning effort the agent's settings named at the end.
+  optional string model = 3;
+  optional string effort = 4;
+  // When it started, in milliseconds since the Unix epoch.
+  uint64 started_at_ms = 5;
+  // The agent's stop reason, or `failed`, `closed`, `superseded`.
+  string outcome = 6;
+  optional string error = 7;
+  uint64 duration_ms = 8;
+  // From the start until the agent's first message, thought, or tool call.
+  optional uint64 first_output_ms = 9;
+  // Streaming the agent's reasoning.
+  uint64 thinking_ms = 10;
+  // Streaming the agent's reply.
+  uint64 message_ms = 11;
+  // Waiting for the user to answer permission requests.
+  uint64 permission_ms = 12;
+  repeated ToolCall tools = 13;
+  optional Tokens tokens = 14;
+  optional Context context = 15;
+  // It was running before it was measured, so it started earlier.
+  bool joined = 16;
+  // The measure lost the agent for a while during it.
+  bool reconnected = 17;
+}
+
+message ToolCall {
+  // The ACP tool kind, e.g. `execute`, `read`, `edit`.
+  string kind = 1;
+  string title = 2;
+  // `completed`, `failed`, or the status it had when the turn ended.
+  string status = 3;
+  // Unset if it did not complete or fail during the turn.
+  optional uint64 duration_ms = 4;
+  // The tool call that started the subagent making this one.
+  optional string parent = 5;
+}
+
+// The tokens the agent says the turn took.
+message Tokens {
+  uint64 total = 1;
+  uint64 input = 2;
+  uint64 output = 3;
+  optional uint64 thought = 4;
+  optional uint64 cached_read = 5;
+  optional uint64 cached_write = 6;
+}
+
+// The latest context use and cumulative cost the agent reported.
+message Context {
+  uint64 used = 1;
+  uint64 size = 2;
+  optional double cost = 3;
+  // ISO 4217, e.g. `USD`.
+  optional string currency = 4;
+}
+
+message RecordRequest {
+  // The gateway's id of the workspace, from the pod's Job.
+  string workspace = 1;
+  Turn turn = 2;
+}
+
+message RecordResponse {
+  // Every reason the turn was refused; empty when it was kept.
+  repeated string problems = 1;
+}
+
+message ListRequest {
+  string workspace = 1;
+  // Only this session's turns.
+  optional string session = 2;
+  // At most this many; 0 for the store's limit.
+  uint32 limit = 3;
+}
+
+message ListResponse {
+  repeated Turn turns = 1;
+}

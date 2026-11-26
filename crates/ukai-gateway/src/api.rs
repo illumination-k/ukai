@@ -22,7 +22,7 @@ use ukai_proto::gateway::v1::schedule_change::Outcome as Change;
 use crate::archive::RelaySource;
 use crate::cluster::RelayEndpoint;
 use crate::job::Plan;
-use crate::{Gateway, access, schedules};
+use crate::{Gateway, access, schedules, secretary};
 
 /// How long the relay may take to list its pod's ports or files.
 const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -34,13 +34,17 @@ pub struct Api {
 
 impl Api {
     /// Refuse a request without the gateway's token.
-    fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
+    pub(crate) fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
         let headers = request.metadata().clone().into_headers();
         Ok(access::authorize(&self.gateway, &headers)?)
     }
 
     /// The workspace of `agent` a request names, as for its `/acp`.
-    fn plan(&self, agent: &str, workspace: Option<gw::Workspace>) -> Result<Plan, Status> {
+    pub(crate) fn plan(
+        &self,
+        agent: &str,
+        workspace: Option<gw::Workspace>,
+    ) -> Result<Plan, Status> {
         let pane = access::pane_of(workspace)?;
         Ok(access::plan(&self.gateway, agent, pane.as_deref())?)
     }
@@ -102,6 +106,7 @@ impl gw::agents_server::Agents for Api {
                     id: id.clone(),
                     command: agent.command.clone(),
                     args: agent.args.clone(),
+                    secretary: agent.secretary,
                 })
                 .collect(),
         }))
@@ -138,6 +143,16 @@ impl gw::agents_server::Agents for Api {
                 Err(Status::unavailable("cannot stop the workspace's pod"))
             }
         }
+    }
+
+    async fn workspaces(
+        &self,
+        request: Request<gw::ListWorkspacesRequest>,
+    ) -> Result<Response<gw::ListWorkspacesResponse>, Status> {
+        self.authorize(&request)?;
+        Ok(Response::new(gw::ListWorkspacesResponse {
+            workspaces: secretary::workspaces(&self.gateway, |_| true).await?,
+        }))
     }
 }
 

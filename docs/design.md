@@ -139,7 +139,7 @@ UI は「再起動して更新」か「そのまま開始」（`SessionHandle::p
 
 UI は ACP のスキーマ型を直接触らない。`ukai-acp` が `SessionEvent`（`crates/ukai-acp/src/session.rs`）に畳む:
 `Preparing` / `UpdateAvailable` / `UpdateMissed` / `Ready` / `AgentMessage` / `AgentThought` / `ToolCall` / `ToolCallUpdate` / `Plan` / `Commands` /
-`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
+`PermissionRequested` / `FileWritten` / `ConfigChanged` / `ConfigFailed` / `TurnStarted` / `TurnRunning` / `TurnEnded` / `PromptFailed` / `SteerFailed` / `Closed`。
 `Preparing` と `TurnRunning` は relay / gateway の拡張通知（`_ukai/progress`、`_ukai/turn_state`）から作る。
 UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `resolve_permission` / `set_config`）で操作する。
 
@@ -165,6 +165,9 @@ UI からは `SessionHandle`（`proceed` / `prompt` / `steer` / `cancel` / `reso
   同じ feed に `_meta.claudeCode.parentToolUseId` 付きで流れ、並列に走るサブエージェント同士で混ざる。これは
   `Subagent { parent, event }` で包んで運び、`Transcript` は起動したツール呼び出しの `Entry::Tool::children` に
   畳み込む（親が見つからなければエージェント自身のものとして扱う）。pane ではそのツール呼び出しの行を開くと見える。
+- `TurnStarted` は `prompt` が出た時点、`TurnEnded` は `session/prompt` の応答で、応答の `usage`（ACP の unstable
+  `unstable_end_turn_token_usage`。入力・出力・思考・キャッシュ読み書きのトークン）を `TokenUsage` として運ぶ。
+  relay はクライアント不在で終わったターンの `_ukai/turn_state` の `idle` にも同じ `usage` を載せる。
 - `Commands` は `available_commands_update` を `SlashCommand`（名前・説明・入力のヒント）の一覧にしたもので、
   届くたびに前の一覧を置き換える。ACP にコマンド実行の専用メソッドはなく、`/name 入力` で始まる prompt がそれになる。
 - `prompt` は `Prompt { text, attachments }` を取る。添付は `Attachment` の 3 種で、どれを送るかは呼び出し側が
@@ -505,8 +508,8 @@ secretary = true # 下の WorkspaceSecretary を許す
 workspace = { git = "https://github.com/o/r" }
 ```
 
-- **常駐**: 秘書は普通の gateway のエージェントとして pane で開く（固定の鍵の 1 つのワークスペースと、
-  サイドバーの先頭への固定は未実装）。記憶はナレッジ（スコープは秘書のもの）、定期の仕事はスケジュールを
+- **常駐**: 秘書は gateway のエージェントとして、専用の pane で開く（下の UI。固定の鍵の 1 つの
+  ワークスペースは未実装で、`workspace` の既定に従う）。記憶はナレッジ（スコープは秘書のもの）、定期の仕事はスケジュールを
   そのまま使う。セッションが接続より長く生きるのは relay の性質なので、新しく要るものはない。
 - **束ねる**: `secretary = true` のエージェントの Pod では、エージェントのコンテナに `UKAI_SECRETARY=true` が
   入り、relay は MCP サーバーに `--secretary` を渡して次のツールを出す（`mcp::secretary`）。答えるのは
@@ -532,9 +535,10 @@ workspace = { git = "https://github.com/o/r" }
     （`Hub::prompt_unattached` / `start_unattached`、接続 `UNATTACHED`）。記録には普通の prompt と同じく残り、
     付いているクライアントには `user_message_chunk` と `_ukai/turn_state`（`running`、終われば `idle`）が届く
     ので、pane は自分が送ったターンのように追える。
-  - 秘書が送った prompt は、先頭に「`<秘書の id>` からで、ユーザーからではない」と 1 行付ける（gateway の
-    `secretary::marked`）。受け手のエージェントにも、記録を読むユーザーにも分かるように。`_meta` で印を
-    付けてアプリで描き分けるのは後で。prompt は 64 KiB まで。
+  - 秘書が送った prompt は、先頭に「`<秘書の id>` からで、ユーザーからではない」と 1 行付ける
+    （`ukai_acp::secretary::marked`）。受け手のエージェントにも、記録を読むユーザーにも分かるように。
+    アプリはこの行を `unmarked` で読み取って描き分ける（`_meta` にしないのは、relay の記録と replay が本文
+    しか持たず、行ならエージェントにも見えるため）。prompt は 64 KiB まで。
   - **パーミッション要求には答えさせない**: 秘書に答えさせると、秘書の 1 回の誤りや後述の注入が
     ほかのすべてのエージェントの権限になる。秘書はユーザーに「どこで何を待っているか」を伝えるだけ
     （MCP の `instructions` にもそう書く）。
@@ -554,9 +558,55 @@ workspace = { git = "https://github.com/o/r" }
     その出来事を扱うかはユーザーの指示で決める」と書く（済み）。秘書がほかのエージェントに振れる以上、
     ここが注入の入口になるため。外に出る操作（Issue への書き込み、メールの送信、push）は、最初は秘書の
     エージェント自身のパーミッション要求としてユーザーに確認させる。
-- 段階: (1) 束ねる（済み）、(2) MCP サーバーの設定、(3) GitHub の webhook、(4) メール。残りの (1) の UI:
-  秘書の常駐ワークスペースとサイドバーの固定、秘書が立てたワークスペースをアプリの pane で開くこと
-  （今は鍵を知る pane からしか開けない）、秘書の prompt の描き分け。
+- 段階: (1) 束ねる（済み）、(2) MCP サーバーの設定、(3) GitHub の webhook、(4) メール。
+- **UI**（アプリの `secretary`、並べ方は `ukai_core::secretary`）:
+  - アプリが秘書を知るのは `Agents.List` の `secretary`。gateway は `Agents.Workspaces` で、gateway の
+    トークンを持つクライアントに `list_workspaces` と同じもの（秘書自身のワークスペースも含む）を返す。
+    アプリは秘書ごとに 15 秒おきに読む（`FollowSecretaries`。開いているプロジェクトのうち、同じ URL の
+    gateway は最初のプロジェクトで 1 回）。
+  - 秘書は専用の pane で開く。左が秘書との会話、右が全体（秘書自身を除くセッションを、パーミッション要求を
+    待つもの・作業中・終わった・答えなかったワークスペースの順に）。行を押すと、そのセッションを開いている
+    pane に移り、なければ新しいタブで `session/load` する（秘書の pane の幅を奪わないよう分割しない）。
+  - サイドバーでは最上段、プロジェクトのドロップダウンより上に固定し（秘書はプロジェクトをまたぐため）、
+    待っている数と作業中の数、秘書の pane の状態を出す。押すと秘書の pane に移り、なければ新しいタブで開く。
+  - 秘書が立てたワークスペースと pane は、ユーザーのものと区別しない（サイドバーにも pane にも印を付けない）。
+  - 秘書が送った prompt は、印の行を外し、ユーザーの発言とは枠を変えて `Secretary` とだけ添える。
+    セッションの題も印の後ろから取る。
+  - 未実装: 会話の中の `list_workspaces` を要約カードに、`start_session` / `prompt_session` を振った先と
+    状態を出すカードにすること。外界の出来事（段階 3・4）は溜まった分を 1 枚のカードにまとめ、外から来た
+    本文であることを示す。外に出る操作は秘書自身のパーミッション要求のカードになる。
+
+### ターンのメトリクス
+
+エージェントの改良に使うため、gateway のエージェントのセッションについてターンごとに何にどれだけ
+かかったかを `ukai-store` に残す。測るのは Pod の `ukai-relay` で、エージェント自身のメッセージが届いた
+時刻を使うので、クライアントまでのネットワークは含まず、クライアントのいないターン（スケジュール、秘書）も
+測れる。ローカルの stdio エージェントは対象外。
+
+- 1 ターンの記録（`ukai_acp::metrics::TurnRecord`、`ukai.metrics.v1.Turn`）: セッション、エージェント
+  （gateway が Pod の Job から入れる）、モデルと推論レベル（ターン終了時の設定）、開始時刻、終わり方
+  （stop reason か `failed` / `closed` / `superseded`）、所要時間、最初の出力までの時間、思考と返答の
+  ストリーミング時間、パーミッション待ち、ツール呼び出しごとの種類・タイトル・結果・所要時間
+  （サブエージェントのものは親付き）、トークン（`session/prompt` 応答の `usage`。入力・出力・思考・キャッシュ）、
+  最新のコンテキスト使用量とコスト。フェーズは最初のイベントから別種のイベントが届くまで。
+- hub は流れるメッセージを `SessionEvent` に読んで `Output::Metered` で出し（`session/prompt` の転送で
+  `TurnStarted`、`session/update`、`session/request_permission`、`session/prompt` の応答で `TurnEnded` /
+  `PromptFailed`、設定は setup と `set_config_option` の応答の `configOptions`）、relay がセッションごとの
+  `Recorder` に畳んで、終わったターンを gateway の `WorkspaceMetrics.Record` に送る（relay のトークンで
+  Pod を特定し、ワークスペースとエージェントは要求ではなく Job から取る）。gateway は `ukai-store` の
+  `MetricsStore.Record` に渡す。store を持たない gateway では送らない。
+- `ukai-store` は `metrics` データベースの `turn` テーブル（schemaless。ワークスペース + 開始時刻と
+  セッションに索引）に 1 ターン 1 レコードで追記する。セッションか終わり方がない、ツール呼び出しが多すぎる
+  記録は理由をすべて返して断り、長いツールのタイトルは切る。`MetricsStore.List` はワークスペースの
+  （セッションで絞れる）ターンを新しい順に返す。集計は SurrealQL で行う。
+- クライアントは gateway の `Metrics.List`（gateway のトークン、エージェント + ワークスペース。Pod は起動しない）で
+  読む。アプリではサイドバーのワークスペース詳細の「Metrics」（gateway エージェントのみ）からメトリクス pane
+  （`PaneContent::Metrics { project, place }`）を開き、30 秒ごとに読み直す。表示は `ukai_core::metrics::Summary`:
+  ターン時間と最初の出力までの中央値 / p90 / 最大、トークン合計とキャッシュ率、各セッションの最新コストの合計、
+  終わり方の内訳、時間の内訳（最初の出力待ち・思考・返答・エージェント自身のツール・パーミッション・その他）の
+  帯グラフ、ツールの種類ごとの回数・失敗・合計 / 中央値 / p90 / 最大、遅いツール呼び出し、最近のターン
+  （クリックでそのツール呼び出し）。
+- 未定: 保持期間。
 
 ### ワークスペース Pod
 

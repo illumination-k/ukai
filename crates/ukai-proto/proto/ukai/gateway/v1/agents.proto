@@ -4,6 +4,7 @@ syntax = "proto3";
 package ukai.gateway.v1;
 
 import "ukai/gateway/v1/common.proto";
+import "ukai/gateway/v1/secretary.proto";
 
 // With the gateway's token.
 service Agents {
@@ -13,6 +14,10 @@ service Agents {
   // bucket for them; the next connection starts a fresh one. A workspace
   // with no pod is left as it is.
   rpc Restart(RestartRequest) returns (RestartResponse);
+  // Every running workspace and its sessions, as `WorkspaceSecretary`
+  // lists them to a secretary (its own workspace included): what the app's
+  // secretary pane and its sidebar row show.
+  rpc Workspaces(ListWorkspacesRequest) returns (ListWorkspacesResponse);
 }
 
 message ListAgentsRequest {}
@@ -27,6 +32,9 @@ message Agent {
   // What its pod runs, for telling the agents apart.
   string command = 2;
   repeated string args = 3;
+  // `secretary = true` in `gateway.toml`: the app opens it in the secretary
+  // pane and pins it to the top of its sidebar.
+  bool secretary = 4;
 }
 
 message RestartRequest {

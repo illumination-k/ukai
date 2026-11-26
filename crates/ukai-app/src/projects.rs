@@ -74,6 +74,9 @@ pub struct AppSignals {
     pub editing_notes: Signal<HashSet<PaneId>>,
     /// Every terminal pane's shell.
     pub terminals: crate::terminal_pane::Terminals,
+    /// What each secretary last listed of the running workspaces, kept by
+    /// [`crate::secretary::FollowSecretaries`].
+    pub secretaries: crate::secretary::Overviews,
 }
 
 impl AppSignals {

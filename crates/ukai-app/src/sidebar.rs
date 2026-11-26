@@ -22,10 +22,12 @@ use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
 use crate::knowledge::KnowledgeNode;
 use crate::layout::{launch_agent, launch_target, open_agent_in};
+use crate::metrics_pane::{metrics_open, open_metrics};
 use crate::ports::PortGroup;
 use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, remove_project};
 use crate::report_pane::ReportGroup;
 use crate::schedules::ScheduleNode;
+use crate::secretary::SecretaryPins;
 use crate::shortcuts::Shortcuts;
 use crate::terminal_pane::open_terminal;
 
@@ -106,6 +108,7 @@ pub fn Sidebar() -> Element {
 
     rsx! {
         nav { class,
+            SecretaryPins {}
             div { class: "sidebar-header",
                 if let Some(id) = selected.clone() {
                     ProjectSelect {
@@ -655,6 +658,9 @@ fn WorkspaceDetail(project: ProjectId, place: ReportSource, opened: Opened) -> E
             }
         }
         ChangesRow { project: project.clone(), place: place.clone(), depth: 0 }
+        if place.agent().is_some() {
+            MetricsRow { project: project.clone(), place: place.clone(), depth: 0 }
+        }
         TerminalRow { project: project.clone(), place: place.clone(), depth: 0 }
         ReportGroup { project: project.clone(), place: place.clone(), depth: 0 }
         PortGroup { project, place, depth: 0 }
@@ -676,6 +682,26 @@ fn ChangesRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
                 Svg { icon: Icon::Diff, size: 12 }
             }
             span { class: "name", "Changes" }
+        }
+    }
+}
+
+/// What each turn of a gateway agent's workspace took: click to see it in a
+/// metrics pane.
+#[component]
+fn MetricsRow(project: ProjectId, place: ReportSource, depth: u8) -> Element {
+    let app = use_context::<AppSignals>();
+    let open = metrics_open(&app.layout.read(), &project, &place);
+    rsx! {
+        div {
+            class: if open { "row report-row open" } else { "row report-row" },
+            style: "--depth: {depth}",
+            title: "How long this workspace's turns took, and on what",
+            onclick: move |_| open_metrics(app, &project, &place),
+            span { class: "row-icon",
+                Svg { icon: Icon::Chart, size: 12 }
+            }
+            span { class: "name", "Metrics" }
         }
     }
 }

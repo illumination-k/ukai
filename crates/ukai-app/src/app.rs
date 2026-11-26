@@ -15,6 +15,7 @@ use crate::ports::FollowPorts;
 use crate::projects::{AppSignals, add_project, load_config};
 use crate::remote_reports::Follow;
 use crate::schedules::FollowSchedules;
+use crate::secretary::FollowSecretaries;
 use crate::shortcuts::{Shortcuts, on_keydown};
 use crate::sidebar::Sidebar;
 use crate::terminal_pane::use_terminal_cleanup;
@@ -69,6 +70,7 @@ pub fn App() -> Element {
             knowledge_revision: Signal::new(0),
             editing_notes: Signal::new(HashSet::new()),
             terminals: Signal::new(HashMap::new()),
+            secretaries: Signal::new(HashMap::new()),
         }
     });
     use_hook(|| {
@@ -125,6 +127,7 @@ pub fn App() -> Element {
             FollowPorts {}
             FollowSchedules {}
             FollowKnowledge {}
+            FollowSecretaries {}
             if palette() {
                 Palette {}
             }

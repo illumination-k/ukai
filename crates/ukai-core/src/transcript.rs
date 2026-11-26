@@ -228,7 +228,7 @@ impl Alert {
     /// The alert `event` raises, if any.
     pub fn of(event: &SessionEvent) -> Option<Self> {
         match event {
-            SessionEvent::TurnEnded { stop_reason } if stop_reason != "cancelled" => {
+            SessionEvent::TurnEnded { stop_reason, .. } if stop_reason != "cancelled" => {
                 Some(Self::Finished)
             }
             SessionEvent::PermissionRequested { title, .. } => Some(Self::NeedsInput {
@@ -274,6 +274,9 @@ impl Transcript {
             };
             entries.iter().find_map(|entry| match entry {
                 Entry::User { text, .. } => {
+                    // A secretary's prompt is titled by what it asks.
+                    let text = ukai_acp::secretary::unmarked(text)
+                        .map_or(text.as_str(), |(_, prompt)| prompt);
                     text.lines().map(str::trim).find(|line| !line.is_empty())
                 }
                 _ => None,
@@ -577,7 +580,9 @@ impl Transcript {
                 self.history_mut().push(Entry::FileWritten { path });
             }
             SessionEvent::Usage(usage) => self.usage = Some(usage),
-            SessionEvent::TurnEnded { stop_reason } => {
+            // The pane went running when it sent the prompt.
+            SessionEvent::TurnStarted => {}
+            SessionEvent::TurnEnded { stop_reason, .. } => {
                 if stop_reason != "end_turn" {
                     self.entries.push(Entry::Notice {
                         text: format!("turn ended: {stop_reason}"),
@@ -840,7 +845,7 @@ pub fn usage_label(usage: &Usage) -> String {
 }
 
 /// A token count rounded for display: `950`, `1.2k`, `53k`, `1.5M`.
-fn tokens(count: u64) -> String {
+pub(crate) fn tokens(count: u64) -> String {
     let (value, unit) = match count {
         0..1_000 => return count.to_string(),
         // Below 999.5k so rounding never shows `1000k`.
@@ -924,6 +929,7 @@ mod tests {
     #[case::unnamed(vec![], None)]
     #[case::first_prompt(vec![user_said("\n fix the build \nplease"), user_said("and the docs")], Some("fix the build"))]
     #[case::named(vec![user_said("fix the build"), named(Some(" Build fix "))], Some("Build fix"))]
+    #[case::secretarys_prompt(vec![user_said(&ukai_acp::secretary::marked("aide", "fix #123"))], Some("fix #123"))]
     #[case::renamed(vec![named(Some("a")), named(Some("b"))], Some("b"))]
     #[case::blank_name(vec![user_said("fix the build"), named(Some("  "))], Some("fix the build"))]
     #[case::name_taken_back(vec![user_said("fix the build"), named(Some("a")), named(None)], Some("fix the build"))]
@@ -1277,9 +1283,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::finished(SessionEvent::TurnEnded { stop_reason: "end_turn".into() }, Some(Alert::Finished))]
-    #[case::refused(SessionEvent::TurnEnded { stop_reason: "refusal".into() }, Some(Alert::Finished))]
-    #[case::cancelled(SessionEvent::TurnEnded { stop_reason: "cancelled".into() }, None)]
+    #[case::finished(SessionEvent::TurnEnded { stop_reason: "end_turn".into(), tokens: None }, Some(Alert::Finished))]
+    #[case::refused(SessionEvent::TurnEnded { stop_reason: "refusal".into(), tokens: None }, Some(Alert::Finished))]
+    #[case::cancelled(SessionEvent::TurnEnded { stop_reason: "cancelled".into(), tokens: None }, None)]
     #[case::permission(
         SessionEvent::PermissionRequested { id: 0, title: "rm".into(), options: vec![] },
         Some(Alert::NeedsInput { title: "rm".into() }),
@@ -1391,6 +1397,7 @@ mod tests {
 
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "cancelled".into(),
+            tokens: None,
         });
         assert_eq!(transcript.take_queued(), Some(queued("instead", &[])));
         assert_eq!(transcript.take_queued(), None);
@@ -1473,6 +1480,7 @@ mod tests {
         assert_eq!(transcript.status, Status::Busy);
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
+            tokens: None,
         });
         assert_eq!(transcript.status, Status::Idle);
         assert_eq!(
@@ -1486,7 +1494,7 @@ mod tests {
 
     #[rstest]
     #[case::cancelled(
-        SessionEvent::TurnEnded { stop_reason: "cancelled".into() },
+        SessionEvent::TurnEnded { stop_reason: "cancelled".into(), tokens: None },
         Entry::Notice { text: "turn ended: cancelled".into(), error: false },
         Status::Idle,
     )]
@@ -1655,6 +1663,7 @@ mod tests {
         assert_eq!(transcript.connection, Connection::Connected);
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
+            tokens: None,
         });
         assert_eq!(transcript.status, Status::Idle);
     }
@@ -1683,6 +1692,7 @@ mod tests {
         transcript.apply(said("hi"));
         transcript.apply(SessionEvent::TurnEnded {
             stop_reason: "end_turn".into(),
+            tokens: None,
         });
         transcript.apply(SessionEvent::Detached);
         // Detached is no state for the user to act on.

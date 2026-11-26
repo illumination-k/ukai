@@ -21,6 +21,8 @@ pub struct GatewayAgent {
     /// What its pod runs, e.g. `npx -y opencode-ai acp`.
     pub command: String,
     pub args: Vec<String>,
+    /// `secretary = true` in `gateway.toml`.
+    pub secretary: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +84,7 @@ impl GatewayEndpoint {
                 id: agent.id,
                 command: agent.command,
                 args: agent.args,
+                secretary: agent.secretary,
             })
             .collect())
     }
@@ -119,6 +122,7 @@ mod tests {
                     id: "opencode".into(),
                     command: "opencode".into(),
                     args: vec!["acp".into()],
+                    secretary: true,
                 }],
             }))
         }
@@ -127,6 +131,13 @@ mod tests {
             &self,
             _: Request<gw::RestartRequest>,
         ) -> Result<Response<gw::RestartResponse>, Status> {
+            Err(Status::unimplemented("not here"))
+        }
+
+        async fn workspaces(
+            &self,
+            _: Request<gw::ListWorkspacesRequest>,
+        ) -> Result<Response<gw::ListWorkspacesResponse>, Status> {
             Err(Status::unimplemented("not here"))
         }
     }
@@ -167,6 +178,7 @@ mod tests {
                 id: "opencode".into(),
                 command: "opencode".into(),
                 args: vec!["acp".into()],
+                secretary: true,
             }])
         );
         let refused = gateway(root, "wrong").agents().await;

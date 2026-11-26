@@ -32,6 +32,8 @@ pub enum Icon {
     Trash,
     Sidebar,
     SidebarDetail,
+    Secretary,
+    Chart,
 }
 
 impl Icon {
@@ -39,6 +41,7 @@ impl Icon {
     fn paths(self) -> &'static [&'static str] {
         match self {
             Self::Plus => &["M8 3.5v9", "M3.5 8h9"],
+            Self::Chart => &["M2.5 13.5h11", "M4.5 11V8", "M8 11V4.5", "M11.5 11V6.5"],
             Self::Close => &["M4.5 4.5l7 7", "M11.5 4.5l-7 7"],
             Self::SplitRight => &["M2.5 3.5h11v9h-11z", "M8 3.5v9"],
             Self::SplitDown => &["M2.5 3.5h11v9h-11z", "M2.5 8h11"],
@@ -87,6 +90,12 @@ impl Icon {
             ],
             Self::Sidebar => &["M2.5 3.5h11v9h-11z", "M6 3.5v9"],
             Self::SidebarDetail => &["M2.5 3.5h11v9h-11z", "M6 3.5v9", "M9.5 3.5v9"],
+            Self::Secretary => &[
+                "M2.5 4.5h11",
+                "M2.5 8h6",
+                "M2.5 11.5h4",
+                "M11.5 9a2 2 0 1 0 0 4 2 2 0 1 0 0-4z",
+            ],
             Self::Diff => &["M5 2.5v5", "M2.5 5h5", "M8.5 11h5", "M3.5 13.5l9-9"],
             Self::Globe => &[
                 "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11z",
