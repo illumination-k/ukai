@@ -2,11 +2,23 @@
 //! bind an `input`'s or a `textarea`'s `value`: give it the id of a
 //! [`use_text_field`], and tell the field what was typed and when its
 //! element mounts.
+//!
+//! While an input method composes, the app is told nothing of the field
+//! (`text_field.js`, installed by [`use_composition`]): its value arrives
+//! when the composition ends.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dioxus::prelude::*;
 use ukai_core::field::Field;
+
+/// Stops the keys an input method takes before they reach the app, in every
+/// text field. Call once, at the app's root.
+pub fn use_composition() {
+    use_hook(|| {
+        document::eval(include_str!("text_field.js"));
+    });
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct TextField {
