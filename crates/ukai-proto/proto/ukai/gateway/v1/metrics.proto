@@ -12,17 +12,22 @@ import "ukai/metrics/v1/metrics.proto";
 // by `ukai-store`, whether the workspace runs or not. UNAVAILABLE, a gateway
 // that keeps no store, or cannot reach it now.
 service Metrics {
-  // The workspace's turns, newest first.
+  // The workspace's turns, or with `every_workspace` those of every
+  // workspace, newest first.
   rpc List(ListTurnsRequest) returns (ukai.metrics.v1.ListResponse);
 }
 
 message ListTurnsRequest {
+  // With `every_workspace`, only this agent's turns; empty for every agent's.
   string agent = 1;
+  // Ignored with `every_workspace`.
   Workspace workspace = 2;
   // Only this session's turns.
   optional string session = 3;
   // At most this many; 0 for the store's limit.
   uint32 limit = 4;
+  // The turns of every workspace the gateway keeps, not just one's.
+  bool every_workspace = 5;
 }
 
 // Recording a turn of an agent pod's own workspace, with its relay's token:

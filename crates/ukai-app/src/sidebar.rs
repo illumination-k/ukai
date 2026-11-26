@@ -22,7 +22,7 @@ use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
 use crate::knowledge::KnowledgeNode;
 use crate::layout::{launch_agent, launch_target, open_agent_in};
-use crate::metrics_pane::{metrics_open, open_metrics};
+use crate::metrics_pane::{metrics_open, open_metrics, open_overview, overview_open};
 use crate::ports::PortGroup;
 use crate::projects::{AppSignals, Paths, pick_and_add_project, reload_project, remove_project};
 use crate::report_pane::ReportGroup;
@@ -146,6 +146,12 @@ pub fn Sidebar() -> Element {
                     }
                 } else {
                     span { class: "section-label", "Projects" }
+                }
+                button {
+                    class: if overview_open(&app.layout.read()) { "icon open" } else { "icon" },
+                    title: "Metrics of every gateway's turns",
+                    onclick: move |_| open_overview(app),
+                    Svg { icon: Icon::Chart }
                 }
                 button {
                     class: "icon",

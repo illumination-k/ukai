@@ -1,15 +1,17 @@
-//! The metrics pane: what each turn of a gateway agent's workspace took, as
-//! the relay in its pod measured it and the gateway's store keeps it
+//! The metrics panes: what each turn took, as the relay in a gateway
+//! agent's pod measured it and the gateway's store keeps it
 //! ([`ukai_acp::metrics`]) — how long turns take and where that time goes,
 //! the tokens they take, and which tool calls cost the most
-//! ([`ukai_core::metrics::Summary`]). Reading never starts the workspace's pod.
+//! ([`ukai_core::metrics::Summary`]). [`MetricsPane`] shows one workspace's
+//! turns, [`MetricsOverview`] those of every workspace of every gateway the
+//! open projects declare, by agent and by model. Reading never starts a pod.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dioxus::prelude::*;
 use ukai_acp::metrics::{MetricsReader, TurnRecord};
 use ukai_acp::{PaneWorkspace, WorkspaceScope};
-use ukai_core::metrics::{Summary, age_label, count_label, duration_label, percent};
+use ukai_core::metrics::{Group, Summary, age_label, count_label, duration_label, groups, percent};
 use ukai_core::{PaneContent, ProjectId, ReportSource};
 
 use crate::follow::poll;
@@ -79,11 +81,78 @@ fn reader_at(
         .ok_or_else(|| format!("agent `{agent}` names no gateway agent"))
 }
 
-/// What the pane last read.
+/// Show the turns of every gateway the open projects declare: focus the
+/// pane already showing them, else open one where [`launch_target`] puts it.
+pub fn open_overview(app: AppSignals) {
+    let mut layout = app.layout;
+    let shown = layout
+        .peek()
+        .contents()
+        .find_map(|(pane, open)| (*open == PaneContent::MetricsOverview).then_some(pane));
+    if let Some(pane) = shown {
+        layout.write().focus(pane);
+        return;
+    }
+    if let Some(pane) = launch_target(app) {
+        let mut layout = layout.write();
+        layout.set_content(pane, PaneContent::MetricsOverview);
+        layout.focus(pane);
+    }
+}
+
+/// Whether a pane shows the turns of every gateway.
+pub fn overview_open(layout: &ukai_core::Layout) -> bool {
+    layout
+        .contents()
+        .any(|(_, content)| *content == PaneContent::MetricsOverview)
+}
+
+/// A reader of every workspace of each gateway the open projects declare,
+/// one per gateway, named as the first project to declare it does.
+fn gateway_readers(app: AppSignals) -> (Vec<(String, MetricsReader)>, Vec<String>) {
+    let mut readers: Vec<(String, MetricsReader)> = Vec::new();
+    let mut problems = Vec::new();
+    let projects = app.projects.peek();
+    let configs = app.configs.peek();
+    for project in projects.iter() {
+        let Some(Ok(config)) = configs.get(&project.id) else {
+            continue;
+        };
+        // `[gateways]` by their names, then any `[agents]` reaching a
+        // gateway directly, by the agent's.
+        let specs = config
+            .gateways
+            .iter()
+            .map(|(name, gateway)| (name.clone(), gateway.agent("_")))
+            .chain(config.agents.iter().map(|(id, spec)| {
+                let name = id
+                    .split_once('/')
+                    .map_or(id.as_str(), |(gateway, _)| gateway);
+                (name.to_owned(), spec.clone())
+            }));
+        for (name, spec) in specs {
+            match MetricsReader::every_workspace(&spec, ukai_acp::system_lookup) {
+                Ok(Some(reader)) => {
+                    if !readers.iter().any(|(_, r)| r.gateway() == reader.gateway()) {
+                        readers.push((name, reader));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => problems.push(format!("{}: {name}: {error}", project.name())),
+            }
+        }
+    }
+    problems.sort();
+    problems.dedup();
+    (readers, problems)
+}
+
+/// What a pane last read.
 #[derive(Debug, Clone, PartialEq)]
 enum Read {
     Loading,
-    Loaded(Vec<TurnRecord>),
+    /// Newest first, with what could not be read.
+    Loaded(Vec<TurnRecord>, Vec<String>),
     Failed(String),
 }
 
@@ -104,8 +173,7 @@ fn short(session: Option<&str>) -> String {
 pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
     let app = use_context::<AppSignals>();
     let mut read = use_signal(|| Read::Loading);
-    let mut revision = use_signal(|| 0_u64);
-    let mut opened = use_signal(|| None::<usize>);
+    let revision = use_signal(|| 0_u64);
     use_future({
         let project = project.clone();
         let place = place.clone();
@@ -118,7 +186,7 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                 async move {
                     let now = match reader_at(app, &project, &place) {
                         Ok(reader) => match reader.list(None, 0).await {
-                            Ok(turns) => Read::Loaded(turns),
+                            Ok(turns) => Read::Loaded(turns, Vec::new()),
                             Err(error) => Read::Failed(error.to_string()),
                         },
                         Err(problem) => Read::Failed(problem),
@@ -130,16 +198,88 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
             })
         }
     });
+    rsx! {
+        MetricsBody {
+            read: read(),
+            revision,
+            every: false,
+            empty: "No turns measured yet. The relay in the workspace's pod records each turn once it ends.",
+        }
+    }
+}
 
-    let current = read();
-    let turns = match &current {
-        Read::Loaded(turns) => turns.clone(),
-        _ => Vec::new(),
+/// The turns of every workspace of every gateway the open projects declare.
+#[component]
+pub fn MetricsOverview() -> Element {
+    let app = use_context::<AppSignals>();
+    let mut read = use_signal(|| Read::Loading);
+    let revision = use_signal(|| 0_u64);
+    use_future(move || {
+        poll(revision, RELOAD, move || async move {
+            let (readers, mut problems) = gateway_readers(app);
+            let now = if readers.is_empty() && problems.is_empty() {
+                Read::Failed("No open project declares a gateway agent; only a gateway's relays measure turns.".to_owned())
+            } else {
+                let several = readers.len() > 1;
+                let lists = futures::future::join_all(
+                    readers.iter().map(|(_, reader)| reader.list(None, 0)),
+                )
+                .await;
+                let mut turns = Vec::new();
+                for ((name, _), listed) in readers.iter().zip(lists) {
+                    match listed {
+                        Ok(listed) => turns.extend(listed.into_iter().map(|mut turn| {
+                            // Agents of different gateways may share an id.
+                            if several {
+                                let agent = turn.agent.take().unwrap_or_else(|| "?".to_owned());
+                                turn.agent = Some(format!("{name}/{agent}"));
+                            }
+                            turn
+                        })),
+                        Err(error) => problems.push(format!("{name}: {error}")),
+                    }
+                }
+                turns.sort_by_key(|turn| std::cmp::Reverse(turn.started_at_ms));
+                Read::Loaded(turns, problems)
+            };
+            if *read.peek() != now {
+                read.set(now);
+            }
+        })
+    });
+    rsx! {
+        MetricsBody {
+            read: read(),
+            revision,
+            every: true,
+            empty: "No turns measured yet. The relays in the gateways' pods record each turn once it ends.",
+        }
+    }
+}
+
+/// What a metrics pane read: with `every`, of many workspaces and agents,
+/// so it also groups them by agent and by model.
+#[component]
+fn MetricsBody(read: Read, revision: Signal<u64>, every: bool, empty: String) -> Element {
+    let mut revision = revision;
+    let mut opened = use_signal(|| None::<usize>);
+    let (turns, problems) = match &read {
+        Read::Loaded(turns, problems) => (turns.clone(), problems.clone()),
+        _ => (Vec::new(), Vec::new()),
     };
     let summary = Summary::of(&turns);
+    let (agents, models) = if every {
+        (
+            groups(&turns, |turn| turn.agent.clone()),
+            groups(&turns, |turn| turn.model.clone()),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let now = now_ms();
     let split_total = summary.split.total();
     let tokens = summary.tokens;
+    let columns = if every { "8" } else { "7" };
     rsx! {
         div { class: "pane-body metrics-pane",
             div { class: "diff-toolbar",
@@ -154,20 +294,24 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                     Svg { icon: Icon::Reload }
                 }
             }
-            match current {
+            match read {
                 Read::Loading => rsx! {
                     p { class: "muted hint diff-hint", "Reading the turns…" }
                 },
                 Read::Failed(problem) => rsx! {
                     pre { class: "config-error diff-hint", "{problem}" }
                 },
-                Read::Loaded(_) if turns.is_empty() => rsx! {
-                    p { class: "muted hint diff-hint",
-                        "No turns measured yet. The relay in the workspace's pod records each turn once it ends."
+                Read::Loaded(..) if turns.is_empty() => rsx! {
+                    for problem in problems.iter() {
+                        pre { key: "{problem}", class: "config-error diff-hint", "{problem}" }
                     }
+                    p { class: "muted hint diff-hint", "{empty}" }
                 },
-                Read::Loaded(_) => rsx! {
+                Read::Loaded(..) => rsx! {
                     div { class: "metrics-body",
+                        for problem in problems.iter() {
+                            pre { key: "{problem}", class: "config-error metrics-problem", "{problem}" }
+                        }
                         div { class: "metrics-tiles",
                             Tile {
                                 label: "Turn time",
@@ -201,10 +345,7 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                             }
                             Tile {
                                 label: "Cost",
-                                value: match &summary.cost {
-                                    Some((amount, currency)) => format!("{amount:.2} {currency}"),
-                                    None => "—".to_owned(),
-                                },
+                                value: cost_label(&summary),
                                 detail: "the sessions' latest totals".to_owned(),
                             }
                             Tile {
@@ -222,6 +363,12 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                     .collect::<Vec<_>>()
                                     .join(" · "),
                             }
+                        }
+                        if !agents.is_empty() {
+                            GroupTable { title: "By agent", label: "Agent", groups: agents }
+                        }
+                        if models.len() > 1 || models.first().is_some_and(|g| g.name != "unknown") {
+                            GroupTable { title: "By model", label: "Model", groups: models }
                         }
                         section { class: "metrics-section",
                             h3 { "Where the time went" }
@@ -300,6 +447,9 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                 thead {
                                     tr {
                                         th { "Started" }
+                                        if every {
+                                            th { "Agent" }
+                                        }
                                         th { "Session" }
                                         th { class: "num", "Time" }
                                         th { class: "num", "First output" }
@@ -319,6 +469,9 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                                 opened.set(now);
                                             },
                                             td { "{age_label(now, turn.started_at_ms)}" }
+                                            if every {
+                                                td { class: "muted", {turn.agent.clone().unwrap_or_default()} }
+                                            }
                                             td { class: "mono", "{short(turn.session_id.as_deref())}" }
                                             td { class: "num", "{duration_label(turn.duration_ms)}" }
                                             td { class: "num",
@@ -342,7 +495,7 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                                         }
                                         if opened() == Some(index) {
                                             tr { key: "{index}-tools", class: "turn-tools",
-                                                td { colspan: "7",
+                                                td { colspan: columns,
                                                     TurnDetail { turn: turn.clone() }
                                                 }
                                             }
@@ -353,6 +506,67 @@ pub fn MetricsPane(project: ProjectId, place: ReportSource) -> Element {
                         }
                     }
                 },
+            }
+        }
+    }
+}
+
+/// The sessions' latest costs, summed, or a dash when there is none.
+fn cost_label(summary: &Summary) -> String {
+    match &summary.cost {
+        Some((amount, currency)) => format!("{amount:.2} {currency}"),
+        None => "—".to_owned(),
+    }
+}
+
+/// The turns grouped by agent or model, one row each.
+#[component]
+fn GroupTable(title: String, label: String, groups: Vec<Group>) -> Element {
+    rsx! {
+        section { class: "metrics-section",
+            h3 { "{title}" }
+            table { class: "metrics-table",
+                thead {
+                    tr {
+                        th { "{label}" }
+                        th { class: "num", "Turns" }
+                        th { class: "num", "Sessions" }
+                        th { class: "num", "Median" }
+                        th { class: "num", "p90" }
+                        th { class: "num", "First output" }
+                        th { class: "num", "Tokens in / out" }
+                        th { class: "num", "Cost" }
+                        th { class: "num", "Failed" }
+                    }
+                }
+                tbody {
+                    for group in groups {
+                        tr { key: "{group.name}",
+                            td { class: "mono", "{group.name}" }
+                            td { class: "num", "{group.summary.turns}" }
+                            td { class: "num", "{group.summary.sessions}" }
+                            td { class: "num", "{duration_label(group.summary.duration.median)}" }
+                            td { class: "num", "{duration_label(group.summary.duration.p90)}" }
+                            td { class: "num", "{duration_label(group.summary.first_output.median)}" }
+                            td { class: "num",
+                                "{count_label(group.summary.tokens.input)} / {count_label(group.summary.tokens.output)}"
+                            }
+                            td { class: "num", "{cost_label(&group.summary)}" }
+                            {
+                                let failed = group
+                                    .summary
+                                    .outcomes
+                                    .iter()
+                                    .filter(|(outcome, _)| outcome == "failed")
+                                    .map(|(_, count)| *count)
+                                    .sum::<usize>();
+                                rsx! {
+                                    td { class: if failed > 0 { "num failed" } else { "num" }, "{failed}" }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

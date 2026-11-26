@@ -97,12 +97,11 @@ impl Metrics {
         Ok(())
     }
 
-    /// `workspace`'s turns (only `session`'s, if given), newest first, at
-    /// most `limit` of them ([`LIST_MAX`] for 0 or more).
+    /// The turns `filter` lets through, newest first, at most `limit` of
+    /// them ([`LIST_MAX`] for 0 or more).
     pub async fn list(
         &self,
-        workspace: &str,
-        session: Option<&str>,
+        filter: &Filter<'_>,
         limit: u32,
     ) -> Result<Vec<TurnRecord>, MetricsError> {
         let limit = if limit == 0 {
@@ -110,18 +109,31 @@ impl Metrics {
         } else {
             limit.min(LIST_MAX)
         };
-        let filter = if session.is_some() {
-            "WHERE workspace = $workspace AND session_id = $sid"
+        let conditions: Vec<&str> = [
+            filter.workspace.map(|_| "workspace = $workspace"),
+            filter.session.map(|_| "session_id = $sid"),
+            filter.agent.map(|_| "agent = $agent"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let filtered = if conditions.is_empty() {
+            String::new()
         } else {
-            "WHERE workspace = $workspace"
+            format!("WHERE {}", conditions.join(" AND "))
         };
         let rows: Vec<serde_json::Value> = self
             .db
             .query(format!(
-                "SELECT * OMIT id, workspace FROM turn {filter} \
+                "SELECT * OMIT id, workspace FROM turn {filtered} \
                  ORDER BY started_at_ms DESC LIMIT $limit"
             ))
-            .bind(json!({ "workspace": workspace, "sid": session, "limit": limit }))
+            .bind(json!({
+                "workspace": filter.workspace,
+                "sid": filter.session,
+                "agent": filter.agent,
+                "limit": limit,
+            }))
             .await?
             .check()?
             .take(0)?;
@@ -129,6 +141,15 @@ impl Metrics {
             .map(|row| Ok(serde_json::from_value(row)?))
             .collect()
     }
+}
+
+/// Which turns [`Metrics::list`] returns: those of the workspace, session,
+/// and agent given, every one's of what is not.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Filter<'a> {
+    pub workspace: Option<&'a str>,
+    pub session: Option<&'a str>,
+    pub agent: Option<&'a str>,
 }
 
 /// `ukai.metrics.v1.MetricsStore`, behind the token only the gateway holds
@@ -187,13 +208,15 @@ impl pb::metrics_store_server::MetricsStore for Service {
         request: Request<pb::ListRequest>,
     ) -> Result<Response<pb::ListResponse>, Status> {
         let request = request.into_inner();
+        // An empty workspace asks for every workspace's turns.
+        let filter = Filter {
+            workspace: Some(request.workspace.as_str()).filter(|w| !w.is_empty()),
+            session: request.session.as_deref(),
+            agent: request.agent.as_deref(),
+        };
         let turns = self
             .store()?
-            .list(
-                workspace(&request.workspace)?,
-                request.session.as_deref(),
-                request.limit,
-            )
+            .list(&filter, request.limit)
             .await
             .map_err(failed)?;
         Ok(Response::new(pb::ListResponse {
@@ -267,16 +290,54 @@ mod tests {
         store.record("w1", turn("s2", 300)).await?;
         store.record("w1", turn("s1", 200)).await?;
         store.record("w2", turn("s3", 100)).await?;
-        let w1 = store.list("w1", None, 0).await?;
+        let of = |workspace| Filter {
+            workspace: Some(workspace),
+            ..Filter::default()
+        };
+        let w1 = store.list(&of("w1"), 0).await?;
         assert_eq!(
             w1.iter().map(|t| t.started_at_ms).collect::<Vec<_>>(),
             [300, 200, 100]
         );
         assert_eq!(w1[2], turn("s1", 100));
-        let s1 = store.list("w1", Some("s1"), 0).await?;
-        assert_eq!(s1.len(), 2);
-        assert_eq!(store.list("w1", None, 1).await?.len(), 1);
-        assert!(store.list("w3", None, 0).await?.is_empty());
+        let s1 = Filter {
+            session: Some("s1"),
+            ..of("w1")
+        };
+        assert_eq!(store.list(&s1, 0).await?.len(), 2);
+        assert_eq!(store.list(&of("w1"), 1).await?.len(), 1);
+        assert!(store.list(&of("w3"), 0).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lists_every_workspace_by_agent() -> Result<(), MetricsError> {
+        let store = store().await;
+        store.record("w1", turn("s1", 100)).await?;
+        store.record("w2", turn("s2", 300)).await?;
+        let codex = TurnRecord {
+            agent: Some("codex".into()),
+            ..turn("s3", 200)
+        };
+        store.record("w2", codex).await?;
+        let every = store.list(&Filter::default(), 0).await?;
+        assert_eq!(
+            every.iter().map(|t| t.started_at_ms).collect::<Vec<_>>(),
+            [300, 200, 100]
+        );
+        let claude = Filter {
+            agent: Some("claude"),
+            ..Filter::default()
+        };
+        assert_eq!(
+            store
+                .list(&claude, 0)
+                .await?
+                .iter()
+                .map(|t| t.started_at_ms)
+                .collect::<Vec<_>>(),
+            [300, 100]
+        );
         Ok(())
     }
 
@@ -286,7 +347,7 @@ mod tests {
         let mut long = turn("s", 1);
         long.tools[0].title = "x".repeat(TITLE_MAX + 5);
         store.record("w", long).await?;
-        let listed = store.list("w", None, 0).await?;
+        let listed = store.list(&Filter::default(), 0).await?;
         assert_eq!(listed[0].tools[0].title.chars().count(), TITLE_MAX);
         Ok(())
     }
@@ -324,6 +385,7 @@ mod tests {
                 workspace: "w".into(),
                 session: None,
                 limit: 0,
+                agent: None,
             }))
             .await;
         assert_eq!(unreached.err().map(|s| s.code()), Some(Code::Unavailable));

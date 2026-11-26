@@ -25,7 +25,7 @@ use crate::browser_pane::BrowserView;
 use crate::diff_pane::DiffPane;
 use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
-use crate::metrics_pane::MetricsPane;
+use crate::metrics_pane::{MetricsOverview, MetricsPane};
 use crate::ports::{PortPrompt, open_browser};
 use crate::projects::AppSignals;
 use crate::report_pane::{ReportView, delete_report, download_report, pick_report};
@@ -317,6 +317,7 @@ pub fn pane_label(
                 None => "Terminal".to_owned(),
             },
         ),
+        Some(PaneContent::MetricsOverview) => (None, "Metrics".to_owned()),
         Some(PaneContent::Empty) | None => (None, "New pane".to_owned()),
     }
 }
@@ -835,6 +836,9 @@ fn PaneView(pane: PaneId) -> Element {
                             place,
                         }
                     }
+                },
+                PaneContent::MetricsOverview => rsx! {
+                    MetricsOverview {}
                 },
                 PaneContent::Metrics { project, place } => rsx! {
                     for (project, place) in [(project, place)] {

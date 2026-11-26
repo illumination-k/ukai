@@ -521,12 +521,16 @@ impl MetricsEndpoint {
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Reading the turns of a gateway agent's workspace, as the app does.
+/// Reading the turns of a gateway agent's workspace, or of every workspace
+/// of a gateway, as the app does.
 #[derive(Debug, Clone)]
 pub struct MetricsReader {
     channel: crate::grpc::Channel,
+    /// The gateway's root, which tells gateways apart.
+    root: String,
     agent: String,
-    workspace: ukai_proto::gateway::v1::Workspace,
+    /// `None` for every workspace, of every agent.
+    workspace: Option<ukai_proto::gateway::v1::Workspace>,
 }
 
 impl MetricsReader {
@@ -542,13 +546,36 @@ impl MetricsReader {
         };
         Ok(Some(Self {
             channel: agent.channel(TIMEOUT)?,
-            workspace: agent.gateway.workspace(workspace),
+            workspace: Some(agent.gateway.workspace(workspace)),
+            root: agent.root,
             agent: agent.id,
         }))
     }
 
-    /// The workspace's turns (only `session`'s, if given), newest first, at
-    /// most `limit` (0 for the store's limit).
+    /// The turns of every workspace and agent of the gateway behind `spec`,
+    /// or `None` when it is not a gateway agent.
+    pub fn every_workspace(
+        spec: &ukai_config::AgentSpec,
+        lookup: impl Fn(ukai_config::Source, &str) -> Option<String> + Copy,
+    ) -> Result<Option<Self>, ResolveError> {
+        let Some(agent) = crate::gateway::GatewayAgent::resolve(spec, lookup)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            channel: agent.channel(TIMEOUT)?,
+            workspace: None,
+            root: agent.root,
+            agent: String::new(),
+        }))
+    }
+
+    /// The gateway's root URL: readers of one gateway read the same turns.
+    pub fn gateway(&self) -> &str {
+        &self.root
+    }
+
+    /// The workspace's turns, or every workspace's (only `session`'s, if
+    /// given), newest first, at most `limit` (0 for the store's limit).
     pub async fn list(
         &self,
         session: Option<&str>,
@@ -559,9 +586,10 @@ impl MetricsReader {
         let listed = MetricsClient::new(self.channel.clone())
             .list(gw::ListTurnsRequest {
                 agent: self.agent.clone(),
-                workspace: Some(self.workspace.clone()),
+                workspace: self.workspace.clone(),
                 session: session.map(str::to_owned),
                 limit,
+                every_workspace: self.workspace.is_none(),
             })
             .await
             .map_err(|status| match status.code() {

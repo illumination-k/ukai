@@ -9,7 +9,7 @@ package ukai.metrics.v1;
 service MetricsStore {
   // Keep one turn.
   rpc Record(RecordRequest) returns (RecordResponse);
-  // A workspace's turns, newest first.
+  // A workspace's turns, or every workspace's, newest first.
   rpc List(ListRequest) returns (ListResponse);
 }
 
@@ -89,11 +89,14 @@ message RecordResponse {
 }
 
 message ListRequest {
+  // Empty for every workspace's turns.
   string workspace = 1;
   // Only this session's turns.
   optional string session = 2;
   // At most this many; 0 for the store's limit.
   uint32 limit = 3;
+  // Only this agent's turns.
+  optional string agent = 4;
 }
 
 message ListResponse {

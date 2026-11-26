@@ -52,18 +52,22 @@ impl MetricsClient {
         answer(self.client.clone().record(message).await)
     }
 
+    /// The turns of `workspace`, or with `None` of every workspace, of
+    /// `agent`'s if given.
     pub async fn list(
         &self,
-        workspace: &str,
+        workspace: Option<&str>,
+        agent: Option<String>,
         session: Option<String>,
         limit: u32,
     ) -> Result<pb::ListResponse, Status> {
         let message = request(
             &self.token,
             pb::ListRequest {
-                workspace: workspace.to_owned(),
+                workspace: workspace.unwrap_or_default().to_owned(),
                 session,
                 limit,
+                agent,
             },
         );
         answer(self.client.clone().list(message).await)
@@ -108,11 +112,30 @@ impl gw::metrics_server::Metrics for Api {
     ) -> Result<Response<pb::ListResponse>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
+        if request.every_workspace {
+            // The store holds this gateway's turns only, so every workspace
+            // of it is every one the gateway's token may read.
+            let agent = Some(request.agent).filter(|agent| !agent.is_empty());
+            if let Some(agent) = &agent {
+                crate::access::agent(&self.gateway, agent)?;
+            }
+            let store = store(&self.gateway)?;
+            return Ok(Response::new(
+                store
+                    .list(None, agent, request.session, request.limit)
+                    .await?,
+            ));
+        }
         let plan = self.plan(&request.agent, request.workspace)?;
         let store = store(&self.gateway)?;
         Ok(Response::new(
             store
-                .list(plan.workspace_id(), request.session, request.limit)
+                .list(
+                    Some(plan.workspace_id()),
+                    None,
+                    request.session,
+                    request.limit,
+                )
                 .await?,
         ))
     }

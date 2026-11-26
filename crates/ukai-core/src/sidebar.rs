@@ -57,7 +57,10 @@ pub fn pane_place(content: &PaneContent) -> Option<(ProjectId, ReportSource)> {
             project,
             place: source,
         } => Some((project.clone(), source.clone())),
-        PaneContent::Empty | PaneContent::Schedule { .. } | PaneContent::Note { .. } => None,
+        PaneContent::Empty
+        | PaneContent::MetricsOverview
+        | PaneContent::Schedule { .. }
+        | PaneContent::Note { .. } => None,
     }
 }
 

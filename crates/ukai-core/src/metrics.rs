@@ -1,4 +1,4 @@
-//! What the metrics pane shows of a workspace's turns ([`TurnRecord`]s the
+//! What the metrics panes show of the turns ([`TurnRecord`]s the
 //! gateway's store keeps; see "ターンのメトリクス" in `docs/design.md`):
 //! how long turns take and where that time goes, the tokens they take, and
 //! which kinds of tool call cost the most.
@@ -135,9 +135,44 @@ pub struct Summary {
 /// How many of the slowest calls [`Summary::slowest`] keeps.
 pub const SLOWEST: usize = 10;
 
+/// The turns that share a key, such as an agent or a model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub name: String,
+    pub summary: Summary,
+}
+
+/// `turns` grouped by `key` (`None` named `unknown`), most turns first.
+pub fn groups(turns: &[TurnRecord], key: impl Fn(&TurnRecord) -> Option<String>) -> Vec<Group> {
+    let mut by: BTreeMap<String, Vec<&TurnRecord>> = BTreeMap::new();
+    for turn in turns {
+        let name = key(turn).unwrap_or_else(|| "unknown".to_owned());
+        by.entry(name).or_default().push(turn);
+    }
+    let mut groups: Vec<Group> = by
+        .into_iter()
+        .map(|(name, turns)| Group {
+            name,
+            summary: Summary::of_refs(&turns),
+        })
+        .collect();
+    groups.sort_by(|a, b| {
+        b.summary
+            .turns
+            .cmp(&a.summary.turns)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    groups
+}
+
 impl Summary {
     /// `turns`, newest first as the gateway lists them.
     pub fn of(turns: &[TurnRecord]) -> Self {
+        Self::of_refs(&turns.iter().collect::<Vec<_>>())
+    }
+
+    /// [`Summary::of`] for turns held elsewhere.
+    pub fn of_refs(turns: &[&TurnRecord]) -> Self {
         let mut outcomes: BTreeMap<&str, usize> = BTreeMap::new();
         let mut split = Split::default();
         let mut tokens = TokenTotals::default();
@@ -145,7 +180,7 @@ impl Summary {
         let mut slowest = Vec::new();
         // Newest first, so the first cost seen of a session is its latest.
         let mut costs: BTreeMap<Option<&str>, (f64, &str)> = BTreeMap::new();
-        for turn in turns {
+        for &turn in turns {
             *outcomes.entry(&turn.outcome).or_default() += 1;
             let waiting = turn.first_output_ms.unwrap_or(0);
             let own_tools: u64 = turn
@@ -466,6 +501,30 @@ mod tests {
             summary.outcomes,
             [("end_turn".to_owned(), 2), ("failed".to_owned(), 1)]
         );
+    }
+
+    #[test]
+    fn groups_turns_most_first() {
+        let by = |agent: Option<&str>, session: &str| TurnRecord {
+            agent: agent.map(Into::into),
+            ..turn(session, 1_000)
+        };
+        let turns = [
+            by(Some("codex"), "a"),
+            by(Some("claude"), "b"),
+            by(Some("claude"), "c"),
+            by(None, "d"),
+        ];
+        let groups = groups(&turns, |turn| turn.agent.clone());
+        let named: Vec<(&str, usize, usize)> = groups
+            .iter()
+            .map(|g| (g.name.as_str(), g.summary.turns, g.summary.sessions))
+            .collect();
+        assert_eq!(
+            named,
+            [("claude", 2, 2), ("codex", 1, 1), ("unknown", 1, 1)]
+        );
+        assert_eq!(groups[0].summary.duration.median, 1_000);
     }
 
     #[rstest]
