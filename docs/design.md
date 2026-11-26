@@ -542,6 +542,16 @@ workspace = { git = "https://github.com/o/r" }
   - **パーミッション要求には答えさせない**: 秘書に答えさせると、秘書の 1 回の誤りや後述の注入が
     ほかのすべてのエージェントの権限になる。秘書はユーザーに「どこで何を待っているか」を伝えるだけ
     （MCP の `instructions` にもそう書く）。
+  - **役割はシステムプロンプトに足す**: エージェント自身のシステムプロンプトはチェックアウトで作業する
+    前提で、MCP の `instructions` はツールの説明として読まれるため、それだけでは秘書が自分で実装しに行く。
+    relay は秘書の Pod（`UKAI_SECRETARY` と gateway があるとき）で、`session/new` / `load` / `resume` に
+    ACP の `systemPrompt`（`append`、クライアントが送ったものがあればその後ろ）で役割を足す
+    （`mcp::secretary::system_prompt`）。中身は、変更は自分でせず振る（自分のチェックアウトは編集・push
+    しない）、調べるのは自分でしてよい、振る先は既存のセッションを優先して選んだ理由を伝え、大きい・
+    戻しにくいものは先に聞く、状況は待っているもの・作業中・終わったの順に短く、など。足すのは
+    エージェントが `initialize` で `sessionCapabilities.systemPrompt` を出したときだけ（出さないエージェントは
+    ACP 上それを断るため）。出さないエージェントでも MCP の `instructions` は届く。秘書の MCP サーバーには
+    プレビューとレビューを出さない（作業は振る側なので）。
 - **外界**（未実装）: 外のサービスを読み書きする手段と、外の出来事で秘書を起こす手段は分ける。
   - 読み書きは MCP サーバー。`[agents.<id>.mcp_servers.<name>]`（`command` / `args` / `env` / `secret_env`）
     を relay に渡し、relay は自分の `ukai` と並べて `session/new` / `load` / `resume` の `mcpServers` に足す。

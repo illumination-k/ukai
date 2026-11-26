@@ -199,8 +199,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 &program,
                 root,
                 gateway.as_ref(),
-                Some(&previews),
-                Some(&review),
+                // A secretary hands work off rather than doing it, so it is
+                // told nothing about showing servers or reviewing changes.
+                (!options.secretary).then_some(previews.as_path()),
+                (!options.secretary).then_some(review.as_path()),
                 Some(&sessions),
                 options.secretary,
             )]
@@ -215,6 +217,10 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         cwd.map(|dir| dir.to_string_lossy().into_owned()),
         mcp_servers,
     );
+    // Only a secretary with the gateway to reach has the tools its role needs.
+    if options.secretary && gateway.is_some() {
+        hub.append_system_prompt(crate::mcp::secretary::system_prompt());
+    }
     dispatch(init, &conns, &mut answers);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
