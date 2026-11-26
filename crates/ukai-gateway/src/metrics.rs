@@ -52,21 +52,76 @@ impl MetricsClient {
         answer(self.client.clone().record(message).await)
     }
 
+    /// The turns of `workspace`, or with `None` of every workspace, of
+    /// `agent`'s if given.
     pub async fn list(
         &self,
-        workspace: &str,
+        workspace: Option<&str>,
+        agent: Option<String>,
         session: Option<String>,
         limit: u32,
     ) -> Result<pb::ListResponse, Status> {
         let message = request(
             &self.token,
             pb::ListRequest {
-                workspace: workspace.to_owned(),
+                workspace: workspace.unwrap_or_default().to_owned(),
                 session,
                 limit,
+                agent,
             },
         );
         answer(self.client.clone().list(message).await)
+    }
+}
+
+impl MetricsClient {
+    /// What the turns of `workspace` (or with `None` every workspace's),
+    /// of `agent`'s if given, took, summed up by the store.
+    pub async fn summarize(
+        &self,
+        workspace: Option<&str>,
+        agent: Option<String>,
+        since_ms: Option<u64>,
+        recent: u32,
+    ) -> Result<pb::SummarizeResponse, Status> {
+        let message = request(
+            &self.token,
+            pb::SummarizeRequest {
+                workspace: workspace.unwrap_or_default().to_owned(),
+                agent,
+                since_ms,
+                recent,
+            },
+        );
+        answer(self.client.clone().summarize(message).await)
+    }
+}
+
+/// Which turns a client asks about: every workspace's (of one agent's if
+/// named), or one workspace's.
+enum Asked {
+    Every(Option<String>),
+    One(String),
+}
+
+impl Api {
+    fn asked(
+        &self,
+        every_workspace: bool,
+        agent: String,
+        workspace: Option<gw::Workspace>,
+    ) -> Result<Asked, Status> {
+        if every_workspace {
+            // The store holds this gateway's turns only, so every workspace
+            // of it is every one the gateway's token may read.
+            let agent = Some(agent).filter(|agent| !agent.is_empty());
+            if let Some(agent) = &agent {
+                crate::access::agent(&self.gateway, agent)?;
+            }
+            return Ok(Asked::Every(agent));
+        }
+        let plan = self.plan(&agent, workspace)?;
+        Ok(Asked::One(plan.workspace_id().to_owned()))
     }
 }
 
@@ -108,12 +163,43 @@ impl gw::metrics_server::Metrics for Api {
     ) -> Result<Response<pb::ListResponse>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
-        let plan = self.plan(&request.agent, request.workspace)?;
+        let asked = self.asked(request.every_workspace, request.agent, request.workspace)?;
         let store = store(&self.gateway)?;
-        Ok(Response::new(
-            store
-                .list(plan.workspace_id(), request.session, request.limit)
-                .await?,
-        ))
+        let listed = match asked {
+            Asked::Every(agent) => {
+                store
+                    .list(None, agent, request.session, request.limit)
+                    .await?
+            }
+            Asked::One(workspace) => {
+                store
+                    .list(Some(&workspace), None, request.session, request.limit)
+                    .await?
+            }
+        };
+        Ok(Response::new(listed))
+    }
+
+    async fn summarize(
+        &self,
+        request: Request<gw::SummarizeTurnsRequest>,
+    ) -> Result<Response<pb::SummarizeResponse>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let asked = self.asked(request.every_workspace, request.agent, request.workspace)?;
+        let store = store(&self.gateway)?;
+        let summary = match asked {
+            Asked::Every(agent) => {
+                store
+                    .summarize(None, agent, request.since_ms, request.recent)
+                    .await?
+            }
+            Asked::One(workspace) => {
+                store
+                    .summarize(Some(&workspace), None, request.since_ms, request.recent)
+                    .await?
+            }
+        };
+        Ok(Response::new(summary))
     }
 }

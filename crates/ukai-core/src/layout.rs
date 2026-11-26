@@ -137,6 +137,9 @@ pub enum PaneContent {
         project: ProjectId,
         place: ReportSource,
     },
+    /// What each turn took across every workspace of every gateway the open
+    /// projects declare.
+    MetricsOverview,
     /// A shell in a workspace's checkout, named as a diff's is. The shell
     /// itself is not kept: after a restart the pane starts a new one there.
     Terminal {
@@ -189,7 +192,7 @@ impl ReportSource {
 impl PaneContent {
     pub fn project(&self) -> Option<&ProjectId> {
         match self {
-            PaneContent::Empty => None,
+            PaneContent::Empty | PaneContent::MetricsOverview => None,
             PaneContent::Agent { project, .. }
             | PaneContent::Report { project, .. }
             | PaneContent::Browser { project, .. }

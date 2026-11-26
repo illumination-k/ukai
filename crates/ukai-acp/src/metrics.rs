@@ -521,12 +521,16 @@ impl MetricsEndpoint {
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Reading the turns of a gateway agent's workspace, as the app does.
+/// Reading the turns of a gateway agent's workspace, or of every workspace
+/// of a gateway, as the app does.
 #[derive(Debug, Clone)]
 pub struct MetricsReader {
     channel: crate::grpc::Channel,
+    /// The gateway's root, which tells gateways apart.
+    root: String,
     agent: String,
-    workspace: ukai_proto::gateway::v1::Workspace,
+    /// `None` for every workspace, of every agent.
+    workspace: Option<ukai_proto::gateway::v1::Workspace>,
 }
 
 impl MetricsReader {
@@ -542,13 +546,36 @@ impl MetricsReader {
         };
         Ok(Some(Self {
             channel: agent.channel(TIMEOUT)?,
-            workspace: agent.gateway.workspace(workspace),
+            workspace: Some(agent.gateway.workspace(workspace)),
+            root: agent.root,
             agent: agent.id,
         }))
     }
 
-    /// The workspace's turns (only `session`'s, if given), newest first, at
-    /// most `limit` (0 for the store's limit).
+    /// The turns of every workspace and agent of the gateway behind `spec`,
+    /// or `None` when it is not a gateway agent.
+    pub fn every_workspace(
+        spec: &ukai_config::AgentSpec,
+        lookup: impl Fn(ukai_config::Source, &str) -> Option<String> + Copy,
+    ) -> Result<Option<Self>, ResolveError> {
+        let Some(agent) = crate::gateway::GatewayAgent::resolve(spec, lookup)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            channel: agent.channel(TIMEOUT)?,
+            workspace: None,
+            root: agent.root,
+            agent: String::new(),
+        }))
+    }
+
+    /// The gateway's root URL: readers of one gateway read the same turns.
+    pub fn gateway(&self) -> &str {
+        &self.root
+    }
+
+    /// The workspace's turns, or every workspace's (only `session`'s, if
+    /// given), newest first, at most `limit` (0 for the store's limit).
     pub async fn list(
         &self,
         session: Option<&str>,
@@ -559,9 +586,10 @@ impl MetricsReader {
         let listed = MetricsClient::new(self.channel.clone())
             .list(gw::ListTurnsRequest {
                 agent: self.agent.clone(),
-                workspace: Some(self.workspace.clone()),
+                workspace: self.workspace.clone(),
                 session: session.map(str::to_owned),
                 limit,
+                every_workspace: self.workspace.is_none(),
             })
             .await
             .map_err(|status| match status.code() {
@@ -573,11 +601,200 @@ impl MetricsReader {
     }
 }
 
+impl MetricsReader {
+    /// What the workspace's turns, or every workspace's, took, as the
+    /// gateway's store sums them up: only turns since `since_ms` if given,
+    /// with `recent` of the newest turns and slowest calls (0 for the
+    /// store's default).
+    pub async fn summarize(
+        &self,
+        since_ms: Option<u64>,
+        recent: u32,
+    ) -> Result<TurnsSummary, RecordError> {
+        use ukai_proto::gateway::v1 as gw;
+        use ukai_proto::gateway::v1::metrics_client::MetricsClient;
+        let summary = MetricsClient::new(self.channel.clone())
+            .summarize(gw::SummarizeTurnsRequest {
+                agent: self.agent.clone(),
+                workspace: self.workspace.clone(),
+                every_workspace: self.workspace.is_none(),
+                since_ms,
+                recent,
+            })
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable => RecordError::Unavailable,
+                _ => RecordError::Failed(status.message().to_owned()),
+            })?
+            .into_inner();
+        Ok(summary.into())
+    }
+}
+
+/// Count, total, mean, median, 90th percentile, and maximum of some
+/// durations, in milliseconds; all 0 when there are none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spread {
+    pub count: u64,
+    pub total: u64,
+    pub mean: u64,
+    pub median: u64,
+    pub p90: u64,
+    pub max: u64,
+}
+
+impl Spread {
+    pub fn of(values: impl IntoIterator<Item = u64>) -> Self {
+        let mut values: Vec<u64> = values.into_iter().collect();
+        if values.is_empty() {
+            return Self::default();
+        }
+        values.sort_unstable();
+        let count = values.len();
+        let total: u64 = values.iter().sum();
+        // Nearest rank: the smallest value at least `p` of them do not exceed.
+        let rank = |p: usize| values[(count * p).div_ceil(100).saturating_sub(1)];
+        Self {
+            count: count as u64,
+            total,
+            mean: total / count as u64,
+            median: rank(50),
+            p90: rank(90),
+            max: values[count - 1],
+        }
+    }
+}
+
+/// Where the turns' time went, summed over them, in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Split {
+    /// Before the agent's first output.
+    pub waiting: u64,
+    pub thinking: u64,
+    pub message: u64,
+    /// The agent's own tool calls (a subagent's run inside the call that
+    /// started it).
+    pub tools: u64,
+    pub permission: u64,
+    /// The rest: between events, or tool calls running alongside each other
+    /// counted once too often.
+    pub other: u64,
+}
+
+impl Split {
+    /// Each part, in the order they are shown.
+    pub fn parts(&self) -> [(&'static str, u64); 6] {
+        [
+            ("waiting", self.waiting),
+            ("thinking", self.thinking),
+            ("reply", self.message),
+            ("tools", self.tools),
+            ("permission", self.permission),
+            ("other", self.other),
+        ]
+    }
+
+    pub fn total(&self) -> u64 {
+        self.parts().iter().map(|(_, ms)| ms).sum()
+    }
+}
+
+/// The tokens of the turns that say, summed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenTotals {
+    /// How many turns said.
+    pub turns: u64,
+    pub input: u64,
+    pub output: u64,
+    pub thought: u64,
+    pub cached_read: u64,
+    pub cached_write: u64,
+}
+
+impl TokenTotals {
+    /// The share of input read from the cache, if any input was counted.
+    pub fn cache_share(&self) -> Option<f64> {
+        (self.input > 0).then(|| self.cached_read as f64 / self.input as f64)
+    }
+}
+
+/// Some turns, summed up.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Summary {
+    pub turns: u64,
+    pub sessions: u64,
+    /// How many turns ended each way, most first.
+    pub outcomes: Vec<(String, u64)>,
+    pub duration: Spread,
+    pub first_output: Spread,
+    pub split: Split,
+    pub tokens: TokenTotals,
+    /// The latest cumulative cost of each session, summed, in the currency
+    /// they report; `None` when none does, or they report more than one.
+    pub cost: Option<(f64, String)>,
+}
+
+impl Summary {
+    /// How many turns ended `outcome`.
+    pub fn ended(&self, outcome: &str) -> u64 {
+        self.outcomes
+            .iter()
+            .filter(|(name, _)| name == outcome)
+            .map(|(_, count)| count)
+            .sum()
+    }
+}
+
+/// The turns that share a key, such as an agent or a model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub name: String,
+    pub summary: Summary,
+}
+
+/// One kind of tool call across the turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolKind {
+    pub kind: String,
+    pub calls: u64,
+    pub failed: u64,
+    /// Of the calls that finished.
+    pub spread: Spread,
+}
+
+/// A tool call that took long, for the list of the slowest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlowCall {
+    pub kind: String,
+    pub title: String,
+    pub duration_ms: u64,
+    pub session: Option<String>,
+}
+
+/// What some turns took, as the store sums them up over all of them, with
+/// the newest of them as they are.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnsSummary {
+    pub summary: Summary,
+    /// Most turns first.
+    pub agents: Vec<Group>,
+    pub models: Vec<Group>,
+    /// Most time first.
+    pub tools: Vec<ToolKind>,
+    /// Slowest first.
+    pub slowest: Vec<SlowCall>,
+    /// Newest first.
+    pub recent: Vec<TurnRecord>,
+}
+
 /// The wire form of a turn, as `ukai.metrics.v1` carries it.
 pub mod wire {
     use ukai_proto::metrics::v1 as pb;
 
-    use super::{Context, Tokens, ToolRecord, TurnRecord};
+    use super::{
+        Context, Group, SlowCall, Split, Spread, Summary, TokenTotals, Tokens, ToolKind,
+        ToolRecord, TurnRecord, TurnsSummary,
+    };
 
     impl From<TurnRecord> for pb::Turn {
         fn from(turn: TurnRecord) -> Self {
@@ -670,6 +887,186 @@ pub mod wire {
             }
         }
     }
+
+    impl From<Spread> for pb::Spread {
+        fn from(s: Spread) -> Self {
+            Self {
+                count: s.count,
+                total: s.total,
+                mean: s.mean,
+                median: s.median,
+                p90: s.p90,
+                max: s.max,
+            }
+        }
+    }
+
+    impl From<pb::Spread> for Spread {
+        fn from(s: pb::Spread) -> Self {
+            Self {
+                count: s.count,
+                total: s.total,
+                mean: s.mean,
+                median: s.median,
+                p90: s.p90,
+                max: s.max,
+            }
+        }
+    }
+
+    impl From<Summary> for pb::Summary {
+        fn from(s: Summary) -> Self {
+            Self {
+                turns: s.turns,
+                sessions: s.sessions,
+                outcomes: s
+                    .outcomes
+                    .into_iter()
+                    .map(|(outcome, count)| pb::Outcome { outcome, count })
+                    .collect(),
+                duration: Some(s.duration.into()),
+                first_output: Some(s.first_output.into()),
+                split: Some(pb::Split {
+                    waiting: s.split.waiting,
+                    thinking: s.split.thinking,
+                    message: s.split.message,
+                    tools: s.split.tools,
+                    permission: s.split.permission,
+                    other: s.split.other,
+                }),
+                tokens: Some(pb::TokenTotals {
+                    turns: s.tokens.turns,
+                    input: s.tokens.input,
+                    output: s.tokens.output,
+                    thought: s.tokens.thought,
+                    cached_read: s.tokens.cached_read,
+                    cached_write: s.tokens.cached_write,
+                }),
+                cost: s
+                    .cost
+                    .map(|(amount, currency)| pb::Cost { amount, currency }),
+            }
+        }
+    }
+
+    impl From<pb::Summary> for Summary {
+        fn from(s: pb::Summary) -> Self {
+            let split = s.split.unwrap_or_default();
+            let tokens = s.tokens.unwrap_or_default();
+            Self {
+                turns: s.turns,
+                sessions: s.sessions,
+                outcomes: s
+                    .outcomes
+                    .into_iter()
+                    .map(|o| (o.outcome, o.count))
+                    .collect(),
+                duration: s.duration.unwrap_or_default().into(),
+                first_output: s.first_output.unwrap_or_default().into(),
+                split: Split {
+                    waiting: split.waiting,
+                    thinking: split.thinking,
+                    message: split.message,
+                    tools: split.tools,
+                    permission: split.permission,
+                    other: split.other,
+                },
+                tokens: TokenTotals {
+                    turns: tokens.turns,
+                    input: tokens.input,
+                    output: tokens.output,
+                    thought: tokens.thought,
+                    cached_read: tokens.cached_read,
+                    cached_write: tokens.cached_write,
+                },
+                // An empty currency: more than one, so no sum.
+                cost: s
+                    .cost
+                    .filter(|cost| !cost.currency.is_empty())
+                    .map(|cost| (cost.amount, cost.currency)),
+            }
+        }
+    }
+
+    impl From<Group> for pb::Group {
+        fn from(g: Group) -> Self {
+            Self {
+                name: g.name,
+                summary: Some(g.summary.into()),
+            }
+        }
+    }
+
+    impl From<pb::Group> for Group {
+        fn from(g: pb::Group) -> Self {
+            Self {
+                name: g.name,
+                summary: g.summary.unwrap_or_default().into(),
+            }
+        }
+    }
+
+    impl From<TurnsSummary> for pb::SummarizeResponse {
+        fn from(s: TurnsSummary) -> Self {
+            Self {
+                summary: Some(s.summary.into()),
+                agents: s.agents.into_iter().map(Into::into).collect(),
+                models: s.models.into_iter().map(Into::into).collect(),
+                tools: s
+                    .tools
+                    .into_iter()
+                    .map(|k| pb::ToolKind {
+                        kind: k.kind,
+                        calls: k.calls,
+                        failed: k.failed,
+                        spread: Some(k.spread.into()),
+                    })
+                    .collect(),
+                slowest: s
+                    .slowest
+                    .into_iter()
+                    .map(|c| pb::SlowCall {
+                        kind: c.kind,
+                        title: c.title,
+                        duration_ms: c.duration_ms,
+                        session: c.session.unwrap_or_default(),
+                    })
+                    .collect(),
+                recent: s.recent.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
+
+    impl From<pb::SummarizeResponse> for TurnsSummary {
+        fn from(s: pb::SummarizeResponse) -> Self {
+            Self {
+                summary: s.summary.unwrap_or_default().into(),
+                agents: s.agents.into_iter().map(Into::into).collect(),
+                models: s.models.into_iter().map(Into::into).collect(),
+                tools: s
+                    .tools
+                    .into_iter()
+                    .map(|k| ToolKind {
+                        kind: k.kind,
+                        calls: k.calls,
+                        failed: k.failed,
+                        spread: k.spread.unwrap_or_default().into(),
+                    })
+                    .collect(),
+                slowest: s
+                    .slowest
+                    .into_iter()
+                    .map(|c| SlowCall {
+                        kind: c.kind,
+                        title: c.title,
+                        duration_ms: c.duration_ms,
+                        session: Some(c.session).filter(|s| !s.is_empty()),
+                    })
+                    .collect(),
+                recent: s.recent.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -678,6 +1075,17 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::none(&[], Spread::default())]
+    #[case::one(&[5], Spread { count: 1, total: 5, mean: 5, median: 5, p90: 5, max: 5 })]
+    #[case::ten(
+        &[10, 1, 9, 2, 8, 3, 7, 4, 6, 5],
+        Spread { count: 10, total: 55, mean: 5, median: 5, p90: 9, max: 10 },
+    )]
+    fn spreads_durations(#[case] values: &[u64], #[case] expected: Spread) {
+        assert_eq!(Spread::of(values.iter().copied()), expected);
+    }
 
     /// Feeds events to a recorder on a clock the test moves.
     struct Clock {

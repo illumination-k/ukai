@@ -3624,8 +3624,9 @@ button.outline.danger {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
 
-/* The metrics pane: a workspace's turns (`metrics_pane.rs`). */
+/* The metrics panes: a workspace's turns, or every gateway's (`metrics_pane.rs`). */
 .metrics-pane {
   display: flex;
   flex-direction: column;
@@ -3636,6 +3637,10 @@ button.outline.danger {
   flex: 1;
   overflow: auto;
   padding: 12px 14px 24px;
+}
+
+.metrics-problem {
+  margin: 0 0 8px;
 }
 
 .metrics-tiles {
@@ -3801,4 +3806,14 @@ button.outline.danger {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
+}
+
+.metrics-gateway + .metrics-gateway {
+  margin-top: 28px;
+}
+
+.metrics-gateway-name {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  font-weight: 600;
 }
