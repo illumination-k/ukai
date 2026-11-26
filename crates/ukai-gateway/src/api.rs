@@ -325,7 +325,7 @@ impl gw::commands_server::Commands for Api {
 }
 
 /// A spec from the wire, or why it is not one.
-fn spec(spec: Option<gw::ScheduleSpec>) -> Result<ScheduleSpec, Status> {
+pub(crate) fn spec(spec: Option<gw::ScheduleSpec>) -> Result<ScheduleSpec, Status> {
     spec.ok_or_else(|| Status::invalid_argument("the request has no schedule"))?
         .try_into()
         .map_err(|error: ukai_acp::schedules::wire::Malformed| {
@@ -340,7 +340,7 @@ fn found(info: Option<ScheduleInfo>) -> Result<Response<gw::ScheduleInfo>, Statu
 }
 
 /// What a change came to.
-fn change(
+pub(crate) fn change(
     result: Result<Option<ScheduleInfo>, Vec<String>>,
 ) -> Result<Response<gw::ScheduleChange>, Status> {
     let outcome = match result {
