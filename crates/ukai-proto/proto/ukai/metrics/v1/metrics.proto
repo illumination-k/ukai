@@ -11,6 +11,9 @@ service MetricsStore {
   rpc Record(RecordRequest) returns (RecordResponse);
   // A workspace's turns, or every workspace's, newest first.
   rpc List(ListRequest) returns (ListResponse);
+  // What a workspace's turns, or every workspace's, took, summed up by the
+  // store over all of them.
+  rpc Summarize(SummarizeRequest) returns (SummarizeResponse);
 }
 
 // One turn of a session. Times are in milliseconds, as the relay saw the
@@ -101,4 +104,112 @@ message ListRequest {
 
 message ListResponse {
   repeated Turn turns = 1;
+}
+
+message SummarizeRequest {
+  // Empty for every workspace's turns.
+  string workspace = 1;
+  // Only this agent's turns.
+  optional string agent = 2;
+  // Only turns that started at or after this, in milliseconds since the
+  // Unix epoch.
+  optional uint64 since_ms = 3;
+  // How many of the newest turns and of the slowest tool calls to return
+  // as they are; 0 for the store's default.
+  uint32 recent = 4;
+}
+
+// Count, total, mean, median, 90th percentile, and maximum of some
+// durations, in milliseconds; all 0 when there are none.
+message Spread {
+  uint64 count = 1;
+  uint64 total = 2;
+  uint64 mean = 3;
+  uint64 median = 4;
+  uint64 p90 = 5;
+  uint64 max = 6;
+}
+
+// Where the turns' time went, summed, in milliseconds.
+message Split {
+  // Before the agent's first output.
+  uint64 waiting = 1;
+  uint64 thinking = 2;
+  uint64 message = 3;
+  // The agent's own tool calls; a subagent's run inside the call that
+  // started it.
+  uint64 tools = 4;
+  uint64 permission = 5;
+  // The rest of the turns' time.
+  uint64 other = 6;
+}
+
+// The tokens of the turns that say, summed.
+message TokenTotals {
+  // How many turns said.
+  uint64 turns = 1;
+  uint64 input = 2;
+  uint64 output = 3;
+  uint64 thought = 4;
+  uint64 cached_read = 5;
+  uint64 cached_write = 6;
+}
+
+message Outcome {
+  string outcome = 1;
+  uint64 count = 2;
+}
+
+// The latest cumulative cost of each session, summed.
+message Cost {
+  double amount = 1;
+  // ISO 4217; empty when the sessions report more than one currency.
+  string currency = 2;
+}
+
+message Summary {
+  uint64 turns = 1;
+  uint64 sessions = 2;
+  // Most first.
+  repeated Outcome outcomes = 3;
+  Spread duration = 4;
+  Spread first_output = 5;
+  Split split = 6;
+  TokenTotals tokens = 7;
+  // Unset when no session reports one.
+  optional Cost cost = 8;
+}
+
+// The turns that share an agent or a model; `unknown` for none.
+message Group {
+  string name = 1;
+  Summary summary = 2;
+}
+
+message ToolKind {
+  string kind = 1;
+  uint64 calls = 2;
+  uint64 failed = 3;
+  // Of the calls that finished.
+  Spread spread = 4;
+}
+
+message SlowCall {
+  string kind = 1;
+  string title = 2;
+  uint64 duration_ms = 3;
+  string session = 4;
+}
+
+message SummarizeResponse {
+  Summary summary = 1;
+  // Most turns first.
+  repeated Group agents = 2;
+  repeated Group models = 3;
+  // Most time first.
+  repeated ToolKind tools = 4;
+  // Slowest first.
+  repeated SlowCall slowest = 5;
+  // Newest first.
+  repeated Turn recent = 6;
 }

@@ -3807,3 +3807,13 @@ button.outline.danger {
   white-space: nowrap;
   font-family: var(--mono);
 }
+
+.metrics-gateway + .metrics-gateway {
+  margin-top: 28px;
+}
+
+.metrics-gateway-name {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+}

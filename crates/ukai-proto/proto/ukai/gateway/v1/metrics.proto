@@ -15,6 +15,23 @@ service Metrics {
   // The workspace's turns, or with `every_workspace` those of every
   // workspace, newest first.
   rpc List(ListTurnsRequest) returns (ukai.metrics.v1.ListResponse);
+  // What the workspace's turns, or with `every_workspace` those of every
+  // workspace, took, summed up by the store.
+  rpc Summarize(SummarizeTurnsRequest) returns (ukai.metrics.v1.SummarizeResponse);
+}
+
+message SummarizeTurnsRequest {
+  // With `every_workspace`, only this agent's turns; empty for every agent's.
+  string agent = 1;
+  // Ignored with `every_workspace`.
+  Workspace workspace = 2;
+  bool every_workspace = 3;
+  // Only turns that started at or after this, in milliseconds since the
+  // Unix epoch.
+  optional uint64 since_ms = 4;
+  // How many of the newest turns and slowest tool calls; 0 for the store's
+  // default.
+  uint32 recent = 5;
 }
 
 message ListTurnsRequest {
