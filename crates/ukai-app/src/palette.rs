@@ -15,6 +15,7 @@ use crate::layout::{close_pane, launch_agent, launch_target, open_report, pane_l
 use crate::projects::{AppSignals, Paths, pick_and_add_project, project_context};
 use crate::remote_reports::Listing;
 use crate::shortcuts::{Shortcuts, use_ime};
+use crate::text_field::use_text_field;
 
 /// Rows shown at once; the query narrows the rest.
 const LIMIT: usize = 50;
@@ -181,6 +182,7 @@ pub fn Palette() -> Element {
     let mut query = use_signal(String::new);
     let mut selected = use_signal(|| 0_usize);
     let ime = use_ime();
+    let field = use_text_field(move || query.cloned());
     let mut open = app.palette;
 
     let matches: Vec<Item> = palette::filter(
@@ -251,12 +253,14 @@ pub fn Palette() -> Element {
                     input {
                         r#type: "text",
                         placeholder: "Go to a pane, open an agent or report, run a command",
-                        value: "{query}",
+                        id: field.id(),
                         spellcheck: "false",
                         onmounted: move |event| async move {
+                            field.mounted();
                             let _ = event.set_focus(true).await;
                         },
                         oninput: move |event| {
+                            field.typed(&event.value());
                             query.set(event.value());
                             selected.set(0);
                         },

@@ -27,6 +27,7 @@ mod secretary;
 mod shortcuts;
 mod sidebar;
 mod terminal_pane;
+mod text_field;
 mod voice;
 
 /// What `benches/` measure; not an API.

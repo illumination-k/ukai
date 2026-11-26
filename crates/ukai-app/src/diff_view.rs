@@ -11,6 +11,7 @@ use ukai_core::review::{DiffLine, Hunk, LineKind, ReviewComment};
 use crate::icons::{Icon, Svg};
 use crate::markdown::Markdown;
 use crate::shortcuts::{Shortcuts, use_ime};
+use crate::text_field::use_text_field;
 
 /// An annotation shown under line `index` of hunk `hunk`; `outdated` when
 /// that line changed since it was written.
@@ -47,6 +48,7 @@ pub fn DiffLines(
     let ime = use_ime();
     let mut editing = use_signal(|| None::<(usize, usize)>);
     let mut text = use_signal(String::new);
+    let field = use_text_field(move || text.cloned());
     let total: usize = hunks.iter().map(Vec::len).sum();
     let mut budget = max_lines;
     let shown: Vec<(usize, Vec<(usize, DiffLine)>)> = hunks
@@ -146,11 +148,15 @@ pub fn DiffLines(
                                 textarea {
                                     rows: "2",
                                     placeholder: "{placeholder}",
-                                    value: "{text}",
+                                    id: field.id(),
                                     onmounted: move |event| async move {
+                                        field.mounted();
                                         let _ = event.set_focus(true).await;
                                     },
-                                    oninput: move |event| text.set(event.value()),
+                                    oninput: move |event| {
+                                        field.typed(&event.value());
+                                        text.set(event.value());
+                                    },
                                     oncompositionend: move |_| ime.end(),
                                     onkeyup: move |_| ime.settle(),
                                     onkeydown: {
@@ -234,6 +240,7 @@ pub fn AnnotationCard(
     let ime = use_ime();
     let mut replying = use_signal(|| false);
     let mut text = use_signal(String::new);
+    let field = use_text_field(move || text.cloned());
     let id = annotation.id.clone();
     let resolved = annotation.resolved;
     let priority = annotation.priority.map(|p| p.name());
@@ -298,11 +305,15 @@ pub fn AnnotationCard(
                         textarea {
                             rows: "2",
                             placeholder: "Reply; it goes to the agent with your next message to it",
-                            value: "{text}",
+                            id: field.id(),
                             onmounted: move |event| async move {
+                                field.mounted();
                                 let _ = event.set_focus(true).await;
                             },
-                            oninput: move |event| text.set(event.value()),
+                            oninput: move |event| {
+                                field.typed(&event.value());
+                                text.set(event.value());
+                            },
                             oncompositionend: move |_| ime.end(),
                             onkeyup: move |_| ime.settle(),
                             onkeydown: move |event: KeyboardEvent| {

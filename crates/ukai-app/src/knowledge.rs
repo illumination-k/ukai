@@ -28,6 +28,7 @@ use crate::markdown::Markdown;
 use crate::projects::AppSignals;
 use crate::schedules::{local_now, when_unix};
 use crate::sidebar::Head;
+use crate::text_field::{TextField, use_text_field};
 
 /// How often the app asks the gateways for their notes.
 const LIST_EVERY: Duration = Duration::from_secs(15);
@@ -585,6 +586,13 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
     let mut history = use_signal(|| None::<Result<Vec<Revision>, String>>);
     let mut errors = use_signal(Vec::<String>::new);
     let mut busy = use_signal(|| false);
+    let field = |of: fn(&Draft) -> String| -> TextField {
+        use_text_field(move || draft.read().as_ref().map(of).unwrap_or_default())
+    };
+    let name_field = field(|draft| draft.name.clone());
+    let description_field = field(|draft| draft.spec.description.clone());
+    let tags_field = field(|draft| draft.tags.clone());
+    let body_field = field(|draft| draft.spec.body.clone());
 
     use_future({
         let note = note.clone();
@@ -964,10 +972,12 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                         span { class: "field-label", "Name" }
                         input {
                             class: "mono",
-                            value: "{current.name}",
+                            id: name_field.id(),
+                            onmounted: move |_| name_field.mounted(),
                             spellcheck: false,
                             placeholder: "release-process",
                             oninput: move |event| {
+                                name_field.typed(&event.value());
                                 if let Some(draft) = draft.write().as_mut() {
                                     draft.name = event.value();
                                 }
@@ -980,9 +990,11 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                 div { class: "field",
                     span { class: "field-label", "Description" }
                     input {
-                        value: "{current.spec.description}",
+                        id: description_field.id(),
+                        onmounted: move |_| description_field.mounted(),
                         placeholder: "One line: what this note is about",
                         oninput: move |event| {
+                            description_field.typed(&event.value());
                             if let Some(draft) = draft.write().as_mut() {
                                 draft.spec.description = event.value();
                             }
@@ -996,10 +1008,12 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                     span { class: "field-label", "Tags" }
                     input {
                         class: "mono",
-                        value: "{current.tags}",
+                        id: tags_field.id(),
+                        onmounted: move |_| tags_field.mounted(),
                         spellcheck: false,
                         placeholder: "research, build",
                         oninput: move |event| {
+                            tags_field.typed(&event.value());
                             if let Some(draft) = draft.write().as_mut() {
                                 draft.spec.tags = knowledge::parse_tags(&event.value());
                                 draft.tags = event.value();
@@ -1025,8 +1039,10 @@ pub fn NoteView(pane: PaneId, project: ProjectId, agent: String, note: Option<St
                         class: "mono",
                         rows: 18,
                         placeholder: "Markdown",
-                        value: "{current.spec.body}",
+                        id: body_field.id(),
+                        onmounted: move |_| body_field.mounted(),
                         oninput: move |event| {
+                            body_field.typed(&event.value());
                             if let Some(draft) = draft.write().as_mut() {
                                 draft.spec.body = event.value();
                             }
