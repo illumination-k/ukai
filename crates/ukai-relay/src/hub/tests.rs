@@ -443,6 +443,76 @@ fn session_setup_gets_the_relays_mcp_servers(#[case] method: &str, #[case] param
     }
 }
 
+/// A hub appending `ROLE` to the system prompt, whose agent answered
+/// `initialize` with `caps` as its `sessionCapabilities`.
+fn with_system_prompt(caps: Value) -> Hub {
+    let (mut hub, init) = Hub::new(None, Vec::new());
+    hub.append_system_prompt(ROLE.to_owned());
+    hub.from_agent(result(
+        json!(agent_id(&init)),
+        json!({ "agentCapabilities": { "sessionCapabilities": caps } }),
+    ));
+    hub.connect(A);
+    hub
+}
+
+const ROLE: &str = "You are the secretary.";
+
+fn system_prompt_sent(outputs: &[Output]) -> Value {
+    match outputs {
+        [Output::Agent(message)] => message["params"]["systemPrompt"].clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[rstest]
+#[case::new("session/new", json!({ "cwd": "/w", "mcpServers": [] }))]
+#[case::load("session/load", json!({ "sessionId": SID, "cwd": "/w", "mcpServers": [] }))]
+#[case::resume("session/resume", json!({ "sessionId": SID, "cwd": "/w" }))]
+fn session_setup_appends_the_relays_system_prompt(#[case] method: &str, #[case] params: Value) {
+    let mut hub = with_system_prompt(json!({ "systemPrompt": {} }));
+    assert_eq!(
+        system_prompt_sent(&hub.from_client(A, req(1, method, params))),
+        json!({ "mode": "append", "content": [{ "type": "text", "text": ROLE }] })
+    );
+}
+
+#[rstest]
+#[case::append("append")]
+#[case::replace("override")]
+fn the_relays_system_prompt_follows_the_clients(#[case] mode: &str) {
+    let mut hub = with_system_prompt(json!({ "systemPrompt": { "mode": { "override": {} } } }));
+    let theirs = json!({ "type": "text", "text": "Theirs." });
+    let sent = hub.from_client(
+        A,
+        req(
+            1,
+            "session/new",
+            json!({ "cwd": "/w", "systemPrompt": { "mode": mode, "content": [theirs.clone()] } }),
+        ),
+    );
+    assert_eq!(
+        system_prompt_sent(&sent),
+        json!({ "mode": mode, "content": [theirs, { "type": "text", "text": ROLE }] })
+    );
+}
+
+#[rstest]
+#[case::no_capability(json!({}))]
+#[case::null_capability(json!({ "systemPrompt": null }))]
+fn an_agent_without_system_prompts_is_sent_none(#[case] caps: Value) {
+    let mut hub = with_system_prompt(caps);
+    let sent = hub.from_client(A, req(1, "session/new", json!({ "cwd": "/w" })));
+    assert_eq!(system_prompt_sent(&sent), Value::Null);
+}
+
+#[test]
+fn other_requests_get_no_system_prompt() {
+    let mut hub = with_system_prompt(json!({ "systemPrompt": {} }));
+    let sent = hub.from_client(A, req(1, "session/list", json!({})));
+    assert_eq!(system_prompt_sent(&sent), Value::Null);
+}
+
 /// The key a setup sent to the agent gave the relay's servers.
 fn key_of(outputs: &[Output]) -> String {
     match outputs {

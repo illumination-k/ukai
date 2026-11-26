@@ -165,6 +165,9 @@ pub struct Hub {
     /// ACP `mcpServers` entries added to every session set up, replacing a
     /// client's entry of the same name.
     mcp_servers: Vec<Value>,
+    /// Text appended to the system prompt of every session set up, when
+    /// the agent takes a `systemPrompt` (see [`Hub::append_system_prompt`]).
+    system_prompt: Option<String>,
     agent_init: Option<Value>,
     waiting_init: Vec<(ConnId, Value)>,
     next_id: u64,
@@ -216,6 +219,14 @@ impl Hub {
 
     /// Whether the agent still has something to do or someone to serve: a
     /// connected client or a running turn.
+    /// Append `text` to the system prompt of every session set up from now
+    /// on, after any the client sends. Only an agent that advertises
+    /// `sessionCapabilities.systemPrompt` is sent it; any other would
+    /// refuse the setup.
+    pub fn append_system_prompt(&mut self, text: String) {
+        self.system_prompt = Some(text);
+    }
+
     pub fn busy(&self) -> bool {
         !self.conns.is_empty() || self.sessions.values().any(|s| s.turn.is_some())
     }
@@ -441,8 +452,8 @@ impl Hub {
         }
     }
 
-    /// Point session setup at the relay's directory and MCP servers, the
-    /// servers given a new key, which is returned.
+    /// Point session setup at the relay's directory, MCP servers, and
+    /// system prompt, the servers given a new key, which is returned.
     fn set_up_here(&mut self, method: &str, message: &mut Value) -> Option<String> {
         let setup = matches!(method, "session/new" | "session/load" | "session/resume");
         if !setup && method != "session/list" {
@@ -451,6 +462,31 @@ impl Hub {
         let params = message.get_mut("params").and_then(Value::as_object_mut)?;
         if let Some(cwd) = &self.cwd {
             params.insert("cwd".to_owned(), json!(cwd));
+        }
+        if setup
+            && let Some(text) = &self.system_prompt
+            && self
+                .agent_init
+                .as_ref()
+                .and_then(|init| {
+                    init.pointer("/agentCapabilities/sessionCapabilities/systemPrompt")
+                })
+                .is_some_and(|caps| !caps.is_null())
+        {
+            let block = json!({ "type": "text", "text": text });
+            match params
+                .get_mut("systemPrompt")
+                .and_then(|prompt| prompt.get_mut("content"))
+                .and_then(Value::as_array_mut)
+            {
+                Some(content) => content.push(block),
+                None => {
+                    params.insert(
+                        "systemPrompt".to_owned(),
+                        json!({ "mode": "append", "content": [block] }),
+                    );
+                }
+            }
         }
         if !setup || self.mcp_servers.is_empty() {
             return None;
