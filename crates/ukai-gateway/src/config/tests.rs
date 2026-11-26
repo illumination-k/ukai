@@ -169,3 +169,64 @@ fn parses_durations(#[case] value: &str, #[case] seconds: Option<u64>) {
 fn parses_secret_refs(#[case] value: &str, #[case] expected: Option<(&str, &str)>) {
     assert_eq!(parse_secret_ref(value), expected);
 }
+
+#[test]
+fn github_app_defaults_to_pushing_and_pull_requests() {
+    let Ok(GatewayConfig { agents }) = parse(&kubernetes(IMAGE, "")) else {
+        panic!("expected a valid config");
+    };
+    let Some(agent) = agents.get("k") else {
+        panic!("expected agent `k`");
+    };
+    assert!(!agent.workspace.github_app);
+    assert_eq!(
+        agent.workspace.github_repository(),
+        Some(GitHubRepository {
+            host: "github.com".into(),
+            owner: "org".into(),
+            name: "repo".into(),
+        })
+    );
+    let permissions: Vec<(String, String)> =
+        agent.workspace.github_permissions().into_iter().collect();
+    assert_eq!(
+        permissions,
+        [
+            ("contents".to_owned(), "write".to_owned()),
+            ("pull_requests".to_owned(), "write".to_owned())
+        ]
+    );
+}
+
+#[rstest]
+#[case::app_and_token(
+    r#"git = "https://github.com/o/r", github_app = true, github_token = "gh/token""#,
+    Problem::GitHubAppAndToken { context: "agents.k.workspace".into() }
+)]
+#[case::ssh(
+    r#"git = "git@github.com:o/r.git", github_app = true"#,
+    Problem::NotGitHubRepository { context: "agents.k.workspace".into(), git: "git@github.com:o/r.git".into() }
+)]
+#[case::no_repository(
+    r#"git = "https://github.com/o", github_app = true"#,
+    Problem::NotGitHubRepository { context: "agents.k.workspace".into(), git: "https://github.com/o".into() }
+)]
+#[case::permissions_without_app(
+    r#"git = "https://github.com/o/r", github_permissions = { contents = "read" }"#,
+    Problem::PermissionsWithoutApp { context: "agents.k.workspace".into() }
+)]
+#[case::bad_level(
+    r#"git = "https://github.com/o/r", github_app = true, github_permissions = { contents = "admin" }"#,
+    Problem::InvalidPermission { context: "agents.k.workspace.github_permissions".into(), name: "contents".into(), level: "admin".into() }
+)]
+fn refuses_a_github_app_it_cannot_use(#[case] workspace: &str, #[case] problem: Problem) {
+    let src = format!(
+        r#"
+        [agents.k]
+        image = "agent"
+        command = "claude-agent-acp"
+        workspace = {{ {workspace} }}
+        "#
+    );
+    assert_eq!(problems(&src), [problem]);
+}

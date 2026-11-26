@@ -22,6 +22,7 @@ pub mod checkout;
 mod fs;
 mod gateway;
 pub mod gateways;
+pub mod github;
 mod grpc;
 pub mod knowledge;
 pub mod metrics;

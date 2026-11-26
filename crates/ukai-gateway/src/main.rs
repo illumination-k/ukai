@@ -46,7 +46,10 @@
 //! `WorkspaceKnowledge`, with their relay's token instead of the gateway's;
 //! they cannot review. They publish the reports their sessions write at
 //! `WorkspaceReports` likewise ([`reports`]), kept by `ukai-store` too, and
-//! what each turn of their sessions took at `WorkspaceMetrics` ([`metrics`]). A
+//! what each turn of their sessions took at `WorkspaceMetrics` ([`metrics`]),
+//! and the pods of agents with `workspace.github_app` ask for GitHub
+//! installation tokens for their repository at `WorkspaceGitHub`
+//! ([`github`]). A
 //! secretary agent's pod reads and prompts the other workspaces' sessions at
 //! `WorkspaceSecretary` ([`secretary`]).
 //!
@@ -68,6 +71,12 @@
 //!   reports ([`archive`]), reached as the `AWS_*` variables say
 //!   (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 //!   `AWS_REGION`); without it no copy is kept
+//! - `UKAI_GITHUB_APP_ID` and `UKAI_GITHUB_APP_PRIVATE_KEY` (the PEM itself,
+//!   from a Secret): the GitHub App whose installation tokens the pods of
+//!   agents with `workspace.github_app` ask for ([`github`]); the gateway
+//!   refuses to start with such an agent and no App
+//! - `UKAI_GITHUB_API_URL`: GitHub's API, for a GitHub Enterprise Server
+//!   (default `https://api.github.com`)
 //!
 //! Each agent runs in a Job per workspace, in the gateway's namespace, with
 //! nothing installed cluster-side: no CRD, no PersistentVolumeClaim of its
@@ -98,6 +107,7 @@ mod api;
 mod archive;
 mod cluster;
 mod config;
+mod github;
 mod job;
 mod knowledge;
 mod metrics;
@@ -127,6 +137,8 @@ struct Gateway {
     metrics: Option<metrics::MetricsClient>,
     /// The copy of the workspaces' reports, when there is a bucket for it.
     archive: Option<Arc<Archive>>,
+    /// The GitHub App minting the pods' tokens, when the gateway has one.
+    github: Option<github::GitHubApp>,
     /// The agent pods' addresses, which the person's side refuses.
     agent_pods: access::AgentPods,
     /// For asking the pods' relays.
@@ -185,10 +197,43 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         (None, _) => (None, None, None),
     };
-    // Agent pods are told where the gateway is only when it keeps a store.
-    let gateway_url = knowledge.as_ref().map(|_| {
-        env("UKAI_GATEWAY_INTERNAL_URL").unwrap_or_else(|| "http://ukai-gateway".to_owned())
-    });
+    let github = match (
+        env("UKAI_GITHUB_APP_ID"),
+        env("UKAI_GITHUB_APP_PRIVATE_KEY"),
+    ) {
+        (Some(id), Some(key)) => {
+            let api = env("UKAI_GITHUB_API_URL").unwrap_or_else(|| github::DEFAULT_API.to_owned());
+            Some(
+                github::GitHubApp::new(&id, &key, &api)
+                    .map_err(|error| format!("UKAI_GITHUB_APP_PRIVATE_KEY: {error}"))?,
+            )
+        }
+        (None, None) => None,
+        _ => {
+            return Err(
+                "set both UKAI_GITHUB_APP_ID and UKAI_GITHUB_APP_PRIVATE_KEY, or neither".into(),
+            );
+        }
+    };
+    let wanting_app: Vec<&str> = config
+        .agents
+        .iter()
+        .filter(|(_, agent)| agent.workspace.github_app)
+        .map(|(id, _)| id.as_str())
+        .collect();
+    if github.is_none() && !wanting_app.is_empty() {
+        return Err(format!(
+            "{path}: {} set workspace.github_app, but the gateway has no GitHub App: set UKAI_GITHUB_APP_ID and UKAI_GITHUB_APP_PRIVATE_KEY",
+            wanting_app.join(", ")
+        )
+        .into());
+    }
+    let internal_url =
+        env("UKAI_GATEWAY_INTERNAL_URL").unwrap_or_else(|| "http://ukai-gateway".to_owned());
+    // Agent pods are told where the gateway is only when it keeps a store,
+    // and where to ask for GitHub tokens only when it has an App.
+    let gateway_url = knowledge.as_ref().map(|_| internal_url.clone());
+    let github_url = github.as_ref().map(|_| internal_url);
     let user = cluster.whoami().await?;
     tracing::info!(namespace = cluster.namespace(), %user, %relay_image, ?gateway_url, knowledge = ?knowledge.as_ref().and(knowledge_url.as_ref()), agents = ?config.agents.keys().collect::<Vec<_>>(), "gateway starting");
     let archive = match env("UKAI_REPORTS_BUCKET") {
@@ -209,6 +254,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         runtime: Runtime {
             relay_image,
             gateway_url,
+            github_url,
         },
         token: env("UKAI_GATEWAY_TOKEN"),
         schedules,
@@ -216,6 +262,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         reports: publications,
         metrics: turns,
         archive,
+        github,
         agent_pods: access::AgentPods::default(),
         http: reqwest::Client::new(),
     });
@@ -267,6 +314,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::metrics_server::MetricsServer;
     use ukai_proto::gateway::v1::ports_server::PortsServer;
     use ukai_proto::gateway::v1::schedules_server::SchedulesServer;
+    use ukai_proto::gateway::v1::workspace_git_hub_server::WorkspaceGitHubServer;
     use ukai_proto::gateway::v1::workspace_knowledge_server::WorkspaceKnowledgeServer;
     use ukai_proto::gateway::v1::workspace_metrics_server::WorkspaceMetricsServer;
     use ukai_proto::gateway::v1::workspace_reports_server::WorkspaceReportsServer;
@@ -288,6 +336,9 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
         gateway: gateway.clone(),
     })))
     .add_service(web.layer(WorkspaceMetricsServer::new(metrics::PodMetrics {
+        gateway: gateway.clone(),
+    })))
+    .add_service(web.layer(WorkspaceGitHubServer::new(github::PodGitHub {
         gateway: gateway.clone(),
     })))
     .add_service(

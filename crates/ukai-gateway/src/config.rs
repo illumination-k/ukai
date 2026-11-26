@@ -26,7 +26,8 @@ pub struct GatewayConfig {
 #[serde(deny_unknown_fields)]
 pub struct KubernetesAgent {
     /// Image for both the agent and the workspace sidecar. It needs bash and
-    /// git, and `gh` for `workspace.github_token` to work.
+    /// git, and `gh` for `workspace.github_token` (or, for the agent,
+    /// `workspace.github_app`) to work.
     pub image: String,
     /// The ACP agent, started in the repository checkout for each session.
     pub command: String,
@@ -105,6 +106,16 @@ pub struct Workspace {
     /// sidecar (to push snapshots) and the agent (to push and open pull
     /// requests), with git's credential helper pointed at `gh`.
     pub github_token: Option<String>,
+    /// Use the gateway's GitHub App instead of a token Secret: the pod asks
+    /// the gateway for an installation token limited to this repository and
+    /// `github_permissions`, fresh whenever git or `gh` needs one (see
+    /// "GitHub App" in `docs/design.md`).
+    #[serde(default)]
+    pub github_app: bool,
+    /// The App's permissions on the repository, e.g. `{ contents = "write",
+    /// issues = "read" }`; [`DEFAULT_GITHUB_PERMISSIONS`] when empty.
+    #[serde(default)]
+    pub github_permissions: BTreeMap<String, String>,
     /// The agent's commit identity: `GIT_AUTHOR_*` and `GIT_COMMITTER_*`.
     pub author: Option<Author>,
     /// Ref snapshots go to; `refs/ukai/wip/<workspace id>` when absent.
@@ -114,9 +125,61 @@ pub struct Workspace {
     pub snapshot_interval: String,
 }
 
+/// What an installation token may do when `github_permissions` is empty:
+/// push branches and open pull requests.
+pub const DEFAULT_GITHUB_PERMISSIONS: &[(&str, &str)] =
+    &[("contents", "write"), ("pull_requests", "write")];
+
 impl Workspace {
     fn default_snapshot_interval() -> String {
         "5m".to_owned()
+    }
+
+    /// The repository on its host, when `git` names one as `<host>/<owner>/<name>`.
+    pub fn github_repository(&self) -> Option<GitHubRepository> {
+        let key = ukai_core::knowledge::repository_key(&self.git);
+        let mut parts = key.split('/');
+        let (Some(host), Some(owner), Some(name), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        [host, owner, name]
+            .iter()
+            .all(|part| !part.is_empty())
+            .then(|| GitHubRepository {
+                host: host.to_owned(),
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+            })
+    }
+
+    /// The permissions an installation token for this workspace asks for.
+    pub fn github_permissions(&self) -> BTreeMap<String, String> {
+        if self.github_permissions.is_empty() {
+            DEFAULT_GITHUB_PERMISSIONS
+                .iter()
+                .map(|(name, level)| ((*name).to_owned(), (*level).to_owned()))
+                .collect()
+        } else {
+            self.github_permissions.clone()
+        }
+    }
+}
+
+/// A repository the GitHub App is installed on, as its API names it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GitHubRepository {
+    /// Where git reaches it, e.g. `github.com`.
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
+impl GitHubRepository {
+    /// `owner/name`.
+    pub fn full_name(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
     }
 }
 
@@ -225,6 +288,22 @@ pub enum Problem {
     InvalidKnowledgeScope { context: String, value: String },
     #[error("{context}: label `{key}` is the gateway's own")]
     ReservedLabel { context: String, key: String },
+    #[error(
+        "{context}: `github_app` and `github_token` are two ways to the same credential; keep one"
+    )]
+    GitHubAppAndToken { context: String },
+    #[error(
+        "{context}: `github_app` needs `git` to be a repository's https URL, `https://<host>/<owner>/<name>`, not `{git}`"
+    )]
+    NotGitHubRepository { context: String, git: String },
+    #[error("{context}: `github_permissions` needs `github_app`")]
+    PermissionsWithoutApp { context: String },
+    #[error("{context}.{name}: `{level}` is not `read` or `write`")]
+    InvalidPermission {
+        context: String,
+        name: String,
+        level: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -302,6 +381,7 @@ fn validate(context: &str, agent: &KubernetesAgent, problems: &mut Vec<Problem>)
             value: scope.clone(),
         });
     }
+    validate_github(&format!("{context}.workspace"), &agent.workspace, problems);
     for key in agent.labels.keys() {
         if key == crate::job::MANAGED_BY || key.starts_with("ukai.dev/") {
             problems.push(Problem::ReservedLabel {
@@ -329,6 +409,37 @@ fn validate(context: &str, agent: &KubernetesAgent, problems: &mut Vec<Problem>)
             problems.push(Problem::InvalidTokenPath {
                 context,
                 path: token.path.clone(),
+            });
+        }
+    }
+}
+
+fn validate_github(context: &str, workspace: &Workspace, problems: &mut Vec<Problem>) {
+    if !workspace.github_app {
+        if !workspace.github_permissions.is_empty() {
+            problems.push(Problem::PermissionsWithoutApp {
+                context: context.to_owned(),
+            });
+        }
+        return;
+    }
+    if workspace.github_token.is_some() {
+        problems.push(Problem::GitHubAppAndToken {
+            context: context.to_owned(),
+        });
+    }
+    if !workspace.git.trim().starts_with("https://") || workspace.github_repository().is_none() {
+        problems.push(Problem::NotGitHubRepository {
+            context: context.to_owned(),
+            git: workspace.git.clone(),
+        });
+    }
+    for (name, level) in &workspace.github_permissions {
+        if !matches!(level.as_str(), "read" | "write") {
+            problems.push(Problem::InvalidPermission {
+                context: format!("{context}.github_permissions"),
+                name: name.clone(),
+                level: level.clone(),
             });
         }
     }

@@ -12,18 +12,21 @@ description = "Serves a namespace's agents over ACP's WebSocket profile, one pod
 # `http2` for gRPC over h2c next to gRPC-Web on the same port.
 axum = { workspace = true, features = ["ws", "http2"] }
 futures = { workspace = true }
+# Signs the GitHub App's JWT (`github`), with the crypto rustls already uses.
+jsonwebtoken = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
 percent-encoding = { workspace = true }
-# No TLS of its own: the gateway asks for reports from a `ukai-relay` at a
-# pod address inside the cluster.
-reqwest = { workspace = true }
+# The pods' relays inside the cluster, and GitHub's API for the App
+# (`github`) over TLS.
+reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true }
+# `parsing` for when GitHub says an installation token expires.
+time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "handshake"] }
 toml = { workspace = true }
@@ -39,6 +42,9 @@ ukai-core = { workspace = true }
 ukai-proto = { workspace = true }
 
 [dev-dependencies]
+# A fresh RSA key for the GitHub App in tests.
+aws-lc-rs = { workspace = true }
+base64 = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 

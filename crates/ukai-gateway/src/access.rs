@@ -212,7 +212,8 @@ impl AgentPods {
 }
 
 /// Paths an agent pod may ask: its own knowledge, publishing its own
-/// reports, recording its own turns, and a secretary's view of the other workspaces (refused to
+/// reports, recording its own turns, a GitHub token for its own repository,
+/// and a secretary's view of the other workspaces (refused to
 /// any other pod), which it asks with its relay's token, and the health
 /// check.
 fn for_pods(path: &str) -> bool {
@@ -220,6 +221,7 @@ fn for_pods(path: &str) -> bool {
         || path.starts_with("/ukai.gateway.v1.WorkspaceKnowledge/")
         || path.starts_with("/ukai.gateway.v1.WorkspaceReports/")
         || path.starts_with("/ukai.gateway.v1.WorkspaceMetrics/")
+        || path.starts_with("/ukai.gateway.v1.WorkspaceGitHub/")
         || path.starts_with("/ukai.gateway.v1.WorkspaceSecretary/")
 }
 
@@ -297,6 +299,7 @@ mod tests {
     #[case::own_reports("/ukai.gateway.v1.WorkspaceReports/Publish", true)]
     #[case::own_metrics("/ukai.gateway.v1.WorkspaceMetrics/Record", true)]
     #[case::secretary("/ukai.gateway.v1.WorkspaceSecretary/PromptSession", true)]
+    #[case::own_github_token("/ukai.gateway.v1.WorkspaceGitHub/Token", true)]
     #[case::persons_knowledge("/ukai.gateway.v1.Knowledge/Approve", false)]
     #[case::schedules("/ukai.gateway.v1.Schedules/Create", false)]
     #[case::acp("/agents/a/acp", false)]

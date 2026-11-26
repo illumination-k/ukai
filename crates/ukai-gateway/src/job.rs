@@ -62,6 +62,13 @@ pub const KNOWLEDGE_ANNOTATION: &str = "ukai.dev/knowledge";
 /// workspace a running pod is.
 pub const AGENT_ANNOTATION: &str = "ukai.dev/agent";
 pub const PANE_ANNOTATION: &str = "ukai.dev/pane";
+/// The environment variable of both containers saying where to ask for a
+/// GitHub installation token (`ukai.gateway.v1.WorkspaceGitHub`), for an
+/// agent with `workspace.github_app`.
+pub const GITHUB_URL_ENV: &str = "UKAI_GITHUB_GATEWAY";
+/// `gh`'s configuration directory in the agent container, whose
+/// `hosts.yml` the relay keeps holding a fresh installation token.
+pub const GH_CONFIG_DIR: &str = "/ukai/github";
 /// The agent container's environment variable saying its agent is a
 /// secretary, for the relay to offer the secretary's tools.
 pub const SECRETARY_ENV: &str = "UKAI_SECRETARY";
@@ -157,6 +164,9 @@ pub struct Runtime {
     /// Where the pod reaches the gateway, e.g. `http://ukai-gateway`; set
     /// only when the gateway keeps knowledge, which is what pods reach it for.
     pub gateway_url: Option<String>,
+    /// Where the pod asks the gateway for GitHub tokens; set only when the
+    /// gateway has a GitHub App.
+    pub github_url: Option<String>,
 }
 
 /// A short hash of `parts`, 12 hex digits.
@@ -235,6 +245,34 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
     }
     agent_env.extend(agent.env.iter().map(|(name, value)| env(name, value)));
     agent_env.extend(secret_env(&agent.secret_env));
+    // The App's tokens, fresh from the gateway whenever git asks; the relay
+    // keeps `gh`'s in `GH_CONFIG_DIR`.
+    let github_app = agent
+        .workspace
+        .github_repository()
+        .filter(|_| agent.workspace.github_app)
+        .zip(runtime.github_url.as_deref())
+        .map(|(repository, url)| {
+            [
+                env(GITHUB_URL_ENV, url),
+                env("GIT_CONFIG_COUNT", "1"),
+                env(
+                    "GIT_CONFIG_KEY_0",
+                    &format!("credential.https://{}.helper", repository.host),
+                ),
+                env(
+                    "GIT_CONFIG_VALUE_0",
+                    &format!("!{RELAY_DIR}/ukai-relay git-credential"),
+                ),
+            ]
+        });
+    if let Some(github) = &github_app {
+        agent_env.extend(github.iter().cloned());
+        agent_env.push(env("GH_CONFIG_DIR", GH_CONFIG_DIR));
+        // The sidecar asks as the pod, with the relay's binary and token.
+        workspace_env.extend(github.iter().cloned());
+        workspace_env.push(env(RELAY_TOKEN_ENV, relay_token));
+    }
     if let Some(token) = github_token {
         agent_env.push(token);
         // `git push` (and so `gh pr create`) authenticates through `gh`.
@@ -267,6 +305,9 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         mount("home", &agent.home),
         mount("relay", RELAY_DIR),
     ];
+    if github_app.is_some() {
+        agent_mounts.push(mount("github", GH_CONFIG_DIR));
+    }
     agent_mounts.extend(agent.mounts.iter().map(|m| VolumeMount {
         name: claim_volume(&m.claim),
         mount_path: expand_home(&m.path, &agent.home),
@@ -313,6 +354,9 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         empty_dir("home"),
         empty_dir("relay"),
     ];
+    if github_app.is_some() {
+        volumes.push(empty_dir("github"));
+    }
     volumes.extend(claims.iter().map(|claim| Volume {
         name: claim_volume(claim),
         persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
@@ -371,10 +415,19 @@ pub fn job(plan: &Plan, runtime: &Runtime, relay_token: &str) -> Job {
         }),
         resources: Some(resources("50m", "128Mi", "512Mi")),
         security_context: Some(container_security()),
-        volume_mounts: Some(vec![
-            mount("workspace", "/workspace"),
-            mount("pristine", "/pristine"),
-        ]),
+        volume_mounts: Some({
+            let mut mounts = vec![
+                mount("workspace", "/workspace"),
+                mount("pristine", "/pristine"),
+            ];
+            if github_app.is_some() {
+                mounts.push(VolumeMount {
+                    read_only: Some(true),
+                    ..mount("relay", RELAY_DIR)
+                });
+            }
+            mounts
+        }),
         ..Container::default()
     };
 

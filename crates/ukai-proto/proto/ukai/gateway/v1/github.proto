@@ -1,0 +1,28 @@
+// The gateway's GitHub App: installation tokens for an agent pod's own
+// repository. See "GitHub App" in docs/design.md.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+// An agent pod asking for its own repository, with its relay's token: the
+// gateway finds the pod by it, and the repository and permissions from the
+// agent the pod's Job runs, never from the request. FAILED_PRECONDITION, an
+// agent without `workspace.github_app`; UNAVAILABLE, a gateway with no App,
+// or GitHub not answering now.
+service WorkspaceGitHub {
+  rpc Token(WorkspaceTokenRequest) returns (GitHubToken);
+}
+
+message WorkspaceTokenRequest {}
+
+// An installation token limited to one repository and the agent's
+// permissions.
+message GitHubToken {
+  string token = 1;
+  // When GitHub stops taking it, in seconds since the Unix epoch.
+  int64 expires_at = 2;
+  // The host git reaches the repository at, e.g. `github.com`.
+  string host = 3;
+  // `owner/name`.
+  string repository = 4;
+}

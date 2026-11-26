@@ -618,6 +618,8 @@ workspace = { git = "https://github.com/o/r" }
 - GitHub の token（`workspace.github_token`）はサイドカーとエージェントの両方に `GH_TOKEN` として渡す。
   エージェントは git の credential helper を `gh` に向けてあり、自分で push して pull request を作れる。
   サイドカーは snapshot をエージェントの `.git` ではなく pristine の `.git` で作る。
+  `workspace.github_app = true` なら、Secret の token の代わりに gateway の GitHub App のトークンを使う
+  （後述「GitHub App」）。
 - 作業ツリーは emptyDir で、PVC は作らない。エージェントの履歴（`~/.claude` など）を残したいときは既存の
   PVC を `mounts` で重ねる。
 - snapshot: サイドカーが pristine の `.git` とエージェントの作業ツリーから一時 index で tree を作り、
@@ -629,6 +631,60 @@ workspace = { git = "https://github.com/o/r" }
 `ghcr.io/illumination-k/ukai-runtime` の `latest` とコミットのタグで公開し、base はそれを使う）、`images/dev` が
 このリポジトリを開発するエージェント用のイメージ（`mise.toml` のツール群、desktop のビルド依存、
 仮想ディスプレイ入り）。
+
+### GitHub App
+
+ワークスペースの GitHub の資格情報を、Secret に置いた長命の token（`workspace.github_token`）から、gateway
+が持つ GitHub App のインストールトークンに替える。トークンは 1 時間で切れ、そのワークスペースの
+リポジトリ 1 つと、エージェントごとに決めた権限にしか効かない。その上で、App が読めるリポジトリの状況と、
+pull request とワークスペースの対応を gateway が中継してアプリに出す。
+
+```toml
+[agents.claude.workspace]
+git = "https://github.com/o/r" # https の URL（credential helper が https のため）
+github_app = true # github_token とは併用しない
+# 既定は contents / pull_requests の write。read / write のみ
+github_permissions = { contents = "write", pull_requests = "write", issues = "read" }
+```
+
+- **App**: gateway の環境変数 `UKAI_GITHUB_APP_ID` と `UKAI_GITHUB_APP_PRIVATE_KEY`（PEM そのもの。
+  Secret から）、GitHub Enterprise Server なら `UKAI_GITHUB_API_URL`。`gateway.toml` には書かない
+  （gateway 自身の資格情報で、Pod の spec には出ないため）。`github_app` のエージェントがあるのに App が
+  なければ gateway は起動しない。App に要る権限は Metadata（read）と、エージェントの
+  `github_permissions` の和。
+- **発行**（段階 1、済み。gateway の `github`）: App の秘密鍵で RS256 の JWT（9 分、1 分さかのぼる）を
+  作り、`GET /repos/{o}/{r}/installation` でインストールを引き、`POST /app/installations/{id}/access_tokens`
+  に `repositories = [r]` とエージェントの権限を付けて発行する。（リポジトリ、権限）ごとに、切れる
+  10 分前まで使い回す（同じリポジトリの Pod は 1 つのトークンを共有する）。インストールがなければ
+  FAILED_PRECONDITION で「App が入っていない」と返す。鍵もトークンもログに出さない。
+- **Pod への渡し方**: Pod 向けの gRPC `ukai.gateway.v1.WorkspaceGitHub.Token`（relay のトークンで Pod を
+  割り出し、リポジトリと権限は要求ではなく Pod のエージェントの設定から取る。`access::guard` の Pod に
+  開いた側）。Pod には長命の資格情報を置かない。
+  - git: 両方のコンテナで `credential.https://<host>.helper` を `ukai-relay git-credential` に向ける
+    （`GIT_CONFIG_*`）。git が要るたびに gateway に聞き、リポジトリのホストへの https の `get` にだけ
+    `x-access-token` とトークンで答える。サイドカーは relay のバイナリを読み取り専用で mount し、relay の
+    トークンを持つ（clone と snapshot の push のため。エージェントの `.git` で git を走らせないのは
+    今までどおり）。
+  - `gh`: トークンを環境変数（`GH_TOKEN`）でしか受けず、プロセスの外から差し替えられないので、relay が
+    `GH_CONFIG_DIR`（エージェントだけの emptyDir）の `hosts.yml` を、切れる 5 分前に書き直し続ける
+    （`ukai_relay::github`。0600 で、丸ごと置き換え）。
+- **リポジトリの状況**（段階 2、未実装）: アプリ向けの `ukai.gateway.v1.GitHub.Repository`（gateway の
+  トークン、エージェント。Pod は起動しない）。gateway が読み取り専用の権限（metadata・pull_requests・
+  issues・checks を read）で別に発行したトークンで、既定ブランチ、開いている PR と Issue の数、既定
+  ブランチの先頭のチェックの状態、最新のリリースを返す。60 秒持つ。アプリはサイドバーのエージェントの
+  詳細に出し、メトリクス pane と同じく開いている間だけ読み直す。手元の stdio エージェントの
+  プロジェクト（gateway を通らない）は対象外。
+- **PR とワークスペース**（段階 3、未実装）: `GitHub.PullRequests`（同じく）が開いている PR を、head の
+  ブランチ・番号・題・下書きか・チェックとレビューの状態付きで返し、それぞれに「そのブランチにいる
+  ワークスペース」を添える。動いている Pod は relay の `GET /checkout`（今のブランチと HEAD）に聞き、
+  止まっているワークスペースは snapshot（`refs/ukai/wip/<id>`）の `Ukai-Branch` trailer を API で読む
+  （ナレッジのような記録は要らない）。アプリはワークスペースの詳細にその PR を、PR の一覧から
+  ワークスペースへ移れるようにする（開いている pane があればそこ、なければ新しいタブで
+  `session/load`）。PR からまだないワークスペースを始める（`ref` を PR の head にした pane の
+  ワークスペース）には Plan に ref の上書きが要るので、その次。
+- **出来事**（段階 4、未実装）: App の webhook を gateway の `POST /hooks/github` で受け
+  （`UKAI_GITHUB_WEBHOOK_SECRET` で署名を検証）、段階 2・3 の持ち分を捨てて読み直させ、秘書の「外界」の
+  トリガーにも使う（`/hooks/github/<schedule>` はこの 1 つにまとめる）。本文はデータとして扱う。
 
 ## プロジェクト設定 `ukai.toml`
 

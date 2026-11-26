@@ -95,6 +95,22 @@ spec:
                   name: ukai-store
                   key: token
                   optional: true
+            # The GitHub App whose installation tokens the pods of agents
+            # with `workspace.github_app` get (see "GitHub App" in
+            # docs/design.md): `kubectl create secret generic ukai-github-app
+            # --from-literal=app-id=<id> --from-file=private-key=<app>.pem`.
+            - name: UKAI_GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-github-app
+                  key: app-id
+                  optional: true
+            - name: UKAI_GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ukai-github-app
+                  key: private-key
+                  optional: true
             # The copy of the workspaces' reports (rustfs.yaml), or any S3
             # bucket through the standard `AWS_*` variables.
             - name: UKAI_REPORTS_BUCKET

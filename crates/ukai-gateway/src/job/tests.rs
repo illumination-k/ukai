@@ -35,6 +35,7 @@ fn json(plan: &Plan) -> Value {
     let runtime = Runtime {
         relay_image: "registry.example.com/ukai-runtime:1".into(),
         gateway_url: Some("http://ukai-gateway".into()),
+        github_url: Some("http://ukai-gateway".into()),
     };
     serde_json::to_value(job(plan, &runtime, "s3cret")).unwrap_or_default()
 }
@@ -99,6 +100,67 @@ fn the_github_token_reaches_the_sidecar_and_the_agent() {
     assert!(env_names(agent).contains(&"GIT_CONFIG_VALUE_0"));
     assert!(env_names(agent).contains(&"API_KEY"));
     assert!(!env_names(sidecar).contains(&"API_KEY"));
+}
+
+fn app_agent() -> KubernetesAgent {
+    let src = r#"
+        [agents.k]
+        image = "registry.example.com/agent:latest"
+        command = "claude-agent-acp"
+        workspace = { git = "https://github.com/org/repo", github_app = true }
+    "#;
+    match crate::config::parse(src).map(|mut config| config.agents.remove("k")) {
+        Ok(Some(agent)) => agent,
+        other => panic!("expected agent `k`, got {other:?}"),
+    }
+}
+
+fn env_value<'a>(container: &'a Value, name: &str) -> Option<&'a str> {
+    container["env"]
+        .as_array()?
+        .iter()
+        .find(|e| e["name"] == name)?["value"]
+        .as_str()
+}
+
+#[test]
+fn the_github_app_is_asked_for_tokens_by_both_containers() {
+    let job = json(&Plan::new("k", app_agent(), "alice", "team", None));
+    let sidecar = container(&job, "/spec/template/spec/initContainers", "workspace");
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    for container in [sidecar, agent] {
+        assert_eq!(
+            env_value(container, "UKAI_GITHUB_GATEWAY"),
+            Some("http://ukai-gateway")
+        );
+        assert_eq!(
+            env_value(container, "GIT_CONFIG_KEY_0"),
+            Some("credential.https://github.com.helper")
+        );
+        assert_eq!(
+            env_value(container, "GIT_CONFIG_VALUE_0"),
+            Some("!/ukai/bin/ukai-relay git-credential")
+        );
+        assert_eq!(env_value(container, "UKAI_RELAY_TOKEN"), Some("s3cret"));
+        assert!(!env_names(container).contains(&"GH_TOKEN"));
+    }
+    assert_eq!(env_value(agent, "GH_CONFIG_DIR"), Some("/ukai/github"));
+    // The sidecar runs the relay's binary but cannot change it.
+    let relay = sidecar["volumeMounts"]
+        .as_array()
+        .and_then(|mounts| mounts.iter().find(|m| m["name"] == "relay"));
+    assert_eq!(relay.map(|m| &m["readOnly"]), Some(&json!(true)));
+}
+
+#[test]
+fn without_the_app_no_container_asks_for_tokens() {
+    let job = json(&plan(""));
+    let sidecar = container(&job, "/spec/template/spec/initContainers", "workspace");
+    let agent = container(&job, "/spec/template/spec/containers", "agent");
+    for container in [sidecar, agent] {
+        assert!(!env_names(container).contains(&"UKAI_GITHUB_GATEWAY"));
+    }
+    assert!(!env_names(sidecar).contains(&"UKAI_RELAY_TOKEN"));
 }
 
 #[test]

@@ -10,6 +10,11 @@
 //! project, and with a previews file it lets the agent open its servers in a
 //! pane.
 //!
+//! `ukai-relay git-credential <get|store|erase>` is git's credential helper
+//! in a pod whose agent uses the gateway's GitHub App (`ukai_relay::github`):
+//! it answers `get` for the repository's host with an installation token
+//! from the gateway at `UKAI_GITHUB_GATEWAY`, asked with `UKAI_RELAY_TOKEN`.
+//!
 //! In a gateway's pod, `UKAI_GATEWAY_URL` is where the gateway is reached.
 //! There the relay is PID 1, so it runs itself again as its child and stays
 //! as that child's init (`ukai_relay::init`).
@@ -52,6 +57,10 @@ struct Cli {
     /// other workspaces.
     #[arg(long, env = "UKAI_SECRETARY")]
     secretary: bool,
+    /// The gateway minting GitHub tokens for this pod's repository, which
+    /// the relay keeps `gh` holding a fresh one of in `GH_CONFIG_DIR`.
+    #[arg(long, env = ukai_relay::github::GATEWAY_ENV)]
+    github_gateway: Option<String>,
     /// The agent and its arguments.
     #[arg(last = true, required = true, value_name = "AGENT")]
     command: Vec<String>,
@@ -81,6 +90,12 @@ enum Mode {
         /// Offer the secretary's tools, through the gateway.
         #[arg(long)]
         secretary: bool,
+    },
+    /// Answer git's credential helper protocol with a GitHub token from the
+    /// gateway.
+    GitCredential {
+        /// What git asks: `get`, `store`, or `erase`; only `get` is answered.
+        action: String,
     },
 }
 
@@ -121,6 +136,9 @@ async fn serve(cli: Cli) -> ExitCode {
     let token = std::env::var(ukai_relay::mcp::TOKEN_ENV)
         .ok()
         .filter(|t| !t.is_empty());
+    if let Some(Mode::GitCredential { action }) = cli.mode {
+        return git_credential(&action, token.as_deref()).await;
+    }
     if let Some(Mode::Mcp {
         root,
         gateway,
@@ -197,11 +215,66 @@ async fn serve(cli: Cli) -> ExitCode {
         args: command.collect(),
         snapshot_trigger: cli.snapshot_trigger,
         secretary: cli.secretary,
+        github: cli.github_gateway.filter(|url| !url.is_empty()),
     };
     match run(options).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(%error, "relay failed");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// git's credential helper: a token for the repository's host on `get`,
+/// and nothing for anything else, so git asks its next helper.
+async fn git_credential(action: &str, token: Option<&str>) -> ExitCode {
+    use std::io::{Read, Write};
+    use ukai_relay::github;
+    if action != "get" {
+        return ExitCode::SUCCESS;
+    }
+    let mut input = String::new();
+    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+        tracing::error!(%error, "cannot read what git asks");
+        return ExitCode::FAILURE;
+    }
+    let gateway = std::env::var(github::GATEWAY_ENV)
+        .ok()
+        .filter(|url| !url.is_empty());
+    let (Some(gateway), Some(token)) = (gateway, token) else {
+        tracing::error!(
+            "no GitHub App in this pod: {} and {} are not set",
+            github::GATEWAY_ENV,
+            ukai_relay::mcp::TOKEN_ENV
+        );
+        return ExitCode::FAILURE;
+    };
+    let endpoint = match ukai_acp::github::TokenEndpoint::for_workspace(&gateway, token) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            tracing::error!(%error, "cannot reach the gateway for a GitHub token");
+            return ExitCode::FAILURE;
+        }
+    };
+    let minted = match endpoint.token().await {
+        Ok(minted) => minted,
+        Err(error) => {
+            tracing::error!(%error, "cannot get a GitHub token");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !github::answers(&github::asked(&input), &minted.host) {
+        return ExitCode::SUCCESS;
+    }
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(github::credential(&minted).as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(%error, "cannot answer git");
             ExitCode::FAILURE
         }
     }
@@ -254,6 +327,12 @@ mod tests {
         assert!(
             matches!(cli.mode, Some(Mode::Mcp { gateway: Some(url), .. }) if url == "http://ukai-gateway")
         );
+    }
+
+    #[test]
+    fn git_credential_needs_no_agent() {
+        let cli = parse(&["git-credential", "get"]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(cli.mode, Some(Mode::GitCredential { action }) if action == "get"));
     }
 
     #[rstest]

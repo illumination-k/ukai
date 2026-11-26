@@ -10,6 +10,11 @@
 image = "registry.example.com/agent:latest"
 command = "claude-agent-acp"
 workspace = { git = "https://github.com/org/repo.git" }
+# GitHub credentials for the workspace: installation tokens of the gateway's
+# GitHub App (UKAI_GITHUB_APP_* in gateway.yaml), limited to this repository
+# and these permissions (default: contents and pull_requests, write), or a
+# long-lived token from a Secret instead (`github_token = "<secret>/<key>"`).
+# workspace = { git = "https://github.com/org/repo.git", github_app = true, github_permissions = { contents = "write", pull_requests = "write" } }
 # Agents naming the same project share its knowledge, whatever repository
 # each works on; without it, an agent's knowledge is its repository's.
 # knowledge = "my-project"

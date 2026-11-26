@@ -43,6 +43,25 @@ pub struct Options {
     /// and prompt the other workspaces, which the gateway answers only for
     /// a secretary's pod.
     pub secretary: bool,
+    /// The gateway minting GitHub tokens for the pod's repository: with
+    /// `token` and `GH_CONFIG_DIR`, the relay keeps `gh` holding a fresh one
+    /// (`crate::github`).
+    pub github: Option<String>,
+}
+
+/// Start keeping `gh`'s token fresh, when the pod's agent uses the
+/// gateway's GitHub App.
+fn keep_gh_fresh(options: &Options) {
+    let dir = std::env::var_os("GH_CONFIG_DIR").filter(|dir| !dir.is_empty());
+    let (Some(url), Some(token), Some(dir)) = (&options.github, &options.token, dir) else {
+        return;
+    };
+    match ukai_acp::github::TokenEndpoint::for_workspace(url, token) {
+        Ok(endpoint) => {
+            tokio::spawn(crate::github::keep_gh_fresh(endpoint, dir.into()));
+        }
+        Err(error) => tracing::warn!(%error, "cannot reach the gateway for GitHub tokens"),
+    }
 }
 
 enum Event {
@@ -67,6 +86,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         rx: mut from_agent,
         tx: to_agent,
     } = agent_channel;
+
+    keep_gh_fresh(&options);
 
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let next_conn = Arc::new(AtomicU64::new(1));
