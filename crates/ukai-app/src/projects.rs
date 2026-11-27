@@ -83,7 +83,8 @@ pub struct AppSignals {
 impl AppSignals {
     /// The app's state as it starts, from what was saved.
     pub fn new(state: AppState, configs: HashMap<ProjectId, Result<Config, String>>) -> Self {
-        // Owned by the root scope, as a session's own signals are: the tasks
+        // Owned by the root scope, where a session's own signals are made
+        // too (which a `Lease` frees, in `agent_pane`): the tasks
         // that follow sessions run there (`spawn_forever`), and a signal
         // used above its owner is warned about at every use in a dev build,
         // which for a transcript is every chunk.

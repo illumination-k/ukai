@@ -2,7 +2,6 @@
 
 use std::rc::Rc;
 
-use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use ukai_acp::{
     Checkout, FsRoot, PaneWorkspace, RestartEndpoint, SessionEvent, SessionEvents, SessionHandle,
@@ -11,7 +10,7 @@ use ukai_acp::{
 use ukai_core::config::ApplyDefaults;
 use ukai_core::{Alert, PaneContent, PaneId, Status, Transcript};
 
-use super::{AgentSession, Composer, Sessions, branch};
+use super::{AgentSession, Composer, Lease, Sessions, branch};
 use crate::alert;
 use crate::projects::{AppSignals, ProjectContext, project_context};
 use crate::voice::DictationOwner;
@@ -40,16 +39,18 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
     else {
         return;
     };
-    // In the root scope, where the task below runs: see `AppSignals::new`.
-    let mut transcript = Signal::new_in_scope(Transcript::default(), ScopeId::ROOT);
-    let (composer, unread, dictation) = sessions.peek().get(&pane).map_or_else(
+    // A reconnect keeps the pane's composer and starts a transcript.
+    let (lease, dictation) = sessions.peek().get(&pane).map_or_else(
         || {
-            let composer = Composer::new();
-            let owner = Rc::new(DictationOwner(composer.dictation));
-            (composer, Signal::new_in_scope(false, ScopeId::ROOT), owner)
+            let lease = Lease::new();
+            let owner = Rc::new(DictationOwner(lease.composer().dictation));
+            (lease, owner)
         },
-        |session| (session.composer, session.unread, session.dictation.clone()),
+        |session| (session.lease.reconnected(), session.dictation.clone()),
     );
+    let mut transcript = lease.transcript();
+    let composer = lease.composer();
+    let unread = lease.unread();
     let restore = if resume { session } else { None };
     let source = match projects.peek().get(&project) {
         Some(project) => format!("{agent} · {}", project.name()),
@@ -67,14 +68,24 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
     let handle = match started {
         Ok((handle, mut events)) => {
             let window = dioxus::desktop::window();
-            let control = handle.clone();
-            spawn_forever(async move {
+            // The events end once the pane's entry drops the handle, so
+            // this holds none: only the lease, for the events still to come.
+            lease.spawn(async move {
                 while let Some(event) = events.recv().await {
+                    // The app left this session itself, to restart its
+                    // agent, and the transcript says so already.
+                    if matches!(event, SessionEvent::Closed { error: None })
+                        && left(sessions, pane, transcript)
+                    {
+                        break;
+                    }
                     if let SessionEvent::Ready { session_id, .. } = &event {
                         layout.write().record_session(pane, session_id.clone());
                     }
-                    if let Some((id, value)) = defaults.on_event(&event) {
-                        control.set_config(id, value);
+                    if let Some((id, value)) = defaults.on_event(&event)
+                        && let Some(handle) = handle_of(sessions, pane, transcript)
+                    {
+                        handle.set_config(id, value);
                     }
                     let ended = matches!(event, SessionEvent::TurnEnded { .. });
                     let raised = Alert::of(&event);
@@ -109,8 +120,31 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
             checkout,
             unread,
             dictation,
+            lease,
         },
     );
+}
+
+/// Whether `pane` still shows `transcript` but has dropped its handle.
+fn left(sessions: Sessions, pane: PaneId, transcript: Signal<Transcript>) -> bool {
+    sessions
+        .peek()
+        .get(&pane)
+        .is_some_and(|session| session.transcript == transcript && session.handle.is_none())
+}
+
+/// The handle of the session showing in `transcript`, while it is still
+/// `pane`'s: a reconnect replaces the pane's session, and closing ends it.
+fn handle_of(
+    sessions: Sessions,
+    pane: PaneId,
+    transcript: Signal<Transcript>,
+) -> Option<SessionHandle> {
+    sessions
+        .peek()
+        .get(&pane)
+        .filter(|session| session.transcript == transcript)
+        .and_then(|session| session.handle.clone())
 }
 
 /// Where `pane`'s agent works: what its session found, else resolved anew.
@@ -194,7 +228,8 @@ pub(super) fn restart_to_update(app: AppSignals, pane: PaneId, latest: String) {
             RestartEndpoint::resolve(&spec, ukai_acp::system_lookup, workspace.as_ref())
                 .map_err(|e| e.to_string())
         });
-    let transcript = app.sessions.peek().get(&pane).map(|s| s.transcript);
+    let lease = app.sessions.peek().get(&pane).map(|s| s.lease.clone());
+    let transcript = lease.as_ref().map(Lease::transcript);
     let report = move |event: SessionEvent| {
         if let Some(mut transcript) = transcript {
             transcript.write().apply(event);
@@ -214,14 +249,20 @@ pub(super) fn restart_to_update(app: AppSignals, pane: PaneId, latest: String) {
             report(SessionEvent::Preparing {
                 message: "Restarting the agent's workspace".to_owned(),
             });
-            spawn_forever(async move {
+            let restart = async move {
                 match endpoint.restart().await {
                     Ok(()) => connect_expecting(app, pane, false, Some(latest)),
                     Err(error) => report(SessionEvent::Closed {
                         error: Some(format!("could not restart the agent: {error}")),
                     }),
                 }
-            });
+            };
+            match lease {
+                Some(lease) => lease.spawn(restart),
+                None => {
+                    dioxus::core::spawn_forever(restart);
+                }
+            }
         }
         Err(error) => report(SessionEvent::Closed {
             error: Some(format!("could not restart the agent: {error}")),
@@ -241,11 +282,7 @@ fn follow_queued(
         return;
     };
     // A reconnect replaces the pane's session; this transcript's handle is gone then.
-    let handle = sessions
-        .peek()
-        .get(&pane)
-        .filter(|session| session.transcript == transcript)
-        .and_then(|session| session.handle.clone());
+    let handle = handle_of(sessions, pane, transcript);
     let idle = transcript.peek().status == Status::Idle;
     if idle && handle.is_some_and(|handle| handle.prompt(steer.prompt())) {
         let sent = steer.shown();

@@ -1,9 +1,16 @@
 //! Agent panes: one ACP session per pane, kept outside the component tree.
 //!
-//! Sessions, transcripts, and drafts live in [`Sessions`] (app-scoped
-//! signals keyed by pane id) rather than in component state, so that the
-//! rest of the app reaches them and they never depend on a mount. Closing a pane drops its entry,
-//! and with it the session.
+//! Sessions, transcripts, and drafts live in [`Sessions`] (signals keyed by
+//! pane id) rather than in component state, so that the rest of the app
+//! reaches them and they never depend on a mount. Closing a pane drops its
+//! entry, and with it the session.
+//!
+//! No scope owns a session's signals: a [`Lease`] does, and frees them when
+//! its last clone goes. The pane's entry holds one, and so does whatever
+//! may still read or write the signals once the entry is gone: work that
+//! outlives the pane ([`Lease::spawn`]) and the components showing the
+//! session ([`use_lease`]). Reading a freed signal panics, so nothing keeps
+//! a session's signal across an `await` or a render without its lease.
 
 mod branch;
 mod composer;
@@ -13,9 +20,15 @@ mod history;
 mod session;
 mod transcript;
 
+#[cfg(test)]
+mod lease_tests;
+
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::Location;
 use std::rc::Rc;
 
+use dioxus::core::{Runtime, spawn_forever};
 use dioxus::prelude::*;
 use ukai_acp::{Attachment, Checkout, SessionHandle};
 use ukai_core::composer::{self as suggest, Files};
@@ -41,6 +54,121 @@ pub struct AgentSession {
     pub unread: Signal<bool>,
     /// Ends the composer's recording once no session holds the composer.
     dictation: Rc<DictationOwner>,
+    /// Frees `transcript`, `composer`, and `unread` once nothing holds them.
+    lease: Lease,
+}
+
+/// A signal no scope owns: it lives until `manually_drop`.
+#[track_caller]
+fn unowned<T: 'static>(value: T) -> Signal<T> {
+    let caller = Location::caller();
+    Runtime::current().in_scope(ScopeId::ROOT, || Signal::leak_with_caller(value, caller))
+}
+
+/// Frees a connection's transcript.
+struct TranscriptOwner(Signal<Transcript>);
+
+impl Drop for TranscriptOwner {
+    fn drop(&mut self) {
+        self.0.manually_drop();
+    }
+}
+
+/// Frees what a pane keeps across its connections.
+struct PaneOwner {
+    composer: Composer,
+    unread: Signal<bool>,
+}
+
+impl Drop for PaneOwner {
+    fn drop(&mut self) {
+        let Composer {
+            draft,
+            attachments,
+            uploading,
+            review,
+            error,
+            dictation,
+            mentions,
+            files,
+        } = self.composer;
+        draft.manually_drop();
+        attachments.manually_drop();
+        uploading.manually_drop();
+        review.manually_drop();
+        error.manually_drop();
+        dictation.manually_drop();
+        mentions.manually_drop();
+        files.manually_drop();
+        self.unread.manually_drop();
+    }
+}
+
+/// Keeps a session's signals: its transcript, which a reconnect replaces,
+/// and its composer and unread mark, which last as long as the pane. Each
+/// is freed when the last lease on it goes.
+#[derive(Clone)]
+pub struct Lease {
+    transcript: Rc<TranscriptOwner>,
+    pane: Rc<PaneOwner>,
+}
+
+impl PartialEq for Lease {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.transcript, &other.transcript) && Rc::ptr_eq(&self.pane, &other.pane)
+    }
+}
+
+impl Lease {
+    /// A new pane's: an empty transcript and composer.
+    fn new() -> Self {
+        Self {
+            transcript: Rc::new(TranscriptOwner(unowned(Transcript::default()))),
+            pane: Rc::new(PaneOwner {
+                composer: Composer::new(),
+                unread: unowned(false),
+            }),
+        }
+    }
+
+    /// The same pane's after a reconnect: an empty transcript, and the
+    /// composer as it is.
+    fn reconnected(&self) -> Self {
+        Self {
+            transcript: Rc::new(TranscriptOwner(unowned(Transcript::default()))),
+            pane: self.pane.clone(),
+        }
+    }
+
+    fn transcript(&self) -> Signal<Transcript> {
+        self.transcript.0
+    }
+
+    fn composer(&self) -> Composer {
+        self.pane.composer
+    }
+
+    fn unread(&self) -> Signal<bool> {
+        self.pane.unread
+    }
+
+    /// Run `work` to its end whatever becomes of the pane, keeping the
+    /// session's signals until then for it to write.
+    fn spawn(&self, work: impl Future<Output = ()> + 'static) {
+        let lease = self.clone();
+        spawn_forever(async move {
+            work.await;
+            drop(lease);
+        });
+    }
+}
+
+/// Keep the session this component shows until it shows another or
+/// unmounts: the event handlers of a render hold its signals that long.
+/// Call it on every render, with `None` when the pane has no session.
+fn use_lease(lease: Option<&Lease>) {
+    let held = use_hook(|| Rc::new(RefCell::new(None)));
+    held.replace(lease.cloned());
 }
 
 /// What the user is putting together for the next prompt. It outlives a
@@ -65,14 +193,14 @@ struct Composer {
 impl Composer {
     fn new() -> Self {
         Self {
-            draft: Signal::new_in_scope(String::new(), ScopeId::ROOT),
-            attachments: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
-            uploading: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
-            review: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
-            error: Signal::new_in_scope(None, ScopeId::ROOT),
-            dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::ROOT),
-            mentions: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
-            files: Signal::new_in_scope(Files::Unread, ScopeId::ROOT),
+            draft: unowned(String::new()),
+            attachments: unowned(Vec::new()),
+            uploading: unowned(Vec::new()),
+            review: unowned(Vec::new()),
+            error: unowned(None),
+            dictation: unowned(Dictation::Idle),
+            mentions: unowned(Vec::new()),
+            files: unowned(Files::Unread),
         }
     }
 
@@ -145,10 +273,17 @@ pub fn stop_turn(sessions: Sessions, pane: PaneId) {
 
 /// Start or stop dictating into `pane`'s composer.
 pub fn toggle_dictation(sessions: Sessions, pane: PaneId, voice: &Voice) {
-    let Some(composer) = sessions.peek().get(&pane).map(|session| session.composer) else {
+    let Some(lease) = sessions.peek().get(&pane).map(|s| s.lease.clone()) else {
         return;
     };
-    voice::toggle(voice, composer.dictation, composer.draft, composer.error);
+    let composer = lease.composer();
+    voice::toggle(
+        voice,
+        composer.dictation,
+        composer.draft,
+        composer.error,
+        lease,
+    );
 }
 
 /// Header status of an agent pane: css class, label, and the agent's own name.
@@ -187,12 +322,11 @@ pub fn session_title(sessions: Sessions, pane: PaneId) -> Option<String> {
 }
 
 /// The comments on diff lines waiting in agent `pane`'s composer for its
-/// next prompt.
-pub fn review_of(app: AppSignals, pane: PaneId) -> Option<Signal<Vec<ReviewComment>>> {
-    app.sessions
-        .read()
-        .get(&pane)
-        .map(|session| session.composer.review)
+/// next prompt, kept while the component shows them.
+pub fn use_review(app: AppSignals, pane: Option<PaneId>) -> Option<Signal<Vec<ReviewComment>>> {
+    let lease = pane.and_then(|pane| app.sessions.read().get(&pane).map(|s| s.lease.clone()));
+    use_lease(lease.as_ref());
+    lease.map(|lease| lease.composer().review)
 }
 
 /// Whether agent `pane` is connected and between turns, so [`ask`] reaches it.
@@ -280,6 +414,9 @@ mod tests {
     /// How many times [`Header`] rendered.
     type Renders = Rc<Cell<usize>>;
 
+    /// The transcript of the session [`Root`] makes.
+    type Shown = Rc<Cell<Option<Signal<Transcript>>>>;
+
     /// What a pane's header reads of its session.
     #[component]
     fn Header() -> Element {
@@ -291,19 +428,22 @@ mod tests {
 
     #[component]
     fn Root() -> Element {
-        let transcript = use_context::<Signal<Transcript>>();
+        let shown = use_context::<Shown>();
         let mut app = use_context_provider(|| AppSignals::new(AppState::default(), HashMap::new()));
         use_hook(|| {
-            let composer = Composer::new();
+            let lease = Lease::new();
+            let composer = lease.composer();
+            shown.set(Some(lease.transcript()));
             app.sessions.write().insert(
                 0,
                 AgentSession {
                     handle: None,
-                    transcript,
+                    transcript: lease.transcript(),
                     composer,
                     checkout: None,
-                    unread: Signal::new_in_scope(false, ScopeId::ROOT),
+                    unread: lease.unread(),
                     dictation: Rc::new(DictationOwner(composer.dictation)),
+                    lease,
                 },
             );
         });
@@ -318,11 +458,13 @@ mod tests {
     fn what_shows_a_sessions_state_does_not_render_with_every_chunk() {
         let renders = Renders::default();
         let mut dom = VirtualDom::new(Root);
-        let mut transcript =
-            dom.in_runtime(|| Signal::new_in_scope(Transcript::default(), ScopeId::ROOT));
+        let shown = Shown::default();
         dom.provide_root_context(renders.clone());
-        dom.provide_root_context(transcript);
+        dom.provide_root_context(shown.clone());
         dom.rebuild_in_place();
+        let Some(mut transcript) = shown.get() else {
+            panic!("the root made no session");
+        };
         let mut apply = |event: SessionEvent| {
             dom.in_runtime(|| transcript.write().apply(event));
             // The memo recomputes in a task, then the header renders.

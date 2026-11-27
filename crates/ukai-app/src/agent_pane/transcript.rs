@@ -7,10 +7,9 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use ukai_core::{Entry, PaneId, Queued, Status, Transcript};
 
-use super::Composer;
 use super::entry::{Attachments, EntryView};
 use super::session::restart_to_update;
-use super::use_transcript;
+use super::{Composer, use_lease, use_transcript};
 use crate::projects::AppSignals;
 
 #[component]
@@ -22,7 +21,7 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
         app.sessions
             .read()
             .get(&pane)
-            .map(|session| (session.transcript, session.composer))
+            .map(|session| (session.transcript, session.composer, session.lease.clone()))
     });
     // Not the entries: those are for `Entries` to render with every chunk.
     let shown = use_transcript(pane, |transcript| {
@@ -34,7 +33,9 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
             transcript.queued.clone(),
         )
     });
-    let Some((mut transcript, composer)) = current() else {
+    let current = current();
+    use_lease(current.as_ref().map(|(_, _, lease)| lease));
+    let Some((mut transcript, composer, _)) = current else {
         return rsx! {};
     };
     let Some((status, awaiting, empty, update, steer)) = shown else {

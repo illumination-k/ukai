@@ -9,8 +9,8 @@ use ukai_acp::{FileDiff, ToolStatus};
 use ukai_core::report::ReportKind;
 use ukai_core::{Entry, PaneContent, PaneId, ProjectId, ReportSource, Sent, review, shell};
 
-use super::review_of;
 use super::transcript::{pages, use_shared};
+use super::use_review;
 use crate::diff_view::DiffLines;
 use crate::icons::{Icon, Svg};
 use crate::layout::{launch_target, open_report};
@@ -416,7 +416,7 @@ const MAX_DIFF_LINES: usize = 400;
 #[component]
 fn DiffView(pane: PaneId, diff: FileDiff) -> Element {
     let app = use_context::<AppSignals>();
-    let Some(review) = review_of(app, pane) else {
+    let Some(review) = use_review(app, Some(pane)) else {
         return rsx! {};
     };
     let path = shown_path(app, pane, &diff.path);
