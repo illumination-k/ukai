@@ -16,7 +16,7 @@ use ukai_core::recall::{self, Recall};
 use ukai_core::{PaneId, Queued, Sent, Status, Transcript, review, shell, slash, usage_label};
 
 use super::config::ConfigControls;
-use super::{Composer, Pending, stop_turn};
+use super::{Composer, Pending, stop_turn, use_transcript};
 use crate::clipboard::{self, Pasted};
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
@@ -45,6 +45,16 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
             .map(|session| session.composer.draft.read().clone())
             .unwrap_or_default()
     });
+    // Read apart from the transcript, which changes with every chunk.
+    let shown = use_transcript(pane, |transcript| {
+        (
+            transcript.status.clone(),
+            transcript.prompt_caps.steering,
+            transcript.config.clone(),
+            transcript.usage.clone(),
+        )
+    });
+    let commands = use_transcript(pane, |transcript| transcript.commands.clone());
     let Some(session) = app.sessions.read().get(&pane).cloned() else {
         return rsx! {};
     };
@@ -77,14 +87,14 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
     let attach_checkout = checkout.clone();
     let paste_checkout = checkout.clone();
     let pick_checkout = checkout.clone();
-    let status = transcript.read().status.clone();
+    let Some((status, steering, config, usage)) = shown else {
+        return rsx! {};
+    };
     let busy = status == Status::Busy;
     // A message sent while a turn runs steers it: it joins the turn, or for
     // an agent that cannot take that, the turn stops and the message follows.
     let writable = status == Status::Idle || busy;
-    let steering = transcript.read().prompt_caps.steering;
     let has_extras = !composer.review.read().is_empty() || !composer.attachments.read().is_empty();
-    let config = transcript.read().config.clone();
     let shell_mode = draft.read().trim_start().starts_with('!');
     let card_class = match (writable, dropping(), shell_mode) {
         (_, true, _) => "composer-card dropping",
@@ -93,14 +103,18 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
         (false, false, _) => "composer-card disabled",
     };
     let send_hint = shortcuts.keymap.hint(Action::Send);
-    let usage = transcript.read().usage.as_ref().map(|usage| {
+    let usage = usage.as_ref().map(|usage| {
         (
             usage_label(usage),
             format!("{} of {} context tokens in use", usage.used, usage.size),
         )
     });
     let suggestions = if writable && !dismissed() {
-        Suggestions::of(&draft.read(), &transcript.read().commands, &files.read())
+        Suggestions::of(
+            &draft.read(),
+            commands.as_deref().unwrap_or_default(),
+            &files.read(),
+        )
     } else {
         Suggestions::None
     };

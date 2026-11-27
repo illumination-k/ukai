@@ -1,3 +1,4 @@
+use proptest::prelude::*;
 use rstest::rstest;
 
 use super::*;
@@ -263,4 +264,146 @@ fn bare_urls_link_inside_nested_blocks() {
             )]
         )]
     );
+}
+
+/// What `stream` makes of `source`: the nodes of its parts, then the rest.
+fn through(stream: &mut Stream, source: &str) -> Vec<Node> {
+    let rest = stream.parse(source);
+    let mut nodes: Vec<Node> = stream.parts().iter().flat_map(|part| parse(part)).collect();
+    nodes.extend(rest);
+    nodes
+}
+
+/// A source of `blocks` paragraphs.
+fn paragraphs(blocks: usize) -> String {
+    (0..blocks)
+        .map(|block| format!("paragraph {block}\n\n"))
+        .collect()
+}
+
+#[test]
+fn a_stream_sets_aside_the_blocks_that_stand() {
+    let mut stream = Stream::default();
+    let mut source = paragraphs(PART_BLOCKS);
+    // The last block may still grow, so it is none of a part's.
+    assert_eq!(stream.parse(&source).len(), PART_BLOCKS);
+    assert!(stream.parts().is_empty());
+
+    source.push_str("- one\n");
+    assert_eq!(stream.parse(&source), parse("- one\n"));
+    let parts = stream.parts().to_vec();
+    assert_eq!(parts, [paragraphs(PART_BLOCKS).into()]);
+
+    // Nor are the blocks before the last, while they are too few.
+    source.push_str("- two\n\nsecond");
+    assert_eq!(stream.parse(&source), parse("- one\n- two\n\nsecond"));
+    assert!(Rc::ptr_eq(&stream.parts()[0], &parts[0]));
+    assert_eq!(stream.parts().len(), 1);
+}
+
+#[rstest]
+// A reference defined later turns earlier text into a link.
+#[case::reference("see [docs]\n\n", "[docs]: https://example.com\n")]
+// Raw HTML is text right under the root, which joins the text next to it.
+#[case::html("<div>\n\n<span>\n\n", "<p>\n")]
+// A fence starts a block right under a paragraph, until its line goes on.
+#[case::no_blank_line("two\n```", " not a fence```")]
+// A number that becomes `2.` joins the list above, past the blank line.
+#[case::list_item("1. a\n\n2", ". b")]
+fn a_stream_keeps_together_what_cannot_be_parsed_in_parts(#[case] first: &str, #[case] more: &str) {
+    let mut stream = Stream::default();
+    let before = paragraphs(PART_BLOCKS);
+    for source in [format!("{before}{first}"), format!("{before}{first}{more}")] {
+        assert_eq!(through(&mut stream, &source), parse(&source), "{source:?}");
+    }
+}
+
+#[test]
+fn a_stream_parses_another_source_anew() {
+    let mut stream = Stream::default();
+    stream.parse(&format!("{}last", paragraphs(PART_BLOCKS)));
+    assert_eq!(stream.parts().len(), 1);
+
+    let other = format!("{}    code\n\n    more code", paragraphs(PART_BLOCKS - 1));
+    assert_eq!(through(&mut stream, &other), parse(&other));
+}
+
+/// Pieces that between them start, continue, and end every kind of block.
+fn piece() -> impl Strategy<Value = &'static str> {
+    prop::sample::select(vec![
+        "word",
+        " ",
+        "\n",
+        "\n\n",
+        "\r\n",
+        "1",
+        "2",
+        ".",
+        ")",
+        "-",
+        "+",
+        "=",
+        "#",
+        ">",
+        "<",
+        ":",
+        "    ",
+        "  ",
+        "\t",
+        "- ",
+        "* ",
+        "1. ",
+        "2) ",
+        "# ",
+        "## ",
+        "> ",
+        "---",
+        "===",
+        "```",
+        "```rust",
+        "~~~",
+        "|",
+        "| a | b |",
+        "|---|---|",
+        "*",
+        "**",
+        "_",
+        "`",
+        "~~",
+        "[x]",
+        "[ ] ",
+        "[docs]",
+        "[docs]: https://example.com",
+        "[a](https://a.b)",
+        "![alt](x.png)",
+        "https://example.com/a",
+        "<div>",
+        "</div>",
+        "<!--",
+        "-->",
+        "<pre>",
+        "</pre>",
+        "<br>",
+        "\\",
+        "&amp;",
+        "é",
+        "日本語",
+    ])
+}
+
+proptest! {
+    /// However a source arrives, what a stream makes of it is what parsing
+    /// it whole does.
+    #[test]
+    fn a_stream_parses_as_the_whole_source_does(
+        chunks in prop::collection::vec(prop::collection::vec(piece(), 0..8), 1..24),
+        part_blocks in 1..4_usize,
+    ) {
+        let mut stream = Stream { part_blocks, ..Stream::default() };
+        let mut source = String::new();
+        for chunk in chunks {
+            source.extend(chunk);
+            prop_assert_eq!(through(&mut stream, &source), parse(&source), "after {:?}", source);
+        }
+    }
 }

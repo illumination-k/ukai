@@ -25,6 +25,7 @@ use ukai_core::{Connection, PaneId, Queued, Status, Transcript};
 
 pub use self::history::HistoryMenu;
 pub use self::session::connect;
+pub use self::transcript::Entries;
 use crate::projects::AppSignals;
 use crate::voice::{self, Dictation, DictationOwner, Voice};
 
@@ -64,14 +65,14 @@ struct Composer {
 impl Composer {
     fn new() -> Self {
         Self {
-            draft: Signal::new_in_scope(String::new(), ScopeId::APP),
-            attachments: Signal::new_in_scope(Vec::new(), ScopeId::APP),
-            uploading: Signal::new_in_scope(Vec::new(), ScopeId::APP),
-            review: Signal::new_in_scope(Vec::new(), ScopeId::APP),
-            error: Signal::new_in_scope(None, ScopeId::APP),
-            dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::APP),
-            mentions: Signal::new_in_scope(Vec::new(), ScopeId::APP),
-            files: Signal::new_in_scope(Files::Unread, ScopeId::APP),
+            draft: Signal::new_in_scope(String::new(), ScopeId::ROOT),
+            attachments: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
+            uploading: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
+            review: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
+            error: Signal::new_in_scope(None, ScopeId::ROOT),
+            dictation: Signal::new_in_scope(Dictation::Idle, ScopeId::ROOT),
+            mentions: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
+            files: Signal::new_in_scope(Files::Unread, ScopeId::ROOT),
         }
     }
 
@@ -98,6 +99,34 @@ struct Pending {
 
 /// Every pane's session, provided as context by the app root.
 pub type Sessions = Signal<HashMap<PaneId, AgentSession>>;
+
+/// What `read` makes of `pane`'s session, rendering the component again
+/// only when that changes. A transcript changes with every chunk its agent
+/// streams, and what a header, a tab, a sidebar row, or the composer shows
+/// of it rarely does: they read it through this rather than subscribe to
+/// the transcript, or each would render with every chunk of every agent.
+pub fn use_session<T: Clone + PartialEq + 'static>(
+    pane: PaneId,
+    read: fn(Sessions, PaneId) -> T,
+) -> T {
+    let sessions = use_context::<AppSignals>().sessions;
+    use_memo(use_reactive((&pane,), move |(pane,)| read(sessions, pane)))()
+}
+
+/// [`use_session`] of `pane`'s transcript; `None` without a session.
+fn use_transcript<T: Clone + PartialEq + 'static>(
+    pane: PaneId,
+    read: fn(&Transcript) -> T,
+) -> Option<T> {
+    let sessions = use_context::<AppSignals>().sessions;
+    use_memo(use_reactive((&pane,), move |(pane,)| {
+        let transcript = sessions
+            .read()
+            .get(&pane)
+            .map(|session| session.transcript)?;
+        Some(read(&transcript.read()))
+    }))()
+}
 
 /// Stop `pane`'s turn, if it is running one.
 pub fn stop_turn(sessions: Sessions, pane: PaneId) {
@@ -235,5 +264,82 @@ pub fn AgentView(pane: PaneId, has_saved_session: bool) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use dioxus::dioxus_core::NoOpMutations;
+    use ukai_acp::SessionEvent;
+    use ukai_core::state::AppState;
+
+    use super::*;
+
+    /// How many times [`Header`] rendered.
+    type Renders = Rc<Cell<usize>>;
+
+    /// What a pane's header reads of its session.
+    #[component]
+    fn Header() -> Element {
+        let renders = use_context::<Renders>();
+        renders.set(renders.get() + 1);
+        let (_, label, _) = use_session(0, agent_status);
+        rsx! { "{label}" }
+    }
+
+    #[component]
+    fn Root() -> Element {
+        let transcript = use_context::<Signal<Transcript>>();
+        let mut app = use_context_provider(|| AppSignals::new(AppState::default(), HashMap::new()));
+        use_hook(|| {
+            let composer = Composer::new();
+            app.sessions.write().insert(
+                0,
+                AgentSession {
+                    handle: None,
+                    transcript,
+                    composer,
+                    checkout: None,
+                    unread: Signal::new_in_scope(false, ScopeId::ROOT),
+                    dictation: Rc::new(DictationOwner(composer.dictation)),
+                },
+            );
+        });
+        rsx! {
+            Header {}
+        }
+    }
+
+    /// A header renders when its session's state changes, not with each
+    /// chunk the agent streams in between.
+    #[test]
+    fn what_shows_a_sessions_state_does_not_render_with_every_chunk() {
+        let renders = Renders::default();
+        let mut dom = VirtualDom::new(Root);
+        let mut transcript =
+            dom.in_runtime(|| Signal::new_in_scope(Transcript::default(), ScopeId::ROOT));
+        dom.provide_root_context(renders.clone());
+        dom.provide_root_context(transcript);
+        dom.rebuild_in_place();
+        let mut apply = |event: SessionEvent| {
+            dom.in_runtime(|| transcript.write().apply(event));
+            // The memo recomputes in a task, then the header renders.
+            dom.process_events();
+            dom.render_immediate(&mut NoOpMutations);
+            renders.get()
+        };
+
+        assert_eq!(apply(SessionEvent::TurnRunning), 2);
+        for chunk in ["one", " two", " three"] {
+            let text = chunk.to_owned();
+            assert_eq!(apply(SessionEvent::AgentMessage { text }), 2);
+        }
+        let ended = SessionEvent::TurnEnded {
+            stop_reason: "end_turn".to_owned(),
+            tokens: None,
+        };
+        assert_eq!(apply(ended), 3);
     }
 }

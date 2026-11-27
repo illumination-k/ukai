@@ -16,7 +16,7 @@ use ukai_core::launch::{self, Choice, Group, Status};
 use ukai_core::sidebar::{self, Fold, OpenAgent, Workspace};
 use ukai_core::{PaneContent, ProjectId, ReportSource};
 
-use crate::agent_pane::{agent_status, session_title};
+use crate::agent_pane::{agent_status, session_title, use_session};
 use crate::alert::is_unread;
 use crate::diff_pane::{diff_open, open_diff};
 use crate::icons::{Icon, Svg};
@@ -748,8 +748,8 @@ fn AgentRow(agent: OpenAgent, depth: u8, on_open: EventHandler<()>) -> Element {
             layout.tabs().len() > 1,
         )
     };
-    let (state, label, _) = agent_status(app.sessions, pane);
-    let session = session_title(app.sessions, pane);
+    let (state, label, _) = use_session(pane, agent_status);
+    let session = use_session(pane, session_title);
     let hint = match &session {
         Some(session) => format!("{agent} · {session} · {label}"),
         None => format!("{agent} · {label}"),
