@@ -1431,14 +1431,13 @@ button.new-tab {
   line-height: 1.625;
 }
 
-/* An entry out of view is neither laid out nor painted until it comes into
-   view, so resizing a pane, showing its tab, or a chunk streaming in costs
-   what is on screen rather than the whole transcript. Until an entry has
-   been drawn once its height is a guess; the transcript is anchored at its
-   end, so a wrong guess above the view moves nothing in it. */
-.entries > * {
-  content-visibility: auto;
-  contain-intrinsic-block-size: auto 3em;
+/* Above the entries mounted of a long transcript (`ukai_core::tail`). Not
+   `content-visibility: auto` on the entries to skip those out of view:
+   with only the end mounted it saves nothing measurable, and an entry that
+   takes its height as it comes into view moves what is being read when
+   earlier entries are shown. */
+.entries > .earlier {
+  align-self: center;
 }
 
 .chat-empty {

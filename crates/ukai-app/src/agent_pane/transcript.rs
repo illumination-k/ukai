@@ -5,12 +5,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
+use ukai_core::tail::Tail;
 use ukai_core::{Entry, PaneId, Queued, Status, Transcript};
 
 use super::entry::{Attachments, EntryView};
 use super::session::restart_to_update;
 use super::{Composer, use_lease, use_transcript};
 use crate::projects::AppSignals;
+
+const TAIL: &str = include_str!("tail.js");
 
 #[component]
 pub(super) fn TranscriptView(pane: PaneId) -> Element {
@@ -23,6 +26,9 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
             .get(&pane)
             .map(|session| (session.transcript, session.composer, session.lease.clone()))
     });
+    // Only the end of a long transcript is mounted, until the user reaches
+    // back for more.
+    let mut tail = use_signal(Tail::default);
     // Not the entries: those are for `Entries` to render with every chunk.
     let shown = use_transcript(pane, |transcript| {
         (
@@ -45,8 +51,21 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
     let busy = status == Status::Busy;
 
     rsx! {
-        // `column-reverse` keeps the view pinned to the newest entry.
-        div { class: "pane-body transcript",
+        // `column-reverse` keeps the view pinned to the newest entry;
+        // `tail.js` says when the view leaves it and comes back.
+        div {
+            id: "transcript-{pane}",
+            class: "pane-body transcript",
+            onmounted: move |_| {
+                let mut view = document::eval(
+                    &TAIL.replace("__ID__", &format!("transcript-{pane}")),
+                );
+                spawn(async move {
+                    while let Ok(following) = view.recv::<bool>().await {
+                        tail.write().follow(following, transcript.peek().entries.len());
+                    }
+                });
+            },
             div { class: "entries",
                 if let Some(update) = update {
                     div { class: "connect update-offer",
@@ -86,7 +105,7 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
                         p { class: "muted", "Send a message to start the session." }
                     }
                 }
-                Entries { pane, transcript }
+                Entries { pane, transcript, tail }
                 if busy && !awaiting {
                     div { class: "working",
                         span { class: "dot busy" }
@@ -105,12 +124,25 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
     }
 }
 
-/// The transcript's entries. This is what renders with every chunk an
-/// agent streams, so only the entries that changed are drawn again.
+/// The transcript's entries, from where `tail` has them start. This is what
+/// renders with every chunk an agent streams, so only the entries that
+/// changed are drawn again.
 #[component]
-pub fn Entries(pane: PaneId, transcript: Signal<Transcript>) -> Element {
+pub fn Entries(pane: PaneId, transcript: Signal<Transcript>, mut tail: Signal<Tail>) -> Element {
     let entries = use_shared(&transcript.read().entries);
-    pages(pane, &entries)
+    // Whole pages: pages starting an entry later with each entry that
+    // arrives would all be drawn again.
+    let start = tail().start(entries.len()) / PAGE * PAGE;
+    rsx! {
+        if start > 0 {
+            button {
+                class: "small outline earlier",
+                onclick: move |_| tail.write().earlier(transcript.peek().entries.len()),
+                "Show earlier messages"
+            }
+        }
+        {pages(pane, entries.get(start..).unwrap_or_default())}
+    }
 }
 
 /// Entries a [`Page`] draws. Each render of a list builds something for

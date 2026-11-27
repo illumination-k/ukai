@@ -15,6 +15,7 @@ use dioxus::prelude::*;
 use ukai_acp::{SessionEvent, ToolStatus};
 use ukai_app::bench::{Entries, use_app};
 use ukai_core::Transcript;
+use ukai_core::tail::Tail;
 
 use crate::common::MESSAGE;
 
@@ -37,8 +38,9 @@ const LENGTHS: [usize; 3] = [1, 10, 50];
 fn Root() -> Element {
     use_app();
     let transcript = use_context::<Signal<Transcript>>();
+    let tail = use_signal(Tail::default);
     rsx! {
-        Entries { pane: 0, transcript }
+        Entries { pane: 0, transcript, tail }
     }
 }
 
