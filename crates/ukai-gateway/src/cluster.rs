@@ -17,6 +17,7 @@ use kube::config::InferConfigError;
 use kube::{Client, Config};
 
 use ukai_acp::checkout::{DIFF_PATH, DiffBase, FILES_PATH, RUN_PATH, UPLOAD_PATH};
+use ukai_acp::flows::FLOWS_PATH;
 use ukai_acp::ports::{FORWARD_PATH, PORTS_PATH};
 use ukai_acp::review::REVIEW_PATH;
 use ukai_acp::terminal::{Size, TERMINAL_PATH};
@@ -436,6 +437,12 @@ impl RelayEndpoint {
         format!("http://{}{PORTS_PATH}", self.address)
     }
 
+    /// The runs of the flows in the pod's checkout, with `suffix` appended:
+    /// nothing (the listing) or `/<run id>`.
+    pub fn flows_url(&self, suffix: &str) -> String {
+        format!("http://{}{FLOWS_PATH}{suffix}", self.address)
+    }
+
     /// The files of the pod's checkout.
     pub fn files_url(&self) -> String {
         format!("http://{}{FILES_PATH}", self.address)
@@ -760,6 +767,11 @@ mod tests {
         assert_eq!(endpoint.acp_url(), "ws://10.0.0.7:7070/acp");
         assert_eq!(endpoint.reports_url(""), "http://10.0.0.7:7070/reports");
         assert_eq!(endpoint.ports_url(), "http://10.0.0.7:7070/ports");
+        assert_eq!(endpoint.flows_url(""), "http://10.0.0.7:7070/flows");
+        assert_eq!(
+            endpoint.flows_url("/weekly-1"),
+            "http://10.0.0.7:7070/flows/weekly-1"
+        );
         assert_eq!(
             endpoint.forward_url(5173),
             "ws://10.0.0.7:7070/forward/5173"

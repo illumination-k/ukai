@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::Startup;
 use crate::alert::mark_read;
+use crate::flows::FollowFlows;
 use crate::gateways::list_gateways;
 use crate::knowledge::FollowKnowledge;
 use crate::layout::Workbench;
@@ -106,6 +107,7 @@ pub fn App() -> Element {
             Workbench {}
             Follow {}
             FollowPorts {}
+            FollowFlows {}
             FollowSchedules {}
             FollowKnowledge {}
             FollowSecretaries {}

@@ -19,6 +19,7 @@
 //! shell there, for the terminal pane.
 
 pub mod checkout;
+pub mod flows;
 mod fs;
 mod gateway;
 pub mod gateways;
@@ -37,6 +38,7 @@ pub mod terminal;
 pub mod updates;
 
 pub use checkout::Checkout;
+pub use flows::Flows;
 pub use fs::{FsError, FsRoot};
 pub use gateways::{GatewayAgent, GatewayEndpoint};
 pub use ports::{PortsEndpoint, Tunnel};

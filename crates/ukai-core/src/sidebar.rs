@@ -56,6 +56,11 @@ pub fn pane_place(content: &PaneContent) -> Option<(ProjectId, ReportSource)> {
         | PaneContent::Metrics {
             project,
             place: source,
+        }
+        | PaneContent::Flow {
+            project,
+            place: source,
+            ..
         } => Some((project.clone(), source.clone())),
         PaneContent::Empty
         | PaneContent::MetricsOverview
@@ -163,6 +168,7 @@ pub fn tree(layout: &Layout, project: &ProjectId, config: Option<&Config>) -> Tr
 pub enum Node {
     Reports { place: ReportSource },
     Ports { place: ReportSource },
+    Flows { place: ReportSource },
     Knowledge,
     Schedules,
 }
@@ -522,6 +528,7 @@ mod tests {
     #[rstest]
     #[case::reports(Node::Reports { place: ReportSource::Project }, true)]
     #[case::ports(Node::Ports { place: ReportSource::Project }, true)]
+    #[case::flows(Node::Flows { place: ReportSource::Project }, true)]
     #[case::knowledge(Node::Knowledge, false)]
     #[case::schedules(Node::Schedules, false)]
     fn toggles_a_node_from_its_default(#[case] node: Node, #[case] open: bool) {

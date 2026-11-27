@@ -1,6 +1,7 @@
 //! The gateway's control plane besides knowledge, as gRPC and gRPC-Web
 //! (`ukai.gateway.v1`): `Agents` (the agents, and restarting a workspace),
-//! `Ports` (what listens in a workspace), `Files` and `Commands` (the files
+//! `Ports` (what listens in a workspace), `Flows` (the runs of the ayaito
+//! flows started in a workspace), `Files` and `Commands` (the files
 //! of a workspace's checkout, and the user's commands run in it), and
 //! `Schedules`. All take the
 //! gateway's token. What is not request and answer stays HTTP: ACP's
@@ -13,6 +14,7 @@ use ukai_acp::checkout::{
     CheckoutDiff, CommandOutput, DiffBase, FileListing, MAX_UPLOAD_BYTES, RUN_TIMEOUT, RunRequest,
     Uploaded,
 };
+use ukai_acp::flows::{FlowListing, Order, Ordered, RunChunk};
 use ukai_acp::ports::PortListing;
 use ukai_acp::review::{AnnotateRequest, Review};
 use ukai_core::schedule::{ScheduleInfo, ScheduleSpec, Trigger};
@@ -178,6 +180,97 @@ impl gw::ports_server::Ports for Api {
         )
         .await?;
         Ok(Response::new(listing.into()))
+    }
+}
+
+/// `/<run>` under the relay's flows, or INVALID_ARGUMENT when `run` is no
+/// run id: an id is the name of a folder, and goes into a URL as it is.
+fn run_suffix(run: &str) -> Result<String, Status> {
+    ukai_acp::flows::run_id(run)
+        .map(|run| format!("/{run}"))
+        .ok_or_else(|| Status::invalid_argument(format!("`{run}` is not a run id")))
+}
+
+#[tonic::async_trait]
+impl gw::flows_server::Flows for Api {
+    async fn list(
+        &self,
+        request: Request<gw::ListFlowsRequest>,
+    ) -> Result<Response<gw::FlowListing>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let listing: FlowListing = ask_relay(
+            self.gateway
+                .http
+                .get(relay.flows_url(""))
+                .bearer_auth(&relay.token)
+                .timeout(LIST_TIMEOUT),
+            &request.agent,
+            "cannot list the workspace's flows",
+            None,
+        )
+        .await?;
+        Ok(Response::new(listing.into()))
+    }
+
+    async fn read(
+        &self,
+        request: Request<gw::ReadFlowRequest>,
+    ) -> Result<Response<gw::FlowRun>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let suffix = run_suffix(&request.run)?;
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let run: RunChunk = ask_relay(
+            self.gateway
+                .http
+                .get(format!(
+                    "{}?after={}",
+                    relay.flows_url(&suffix),
+                    request.after
+                ))
+                .bearer_auth(&relay.token)
+                .timeout(LIST_TIMEOUT),
+            &request.agent,
+            "cannot read the workspace's flow",
+            // What is wrong with the run asked for.
+            Some(Status::aborted),
+        )
+        .await?;
+        Ok(Response::new(run.into()))
+    }
+
+    async fn order(
+        &self,
+        request: Request<gw::OrderFlowRequest>,
+    ) -> Result<Response<gw::FlowOrdered>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let suffix = run_suffix(&request.run)?;
+        let plan = self.plan(&request.agent, request.workspace)?;
+        let relay = self.running_relay(&plan).await?;
+        let ordered: Ordered = ask_relay(
+            self.gateway
+                .http
+                .post(relay.flows_url(&suffix))
+                .bearer_auth(&relay.token)
+                .json(&Order {
+                    node: request.node,
+                    message: request.message,
+                })
+                // ayaito's command line, which answers within the relay's
+                // own limit.
+                .timeout(RUN_TIMEOUT),
+            &request.agent,
+            "cannot reach the workspace's flow",
+            // Why ayaito refused, word for word.
+            Some(Status::aborted),
+        )
+        .await?;
+        Ok(Response::new(gw::FlowOrdered { said: ordered.said }))
     }
 }
 
@@ -465,6 +558,21 @@ mod tests {
     use tonic::Code;
 
     use super::*;
+
+    #[test]
+    fn a_run_is_named_by_an_id_that_goes_into_a_url() {
+        assert_eq!(
+            run_suffix("weekly-1a2b").ok().as_deref(),
+            Some("/weekly-1a2b")
+        );
+        for run in ["", "../x", "a/b", "a b", "a?b", ".hidden"] {
+            assert_eq!(
+                run_suffix(run).map_err(|status| status.code()),
+                Err(Code::InvalidArgument),
+                "{run}"
+            );
+        }
+    }
 
     #[test]
     fn a_change_is_saved_refused_or_not_found() {

@@ -25,6 +25,7 @@ use crate::agent_pane::{
 use crate::alert::{is_unread, mark_read};
 use crate::browser_pane::BrowserView;
 use crate::diff_pane::DiffPane;
+use crate::flows::FlowPane;
 use crate::icons::{Icon, Svg};
 use crate::knowledge::NoteView;
 use crate::metrics_pane::{MetricsOverview, MetricsPane};
@@ -317,6 +318,17 @@ pub fn pane_label(
             match place.agent() {
                 Some(agent) => format!("Terminal · {agent}"),
                 None => "Terminal".to_owned(),
+            },
+        ),
+        Some(PaneContent::Flow {
+            project,
+            run,
+            place,
+        }) => (
+            Some(project_name(project)),
+            match place.agent() {
+                Some(agent) => format!("Flow {run} · {agent}"),
+                None => format!("Flow {run}"),
             },
         ),
         Some(PaneContent::MetricsOverview) => (None, "Metrics".to_owned()),
@@ -846,6 +858,17 @@ fn PaneView(pane: PaneId) -> Element {
                 PaneContent::Metrics { project, place } => rsx! {
                     for (project, place) in [(project, place)] {
                         MetricsPane { key: "{project}-{place:?}", project, place }
+                    }
+                },
+                PaneContent::Flow { project, run, place } => rsx! {
+                    for (project, run, place) in [(project, run, place)] {
+                        FlowPane {
+                            key: "{project}-{place:?}-{run}",
+                            pane,
+                            project,
+                            run,
+                            place,
+                        }
                     }
                 },
                 PaneContent::Terminal { project, place } => rsx! {

@@ -25,6 +25,7 @@ enum Action {
     Focus(PaneId),
     Launch(ProjectId, String),
     Report(ProjectId, PathBuf, ReportSource),
+    Flow(ProjectId, ReportSource, String),
     NewTab,
     Split(Direction),
     ClosePane,
@@ -107,6 +108,20 @@ fn items(app: AppSignals, shortcuts: &Shortcuts) -> Vec<Item> {
             });
         }
     }
+    for (project, place, run) in crate::flows::listed_runs(app) {
+        let name = projects
+            .get(&project)
+            .map_or_else(|| project.to_string(), |project| project.name());
+        items.push(Item {
+            kind: "Open flow",
+            detail: match place.agent() {
+                Some(agent) => format!("{name} · {agent} · {}", run.state.name()),
+                None => format!("{name} · {}", run.state.name()),
+            },
+            label: run.id.clone(),
+            action: Action::Flow(project, place, run.id),
+        });
+    }
     let command = |label: &str, action, shortcut: Option<keymap::Action>| Item {
         kind: "Command",
         label: label.to_owned(),
@@ -158,6 +173,7 @@ fn perform(app: AppSignals, paths: &Paths, action: Action) {
                 open_report(app, pane, &project, path, source);
             }
         }
+        Action::Flow(project, place, run) => crate::flows::open_flow(app, &project, &place, &run),
         Action::NewTab => {
             layout.write().new_tab();
         }

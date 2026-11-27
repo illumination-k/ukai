@@ -390,6 +390,7 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
 
     use ukai_acp::PaneWorkspace;
     use ukai_acp::checkout::{Checkout, CheckoutError, DiffBase};
+    use ukai_acp::flows::{FlowError, Order};
     use ukai_acp::ports::{PortsEndpoint, PortsError};
     use ukai_acp::updates::RestartEndpoint;
 
@@ -404,6 +405,23 @@ async fn a_workspace_that_is_not_running_is_left_alone() {
         .list()
         .await;
     assert!(matches!(ports, Err(PortsError::Gone)), "{ports:?}");
+    // Nor do the runs of its flows: listing them, reading one, or a message
+    // to one.
+    let flows = ukai_acp::Flows::resolve(&agent_spec(&token), |_, _| None, Some(&pane))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("a gateway agent has flows"));
+    let listed = flows.list().await;
+    assert_eq!(listed, Err(FlowError::NotRunning));
+    let read = flows.read("weekly-1", 0).await;
+    assert_eq!(read, Err(FlowError::NotRunning));
+    let stopped = flows.order("weekly-1", Order::default()).await;
+    assert_eq!(stopped, Err(FlowError::NotRunning));
+    // What is no run id is refused before anything is asked of a pod.
+    let refused = flows.read("../x", 0).await;
+    assert!(
+        matches!(&refused, Err(FlowError::Failed(why)) if why.contains("not a run id")),
+        "{refused:?}"
+    );
     // Neither the checkout's files, a command, a diff, nor a reply to its
     // review start one.
     let checkout = Checkout::resolve(

@@ -19,6 +19,7 @@ use ukai_core::{PaneContent, ProjectId, ReportSource};
 use crate::agent_pane::{agent_status, session_title, use_session};
 use crate::alert::is_unread;
 use crate::diff_pane::{diff_open, open_diff};
+use crate::flows::FlowGroup;
 use crate::icons::{Icon, Svg};
 use crate::knowledge::KnowledgeNode;
 use crate::layout::{launch_agent, launch_target, open_agent_in};
@@ -669,7 +670,8 @@ fn WorkspaceDetail(project: ProjectId, place: ReportSource, opened: Opened) -> E
         }
         TerminalRow { project: project.clone(), place: place.clone(), depth: 0 }
         ReportGroup { project: project.clone(), place: place.clone(), depth: 0 }
-        PortGroup { project, place, depth: 0 }
+        PortGroup { project: project.clone(), place: place.clone(), depth: 0 }
+        FlowGroup { project, place, depth: 0 }
     }
 }
 

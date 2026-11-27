@@ -1,0 +1,87 @@
+// The runs of ayaito flows in a workspace's checkout: workflows of agents
+// and code that an agent there starts, each saved as a folder with the
+// flow's graph and what its nodes did.
+syntax = "proto3";
+
+package ukai.gateway.v1;
+
+import "ukai/gateway/v1/common.proto";
+
+// With the gateway's token. A workspace that is not running is
+// FAILED_PRECONDITION: nothing here starts a pod. What is wrong with a
+// request (no such run, a node that is not running) is ABORTED, with the
+// reason as the message.
+service Flows {
+  rpc List(ListFlowsRequest) returns (FlowListing);
+  // A run's graph and its events from an offset on.
+  rpc Read(ReadFlowRequest) returns (FlowRun);
+  // Send a message to an agent of a run, or stop the agent or the run.
+  rpc Order(OrderFlowRequest) returns (FlowOrdered);
+}
+
+message ListFlowsRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+}
+
+message FlowListing {
+  // The runs kept in the workspace, the one written last first.
+  repeated FlowSummary runs = 1;
+}
+
+message FlowSummary {
+  // The run's id: the name of its folder.
+  string id = 1;
+  FlowState state = 2;
+  // When it last wrote something, in milliseconds since the epoch by the
+  // pod's clock.
+  uint64 at = 3;
+}
+
+enum FlowState {
+  // No result yet.
+  FLOW_STATE_RUNNING = 0;
+  FLOW_STATE_DONE = 1;
+  // A node found nothing to do: an early end, as a success.
+  FLOW_STATE_STOPPED = 2;
+  // It failed, or its process ended without a result.
+  FLOW_STATE_FAILED = 3;
+}
+
+message ReadFlowRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  string run = 3;
+  // Where in the run's events to read from, in bytes: 0, or the `next` of
+  // the last answer.
+  uint64 after = 4;
+}
+
+message FlowRun {
+  // The flow as ayaito's toGraph describes it, as JSON.
+  string graph = 1;
+  // Whole lines of the run's events.jsonl from `after` on.
+  string events = 2;
+  // Where to read on from.
+  uint64 next = 3;
+  FlowState state = 4;
+  // What the run answered when it ended, as JSON, cut when long.
+  optional string result = 5;
+}
+
+message OrderFlowRequest {
+  string agent = 1;
+  Workspace workspace = 2;
+  string run = 3;
+  // The agent to reach: its node's name, name#item in a forEach, or its
+  // session's id. Absent to stop the whole run.
+  optional string node = 4;
+  // What to tell the agent, which goes on with its task. Absent to stop:
+  // the agent answers from what it has done, and the run goes on.
+  optional string message = 5;
+}
+
+message FlowOrdered {
+  // What ayaito said of it.
+  string said = 1;
+}

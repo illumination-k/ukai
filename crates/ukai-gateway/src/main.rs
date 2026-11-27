@@ -31,7 +31,9 @@
 //! port ([`api`], `ukai.gateway.v1`): `Agents` lists the agents and restarts
 //! a workspace (stopping its pod, so the next connection starts a fresh
 //! one, e.g. to pick up a newer agent release); `Ports` lists what listens
-//! in a workspace's pod and the previews its agent asked for; `Files` and
+//! in a workspace's pod and the previews its agent asked for; `Flows` reads
+//! the runs of the ayaito flows its agent started there, and passes messages
+//! to their agents; `Files` and
 //! `Commands` list the files of its checkout and run the user's commands
 //! there, through the pod's relay, for the composer's `@` and `!`; `Schedules`
 //! keeps the agent's [`schedules`], commands and prompts the gateway runs on
@@ -263,6 +265,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     use ukai_proto::gateway::v1::agents_server::AgentsServer;
     use ukai_proto::gateway::v1::commands_server::CommandsServer;
     use ukai_proto::gateway::v1::files_server::FilesServer;
+    use ukai_proto::gateway::v1::flows_server::FlowsServer;
     use ukai_proto::gateway::v1::knowledge_server::KnowledgeServer;
     use ukai_proto::gateway::v1::metrics_server::MetricsServer;
     use ukai_proto::gateway::v1::ports_server::PortsServer;
@@ -297,6 +300,7 @@ fn grpc(gateway: Arc<Gateway>) -> Router {
     )
     .add_service(web.layer(AgentsServer::new(api.clone())))
     .add_service(web.layer(PortsServer::new(api.clone())))
+    .add_service(web.layer(FlowsServer::new(api.clone())))
     .add_service(web.layer(MetricsServer::new(api.clone())))
     .add_service(
         web.layer(

@@ -140,6 +140,15 @@ pub enum PaneContent {
     /// What each turn took across every workspace of every gateway the open
     /// projects declare.
     MetricsOverview,
+    /// A run of an ayaito flow in a workspace's checkout, on its graph
+    /// (`crate::flow`); the workspace is named as a diff's is, the run by
+    /// its id.
+    Flow {
+        project: ProjectId,
+        run: String,
+        #[serde(default, skip_serializing_if = "ReportSource::is_project")]
+        place: ReportSource,
+    },
     /// A shell in a workspace's checkout, named as a diff's is. The shell
     /// itself is not kept: after a restart the pane starts a new one there.
     Terminal {
@@ -200,6 +209,7 @@ impl PaneContent {
             | PaneContent::Note { project, .. }
             | PaneContent::Diff { project, .. }
             | PaneContent::Metrics { project, .. }
+            | PaneContent::Flow { project, .. }
             | PaneContent::Terminal { project, .. } => Some(project),
         }
     }

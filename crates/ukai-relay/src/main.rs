@@ -81,6 +81,9 @@ enum Mode {
         /// Offer the secretary's tools, through the gateway.
         #[arg(long)]
         secretary: bool,
+        /// Offer the tools that run ayaito flows in the checkout.
+        #[arg(long)]
+        flows: bool,
     },
 }
 
@@ -128,17 +131,29 @@ async fn serve(cli: Cli) -> ExitCode {
         review,
         sessions,
         secretary,
+        flows,
     }) = cli.mode
     {
+        let key = std::env::var(ukai_relay::hub::SESSION_KEY_ENV)
+            .ok()
+            .filter(|key| !key.is_empty());
+        // With the relay's record of sessions, it wakes this server's
+        // session when a run it started ends.
+        let flows = flows.then(|| ukai_relay::mcp::flows::Offer {
+            waking: sessions
+                .clone()
+                .map(|sessions| ukai_relay::mcp::flows::Waking {
+                    sessions,
+                    key: key.clone(),
+                }),
+        });
         let publishing = match (&gateway, &token, sessions) {
             (Some(gateway), Some(token), Some(sessions)) => {
                 match ukai_acp::reports::PublishEndpoint::for_workspace(gateway, token) {
                     Ok(endpoint) => Some(ukai_relay::mcp::Publishing {
                         publisher: Box::new(endpoint),
                         sessions,
-                        key: std::env::var(ukai_relay::hub::SESSION_KEY_ENV)
-                            .ok()
-                            .filter(|key| !key.is_empty()),
+                        key: key.clone(),
                     }),
                     Err(error) => {
                         tracing::warn!(%error, "cannot publish reports through the gateway");
@@ -174,8 +189,10 @@ async fn serve(cli: Cli) -> ExitCode {
             }
             _ => None,
         };
-        return match ukai_relay::mcp::serve(&root, notes, previews, review, publishing, secretary)
-            .await
+        return match ukai_relay::mcp::serve(
+            &root, notes, previews, review, publishing, secretary, flows,
+        )
+        .await
         {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -247,7 +264,7 @@ mod tests {
     fn mcp_needs_no_agent() {
         let cli = parse(&["mcp", "--root", "/workspace"]).unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None, sessions: None, secretary: false }) if root == std::path::Path::new("/workspace"))
+            matches!(cli.mode, Some(Mode::Mcp { root, gateway: None, previews: None, review: None, sessions: None, secretary: false, flows: false }) if root == std::path::Path::new("/workspace"))
         );
         let cli =
             parse(&["mcp", "--gateway", "http://ukai-gateway"]).unwrap_or_else(|e| panic!("{e}"));
