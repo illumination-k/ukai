@@ -74,17 +74,17 @@ ukai はこの2クレートの上に乗る。プロトコルのワイヤ実装�
 
 ### Crates
 
-| crate          | kind      | 役割                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| -------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。エージェントの checkout のファイル一覧・コマンド実行・差分（`checkout`）とそのレビュー（`review`）。UI に依存しない。                                                                                                                                                                                                                      |
-| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`、送った発言の呼び戻し `recall`、`@` のファイル補完 `mention`、`!` のコマンドの送り方 `shell`、`git diff` の読み取り `diff`、エージェントのレビューの規則 `annotation`、サイドバーの木と開閉 `sidebar`）。UI フレームワークに依存しない。 |
-| `ukai-voice`   | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                                                                                                                                                                                                                             |
-| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `ukai-store`   | bin       | ナレッジのノートと、どのセッションがどのレポートを出したか（後述「セッションのレポート」）を SurrealDB に持ち、gateway にだけ gRPC（`ukai.knowledge.v1.KnowledgeStore`・`ukai.reports.v1.ReportStore`）で答える。                                                                                                                                                                                                                                                                                                                                                       |
-| `ukai-proto`   | lib       | 部品の間の gRPC の `.proto` と、そこから生成した message・client・server だけ。`protox` でコンパイルするのでビルドに `protoc` は要らない。ukai の型との変換は型の側（`ukai_acp::knowledge::wire`）に置く。                                                                                                                                                                                                                                                                                                                                                              |
+| crate          | kind      | 役割                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ukai-config`  | lib       | `ukai.toml` のスキーマ（serde 型）、読み込み、変数展開、検証。I/O 以外は純粋関数で、テストの主戦場。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ukai-acp`     | lib       | エージェント接続。`AgentSpec` → トランスポート選択 → ACP client 接続、セッション操作、`SessionEvent` への正規化。gateway エージェントのレポート・ポート（とそこへのトンネル `ports`）・スケジュール・ナレッジのクライアント。エージェントの checkout のファイル一覧・コマンド実行・差分（`checkout`）とそのレビュー（`review`）、ayaito の run の読み出し・起動・指示（`flows`）。UI に依存しない。                                                                                                                                                                                                        |
+| `ukai-core`    | lib       | アプリ状態のモデル（実行時のタブ/pane 木 `Layout`、会話ログ `Transcript`、レポートの列挙と配信 `report`、発言の Markdown `markdown`、差分とレビュー `review`、添付 `attachment`、ブラウザ pane のポート指定とプレビュー `browser`、エージェント設定の表示 `config`、パレットの照合 `palette`、スラッシュコマンドの補完 `slash`、送った発言の呼び戻し `recall`、`@` のファイル補完 `mention`、`!` のコマンドの送り方 `shell`、`git diff` の読み取り `diff`、エージェントのレビューの規則 `annotation`、サイドバーの木と開閉 `sidebar`、ayaito の run の状態と配置 `flow`）。UI フレームワークに依存しない。 |
+| `ukai-voice`   | lib       | 音声入力。マイクの録音（`cpal`）と whisper.cpp（`whisper-rs`）による端末内の文字起こし。変換（ダウンミックス・リサンプル・下書きへの差し込み）は純粋関数の `audio` に置く。                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ukai-app`     | bin       | Dioxus desktop UI。`ukai` バイナリ。状態は `ukai-core` を Signal で包むだけに留める。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `ukai-relay`   | bin + lib | stdio エージェントを子に持ち、`/acp`（HTTP/SSE・WebSocket）で出す。セッションと履歴を接続より長く保ち、再接続に `session/load` の再生で答える。                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `ukai-gateway` | bin       | Kubernetes の namespace に 1 つ。`gateway.toml` のエージェントを `/agents/<id>/acp` で出し、ワークスペースごとの Pod を用意して中の relay に中継する。                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `ukai-store`   | bin       | ナレッジのノートと、どのセッションがどのレポートを出したか（後述「セッションのレポート」）を SurrealDB に持ち、gateway にだけ gRPC（`ukai.knowledge.v1.KnowledgeStore`・`ukai.reports.v1.ReportStore`）で答える。                                                                                                                                                                                                                                                                                                                                                                                          |
+| `ukai-proto`   | lib       | 部品の間の gRPC の `.proto` と、そこから生成した message・client・server だけ。`protox` でコンパイルするのでビルドに `protoc` は要らない。ukai の型との変換は型の側（`ukai_acp::knowledge::wire`）に置く。                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 UI 依存を `ukai-app` に閉じ込めるのは、ロジックを headless にテストするため（Dioxus のコンポーネントテストは重い）。
 
@@ -250,7 +250,7 @@ ukai ──ws──▶ ukai-gateway（namespace に 1 つ）──ws──▶ <p
 部品の間の通信: ACP は仕様どおり WebSocket（`/acp`）で、ポートのトンネル（`/forward`）はバイト列、レポートは
 web view が相対パスで素材を読むので HTTP のまま。それ以外の要求と応答の API は gRPC にしていく。型は
 `ukai-proto` の `.proto` が決める。アプリと relay → gateway の `ukai.gateway.v1`（`Knowledge`・
-`WorkspaceKnowledge`・`WorkspaceReports`・`Agents`・`Ports`・`Files`・`Commands`・`Schedules`）と、gateway → `ukai-store` が gRPC。gateway → relay
+`WorkspaceKnowledge`・`WorkspaceReports`・`Agents`・`Ports`・`Flows`・`Files`・`Commands`・`Schedules`）と、gateway → `ukai-store` が gRPC。gateway → relay
 （`/ports` など）はクラスタの中の HTTP のまま。アプリと gateway の間は IAP
 などの HTTP/1.1 の proxy を通ることがあるので、gateway は同じポートで gRPC（h2c）と gRPC-Web の両方を受け、
 gateway のクライアント（アプリと relay）は gRPC-Web で話す。gRPC-Web は、エージェントのヘッダー・TLS・
@@ -311,6 +311,8 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   （checkout の外。1 件ごとのディレクトリに元の名前で）に置き、そのパスを返す（`store_upload`。名前の
   ないものは 422、16 MiB を超えるものは 413）。
 - 同じく `GET /terminal?cols=&rows=` で checkout のシェルを WebSocket で出す（`terminal`。後述「ターミナル」）。
+- 同じく `/flows` で checkout の ayaito の run を出し、MCP サーバーに `--flows` を渡してエージェントが run を
+  始めるツール（`run_flow` など）を出す（`flows`。後述「フロー（ayaito）」）。
 - 1 セッションに付くクライアントは 1 つで、後から load したほうが引き継ぐ。
 - クライアントがおらず、ターンも動いておらず、ターミナルも開いていない状態が `idle_timeout` 続いたら終了する。
 
@@ -348,6 +350,8 @@ gateway のクライアント（アプリと relay）は gRPC-Web で話す。gR
   ないものは INVALID_ARGUMENT。この service だけ受信メッセージの上限を 16 MiB 強に上げる）。ワークスペースの名指しとトークン、Pod を起こさないこと（FAILED_PRECONDITION）は
   `Ports.List` と同じ。`Commands.Run` を許すトークンは、エージェントに prompt でコマンドを走らせることも
   スケジュールでコマンドを登録することもすでにできるので、できることは増えない。
+- ayaito の run の一覧・読み出し・指示を `Flows.List`・`Flows.Read`・`Flows.Order` で中継する（relay の `/flows`。
+  後述「フロー（ayaito）」）。名指し・トークン・Pod を起こさないことは `Ports.List` と同じ。
 - スケジュール（後述「スケジュール」）を `ukai.gateway.v1.Schedules` で持ち、自分で発火する。
 - プロジェクト（またはリポジトリ）ごとのナレッジ（後述「ナレッジ」）を gRPC の `ukai.gateway.v1.Knowledge` と、
   Pod 向けの `WorkspaceKnowledge` で出す。持つのは `ukai-store` で、gateway は誰が聞いているかを決めて取り次ぐ。
@@ -771,7 +775,7 @@ p0 = "マージ不可（壊れる・危ない）"
   組み直し、子 WebView を作り直す）。それより古いタブは外し（メモリを抑えるため）、表示したときに作り直す。隠れたタブの子 WebView は自分で隠し
   （`PaneShown`）、一度も表示されていなければ表示されるまで作らない。
 - pane の中身: `agent { project, agent, session }`（ACP セッション 1 本）/ `report { project, path }` /
-  `terminal { project, place }`（後述「ターミナル」）などと空。
+  `terminal { project, place }`（後述「ターミナル」）/ `flow { project, run, place }`（後述「フロー（ayaito）」）などと空。
   **pane ごとにプロジェクトを持つ**ので、1 つのタブに別プロジェクトのエージェントを並べられる（herdr と同じ。
   orca は worktree ごとに配置を丸ごと切り替える方式で、混在はできない）。
 - 新しい pane / タブは空で開き、プロジェクトを選んでから、その設定にあるエージェント（起動コマンド付き）を選ぶ。
@@ -1280,6 +1284,92 @@ browser pane ──▶ 127.0.0.1:<port>（ukai_acp::ports::Tunnel）
 pane の上部に戻る・進む・再読込・アドレス（オリジン上のパス。Enter で移動）・外部ブラウザで開くを置く。
 子 WebView はタブの切り替えで作り直すので、ページの状態（ログインなど）はそこで失われる。
 
+## フロー（ayaito）
+
+[ayaito](https://github.com/illumination-k/ayaito) は、エージェントとコードのワークフローを型付きのグラフとして
+実行する。1 つのエージェントに長い仕事を任せる代わりに、「計画 → 項目ごとに worktree で修正 → テスト」のような
+手順をエージェント自身がフローとして書き、ukai はその run をグラフの上で見せる。pane の中身は
+`flow { project, run, place }`。`place` は差分やターミナルと同じ `ReportSource` で、`project`（既定）なら手元の
+checkout、`agent { agent, workspace }` なら gateway エージェントのワークスペース。
+
+```
+エージェント ──MCP run_flow──▶ ukai-relay mcp ──起動──▶ ayaito run flow.ts（Pod の中の別プロセス）
+                                                          │ 書く
+                                                          ▼
+   flow pane ◀─ Flows.Read ─ ukai-gateway ◀─ /flows/<run> ─ ukai-relay ◀─ <store>/<run>/graph.json, events.jsonl
+```
+
+### ayaito との境界
+
+ukai が ayaito について知っているのは、run のフォルダの中身と CLI の引数だけ（ライブラリには依存しない）。
+
+- **読むのはファイル。** `ayaito run` は run ごとに `<store>/<run id>/` へ `graph.json`（`toGraph` のグラフ）、
+  `events.jsonl`（ノードの開始・終了・エラー、エージェントの発言とツール。追記のみ）、終わったら `result.json` を
+  置く。store は作業ツリーの外（git common dir の `ayaito-runs`。git の外では `$XDG_STATE_HOME/ayaito/runs`）で、
+  `ukai_acp::flows::Store` が同じ決め方で探す（0.2 以前の `.runs` にある run も見つける）。だから **誰が始めた run も
+  出る**: エージェントが MCP で始めたものも、ターミナルで `npx ayaito run` したものも。
+- **意味づけは `ukai_core::flow`。** グラフとイベントを読み（`Graph` / `parse_events`）、ノードごとの状態に畳み
+  （`view`。ayaito の Claude Code 用 mod と同じ規則: 名前で突き合わせ、取られなかった branch は skipped、
+  イベントのないグループはメンバーの状態から決める）、配置を決める（`draw`）。どちらのファイルも別のプログラムの
+  もので版ごとに変わるので、分からないものは拒否せず読み飛ばす（未知の kind は fn として描き、未知の type の
+  イベントや書きかけの行は無視する）。
+- **書くのは CLI 経由。** 動いている run への指示（エージェントへのメッセージ、エージェントや run の停止）は
+  `ayaito steer` / `ayaito stop` を呼ぶ（`ukai_acp::flows::order`）。run やノードが動いているかの判定と、
+  run への渡し方（`steer.jsonl`）は ayaito の内部なので、ukai は触らない。
+- **CLI の探し方。** checkout の `node_modules/.bin/ayaito`、なければ `PATH` の `ayaito`。後者（イメージに
+  グローバルに入れた場合）は、store の `node_modules` をそのインストール先へのシンボリックリンクにする。
+  フローのファイルは store の中に置くので、Node がそこから `ayaito` や `zod` を import できるようにするため。
+
+### 始め方（MCP）
+
+エージェントは ukai がフローを描けることを知らないので、relay の MCP サーバー（前述）の `instructions` で伝え、
+ツールを出す。
+
+- `run_flow { name, script, input, run_id }` … `script`（default export がフローの TypeScript モジュール）を
+  `<store>/<run>/flow.ts` に置き、`ayaito run` を **別プロセスとして**起動してすぐ返る（`ukai_acp::flows::start`）。
+  プロセスグループを分け、出力は `run.log`、pid は `run.pid` に残す。MCP サーバー（エージェントの子）や
+  セッションが終わっても run は続く。同じ `run_id` を渡すと、保存済みの（または新しい）フローでチェックポイントから
+  再開する。動いている run は二重に始めない。
+- `read_flow { run_id }` … 状態と、ノードごとの進み具合（`ukai_core::flow::outline`）、終わっていれば結果。
+  **run が終わってもエージェントには通知が行かない**（MCP サーバーからターンは始められない）ので、エージェントが
+  これで確かめる。
+- `steer_flow { run_id, node, message }` / `stop_flow { run_id, node }` … 上の CLI 経由の指示。
+- フローはエージェントが書いたコードで、エージェントの権限で動く（エージェントがシェルで実行できることと同じ）。
+  フローの中のエージェント（`claudeRuntime` など）の資格情報は、Pod のエージェント自身のものを使う。
+- run の状態は `result.json` があればその `status`、なければ `run.pid` のプロセスが生きているか（Linux の
+  `/proc`）で決める: 結果を残さずに死んだ run は failed。pid のない run（手で始めたもの）は結果が出るまで running。
+
+### 読み方（relay / gateway）
+
+- relay は `/acp` の隣に `GET /flows`（run の一覧。最後に書いた順、100 件まで）、`GET /flows/<run>?after=<バイト>`
+  （グラフと、`events.jsonl` の `after` 以降の **行単位の**続き、次の位置、状態、結果）、`POST /flows/<run>`
+  （指示。`Order { node, message }`）を出す（`ukai-relay/src/flows.rs`）。run id はフォルダ名になれる文字だけ
+  （`ukai_acp::flows::run_id`）。リクエストの誤り（run がない、ノードが動いていない）は 422 と理由。
+- gateway は `ukai.gateway.v1.Flows`（`List` / `Read` / `Order`）で中継する。ワークスペースの名指しとトークン、
+  Pod を起こさないこと（FAILED_PRECONDITION）は `Ports.List` と同じで、relay の 422 は ABORTED にして理由を
+  そのまま返す。グラフとイベントは JSON の文字列のまま運ぶ（ayaito のスキーマを proto に写さない）。
+- 1 回の読み出しは 512 KiB まで。pane は `next` から読み継ぐ。
+
+### pane（`ukai-app/src/flows.rs`）
+
+- アプリは一覧をワークスペースごとに読み、サイドバーのそのワークスペースの「Flows」に出す（手元の checkout は
+  `Flows::Local` で同じファイルを直接読む）。エージェントの pane があるワークスペースで新しく始まった run は、
+  その pane の横に開く。フォーカスは動かさず、初めて読んだ一覧の run は開かない（プレビューと同じ規則）。
+- pane は run を読み継ぎ、グラフを描く: コードは箱、エージェントは角丸、flow / parallel / forEach / until は
+  メンバーを囲む枠。上から下へ、あるノードはそこへ導くノードの下。ループの本体は「done?」の横に置く
+  （ループを抜ける辺が本体を横切らないように）。ノードには状態の印、ラベル、包むもの（`checkpoint` など）と
+  所要時間・費用、動いているエージェントなら最後の発言かツール。
+- 動いているエージェントのノードを選ぶと、メッセージを送る・そのエージェントだけ止める。run 全体の停止も
+  pane から（チェックポイントは残るので、同じ run id で再開できる）。
+- グラフのラベルもイベントの本文もエージェントが書いたものなので、テキストとしてだけ描く（HTML にしない）。
+
+### 今後
+
+- run が終わったことをエージェントに伝える（relay の hub がセッションに prompt を入れる）。
+- 手元の stdio エージェントにも MCP のツールを渡す（relay の MCP サーバーを手元でも足すことになる。
+  ナレッジ・`open_preview` と同じ課題）。今は手元では、エージェントがシェルで `ayaito run` した run が見える。
+- Pod が落ちた後の run（store は checkout の `.git` の中なので、スナップショットには入らない）。
+
 ## Security
 
 - `fs/*` はプロジェクトルート配下に正規化後のパスで制限。シンボリックリンク経由の脱出も拒否。
@@ -1294,20 +1384,23 @@ pane の上部に戻る・進む・再読込・アドレス（オリジン上の
   `WorkspaceKnowledge` と `/health` のほかはトークンがあっても 403 で断る（`access::guard`）。Pod の IP は
   1 秒より古ければ引き直す。Pod の IP はエージェントが動く前（relay のコピーと clone の間）からあるので、
   その鮮度で足りる。一覧が引けなければ断る。
+- フローのグラフとイベントはエージェントが書いたファイルなので、テキストとしてだけ描き、run id はフォルダ名に
+  なれる文字に限る。フロー自体はエージェントの権限で動くコードで、ukai が実行を許すものではない
+  （エージェントがシェルでできることと同じ）。pane からの指示は ayaito の CLI に引数として渡す（シェルを通さない）。
 - browser pane も IPC を持たない子 WebView。トンネルは `127.0.0.1` だけで listen し、pane を閉じると止まる
   （開いている間は手元の他のプロセスからも使える。kubectl の port-forward と同じ）。relay の `/forward` は
   トークンが要り、Pod の中の `localhost` にしかつながない。
 
 ## Milestones
 
-| Phase | 内容                                                                                                                                                                                                                        |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル                                                                  |
-| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                                              |
-| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                                        |
-| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、音声入力、gateway のスケジュール（コマンドと prompt、済み）。リサイズ |
-| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、browser pane と gateway ワークスペースのポートへのトンネル・`open_preview`（済み）、ACP コンテンツからのレポート                             |
-| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                             |
+| Phase | 内容                                                                                                                                                                                                                                       |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0     | 環境構築: workspace、mise、CI、lint、`ukai.toml` のスキーマ・検証・`${env:}` 展開、spec → トランスポート解決、レイアウトを読み取り専用で描く Dioxus シェル                                                                                 |
+| 1     | stdio エージェントとのチャット（agent pane ごとに 1 セッション）、`fs/*`、パーミッション応答、`ukai-core::Transcript`。claude-agent-acp / codex-acp で確認済み                                                                             |
+| 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                                                       |
+| 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、音声入力、gateway のスケジュール（コマンドと prompt、済み）。リサイズ                |
+| 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、browser pane と gateway ワークスペースのポートへのトンネル・`open_preview`（済み）、ayaito のフローの実行と flow pane（済み）、ACP コンテンツからのレポート |
+| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                                            |
 
 ## Open questions
 
