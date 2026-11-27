@@ -77,6 +77,11 @@ pub struct AppSignals {
     /// What each secretary last listed of the running workspaces, kept by
     /// [`crate::secretary::FollowSecretaries`].
     pub secretaries: crate::secretary::Overviews,
+    /// What each checkout last listed of its flow runs, kept by
+    /// [`crate::flows::FollowFlows`].
+    pub flows: crate::flows::FlowListings,
+    /// What the flow panes have read of their runs.
+    pub flow_runs: crate::flows::FlowRuns,
 }
 
 impl AppSignals {

@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::Startup;
 use crate::alert::mark_read;
+use crate::flows::FollowFlows;
 use crate::gateways::list_gateways;
 use crate::knowledge::FollowKnowledge;
 use crate::layout::Workbench;
@@ -72,6 +73,8 @@ pub fn App() -> Element {
             editing_notes: Signal::new(HashSet::new()),
             terminals: Signal::new(HashMap::new()),
             secretaries: Signal::new(HashMap::new()),
+            flows: Signal::new(HashMap::new()),
+            flow_runs: Signal::new(HashMap::new()),
         }
     });
     use_hook(|| {
@@ -127,6 +130,7 @@ pub fn App() -> Element {
             Workbench {}
             Follow {}
             FollowPorts {}
+            FollowFlows {}
             FollowSchedules {}
             FollowKnowledge {}
             FollowSecretaries {}

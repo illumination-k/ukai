@@ -668,12 +668,17 @@ fn collect<'a>(
         }
         order.push((node, depth, untaken));
         if node.kind.is_group() {
-            let state = node
-                .name
-                .as_deref()
-                .and_then(|name| states.get(name));
+            let state = node.name.as_deref().and_then(|name| states.get(name));
             let below = untaken || not_taken(states, cases.get(node.id.as_str()), state);
-            collect(graph, states, cases, Some(&node.id), depth + 1, below, order);
+            collect(
+                graph,
+                states,
+                cases,
+                Some(&node.id),
+                depth + 1,
+                below,
+                order,
+            );
         }
     }
 }
@@ -707,7 +712,10 @@ pub fn outline(view: &RunView) -> String {
 /// were started before the app was looking, and opening them all on a
 /// restart would bury the layout. A run that has ended opens only when
 /// asked for.
-pub fn new_runs(seen: Option<&HashSet<String>>, runs: &[RunSummary]) -> (Vec<String>, HashSet<String>) {
+pub fn new_runs(
+    seen: Option<&HashSet<String>>,
+    runs: &[RunSummary],
+) -> (Vec<String>, HashSet<String>) {
     let known: HashSet<String> = runs.iter().map(|run| run.id.clone()).collect();
     let fresh = match seen {
         None => Vec::new(),

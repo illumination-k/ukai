@@ -32,7 +32,7 @@ const GRAPH: &str = r#"{
 }"#;
 
 fn graph() -> Graph {
-    Graph::parse(GRAPH).expect("the graph parses")
+    Graph::parse(GRAPH).unwrap_or_else(|error| panic!("the graph parses: {error}"))
 }
 
 fn seen(events: &str) -> RunView {
@@ -40,14 +40,17 @@ fn seen(events: &str) -> RunView {
 }
 
 fn status(view: &RunView, id: &str) -> Status {
-    view.node(id).expect("the node is shown").status
+    view.node(id).unwrap_or_else(|| panic!("the node is shown")).status
 }
 
 #[test]
 fn a_run_without_events_is_pending() {
     let view = seen("");
     assert_eq!(
-        view.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+        view.nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
         ["s0", "n1", "n2", "s3", "n5", "c6", "n7", "n8"],
         "the ends of the graph and the loop's done? say nothing"
     );
@@ -60,37 +63,62 @@ fn a_run_without_events_is_pending() {
 #[test]
 fn events_are_laid_over_the_graph() {
     let view = seen(concat!(
-        r#"{"type":"start","node":"weekly","at":"t"}"#, "\n",
-        r#"{"type":"start","node":"prepare","at":"t"}"#, "\n",
-        r#"{"type":"end","node":"prepare","at":"t","ms":12}"#, "\n",
-        r#"{"type":"skip","node":"select-topic","at":"t","reason":"checkpoint"}"#, "\n",
-        r#"{"type":"start","node":"select-topic","at":"t"}"#, "\n",
-        r#"{"type":"skip","node":"select-topic","at":"t","reason":"checkpoint"}"#, "\n",
-        r#"{"type":"end","node":"select-topic","at":"t","ms":1}"#, "\n",
-        r#"{"type":"start","node":"fix","at":"t"}"#, "\n",
-        r#"{"type":"usage","node":"fix","at":"t","usd":0.25,"models":{}}"#, "\n",
-        r#"{"type":"end","node":"fix","at":"t","ms":61000}"#, "\n",
-        r#"{"type":"start","node":"fix","at":"t"}"#, "\n",
-        r#"{"type":"session","node":"fix","at":"t","sessionId":"s-1"}"#, "\n",
-        r#"{"type":"retry","node":"fix","at":"t","attempt":1,"error":"x"}"#, "\n",
-        r#"{"type":"activity","node":"fix","at":"t","tool":"Bash","text":"npm\n  test"}"#, "\n",
-        r#"{"type":"mystery","node":"fix","at":"t"}"#, "\n",
+        r#"{"type":"start","node":"weekly","at":"t"}"#,
+        "\n",
+        r#"{"type":"start","node":"prepare","at":"t"}"#,
+        "\n",
+        r#"{"type":"end","node":"prepare","at":"t","ms":12}"#,
+        "\n",
+        r#"{"type":"skip","node":"select-topic","at":"t","reason":"checkpoint"}"#,
+        "\n",
+        r#"{"type":"start","node":"select-topic","at":"t"}"#,
+        "\n",
+        r#"{"type":"skip","node":"select-topic","at":"t","reason":"checkpoint"}"#,
+        "\n",
+        r#"{"type":"end","node":"select-topic","at":"t","ms":1}"#,
+        "\n",
+        r#"{"type":"start","node":"fix","at":"t"}"#,
+        "\n",
+        r#"{"type":"usage","node":"fix","at":"t","usd":0.25,"models":{}}"#,
+        "\n",
+        r#"{"type":"end","node":"fix","at":"t","ms":61000}"#,
+        "\n",
+        r#"{"type":"start","node":"fix","at":"t"}"#,
+        "\n",
+        r#"{"type":"session","node":"fix","at":"t","sessionId":"s-1"}"#,
+        "\n",
+        r#"{"type":"retry","node":"fix","at":"t","attempt":1,"error":"x"}"#,
+        "\n",
+        r#"{"type":"activity","node":"fix","at":"t","tool":"Bash","text":"npm\n  test"}"#,
+        "\n",
+        r#"{"type":"mystery","node":"fix","at":"t"}"#,
+        "\n",
         r#"{"type":"activity","node":"fix""#,
     ));
     assert_eq!(status(&view, "n1"), Status::Done);
-    assert_eq!(view.node("n1").map(|node| node.detail.as_str()), Some("12ms"));
+    assert_eq!(
+        view.node("n1").map(|node| node.detail.as_str()),
+        Some("12ms")
+    );
     assert_eq!(status(&view, "n2"), Status::Skipped);
     assert_eq!(
         view.node("n2").map(|node| node.detail.as_str()),
         Some("→ topic · checkpoint · retry · 1ms")
     );
-    let fix = view.node("n5").expect("fix is shown");
+    let fix = view.node("n5").unwrap_or_else(|| panic!("fix is shown"));
     assert_eq!(fix.status, Status::Running);
     assert_eq!(fix.detail, "worktree · ×2 · attempt 2 · $0.250");
     assert_eq!(fix.activity.as_deref(), Some("Bash npm test"));
     assert_eq!(fix.reach.as_deref(), Some("fix"));
-    assert_eq!(status(&view, "s3"), Status::Running, "a group is as far as its members");
-    assert_eq!(view.node("s3").map(|node| node.detail.as_str()), Some("at most 3"));
+    assert_eq!(
+        status(&view, "s3"),
+        Status::Running,
+        "a group is as far as its members"
+    );
+    assert_eq!(
+        view.node("s3").map(|node| node.detail.as_str()),
+        Some("at most 3")
+    );
     assert_eq!(status(&view, "s0"), Status::Running);
     assert_eq!((view.done, view.total), (2, 5));
     assert_eq!(view.summary(), "2/5 · $0.250");
@@ -99,16 +127,20 @@ fn events_are_laid_over_the_graph() {
 #[test]
 fn a_case_not_taken_is_skipped() {
     let view = seen(concat!(
-        r#"{"type":"start","node":"ship?","at":"t"}"#, "\n",
-        r#"{"type":"end","node":"ship?","at":"t","ms":1}"#, "\n",
-        r#"{"type":"start","node":"publish","at":"t"}"#, "\n",
-        r#"{"type":"error","node":"publish","at":"t","error":"no token"}"#, "\n",
+        r#"{"type":"start","node":"ship?","at":"t"}"#,
+        "\n",
+        r#"{"type":"end","node":"ship?","at":"t","ms":1}"#,
+        "\n",
+        r#"{"type":"start","node":"publish","at":"t"}"#,
+        "\n",
+        r#"{"type":"error","node":"publish","at":"t","error":"no token"}"#,
+        "\n",
     ));
-    let publish = view.node("n7").expect("publish is shown");
+    let publish = view.node("n7").unwrap_or_else(|| panic!("publish is shown"));
     assert_eq!(publish.status, Status::Failed);
     assert_eq!(publish.error.as_deref(), Some("no token"));
     assert_eq!(publish.when.as_deref(), Some("yes"));
-    let skip = view.node("n8").expect("skip is shown");
+    let skip = view.node("n8").unwrap_or_else(|| panic!("skip is shown"));
     assert_eq!(skip.status, Status::Skipped);
     assert_eq!(skip.detail, "not taken");
     assert_eq!(view.total, 4, "a step not taken is no step of this run");
@@ -117,9 +149,12 @@ fn a_case_not_taken_is_skipped() {
 #[test]
 fn a_stop_ends_what_was_running() {
     let view = seen(concat!(
-        r#"{"type":"start","node":"weekly","at":"t"}"#, "\n",
-        r#"{"type":"start","node":"prepare","at":"t"}"#, "\n",
-        r#"{"type":"stop","node":"prepare","at":"t","reason":"nothing to do"}"#, "\n",
+        r#"{"type":"start","node":"weekly","at":"t"}"#,
+        "\n",
+        r#"{"type":"start","node":"prepare","at":"t"}"#,
+        "\n",
+        r#"{"type":"stop","node":"prepare","at":"t","reason":"nothing to do"}"#,
+        "\n",
     ));
     assert_eq!(status(&view, "n1"), Status::Stopped);
     assert_eq!(status(&view, "s0"), Status::Stopped);
@@ -128,28 +163,40 @@ fn a_stop_ends_what_was_running() {
 #[test]
 fn messages_sent_to_an_agent_show_as_its_activity() {
     let view = seen(concat!(
-        r#"{"type":"start","node":"fix","at":"t","item":"2"}"#, "\n",
-        r#"{"type":"steer","node":"fix","at":"t","item":"2","message":"leave the tests"}"#, "\n",
+        r#"{"type":"start","node":"fix","at":"t","item":"2"}"#,
+        "\n",
+        r#"{"type":"steer","node":"fix","at":"t","item":"2","message":"leave the tests"}"#,
+        "\n",
     ));
     assert_eq!(
         view.node("n5").and_then(|node| node.activity.as_deref()),
         Some("#2 ← leave the tests")
     );
     let view = seen(concat!(
-        r#"{"type":"start","node":"fix","at":"t"}"#, "\n",
-        r#"{"type":"wrapUp","node":"fix","at":"t","stopped":true}"#, "\n",
+        r#"{"type":"start","node":"fix","at":"t"}"#,
+        "\n",
+        r#"{"type":"wrapUp","node":"fix","at":"t","stopped":true}"#,
+        "\n",
     ));
-    assert_eq!(view.node("n5").and_then(|node| node.activity.as_deref()), Some("← stop"));
+    assert_eq!(
+        view.node("n5").and_then(|node| node.activity.as_deref()),
+        Some("← stop")
+    );
 }
 
 #[test]
 fn the_outline_reads_as_text() {
     let view = seen(concat!(
-        r#"{"type":"start","node":"prepare","at":"t"}"#, "\n",
-        r#"{"type":"error","node":"prepare","at":"t","error":"boom"}"#, "\n",
+        r#"{"type":"start","node":"prepare","at":"t"}"#,
+        "\n",
+        r#"{"type":"error","node":"prepare","at":"t","error":"boom"}"#,
+        "\n",
     ));
     let outline = outline(&view);
-    assert!(outline.contains("  ✗ prepare (failed)\n    boom"), "{outline}");
+    assert!(
+        outline.contains("  ✗ prepare (failed)\n    boom"),
+        "{outline}"
+    );
     assert!(outline.contains("  [yes] ○ publish (pending)"), "{outline}");
 }
 
@@ -162,8 +209,9 @@ fn what_is_no_graph_is_refused(#[case] text: &str) {
 
 #[test]
 fn an_unknown_kind_is_a_step() {
-    let graph = Graph::parse(r#"{"nodes":[{"id":"a","kind":"quantum","label":"a","name":"a"}],"edges":[]}"#)
-        .expect("an unknown kind parses");
+    let graph = Graph::parse(
+        r#"{"nodes":[{"id":"a","kind":"quantum","label":"a","name":"a"}],"edges":[]}"#,
+    ).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(graph.nodes[0].kind, NodeKind::Other);
     assert_eq!(view(&graph, &[]).total, 1);
 }
@@ -176,7 +224,11 @@ fn money_reads_as_dollars(#[case] usd: f64, #[case] text: &str) {
 }
 
 fn shape<'a>(drawing: &'a Drawing, id: &str) -> &'a Shape {
-    drawing.shapes.iter().find(|shape| shape.id == id).expect("the node is placed")
+    drawing
+        .shapes
+        .iter()
+        .find(|shape| shape.id == id)
+        .unwrap_or_else(|| panic!("the node is placed"))
 }
 
 fn inside(inner: &Shape, outer: &Shape) -> bool {
@@ -199,16 +251,33 @@ fn every_node_is_placed_inside_its_group() {
     for node in &graph.nodes {
         let placed = shape(&drawing, &node.id);
         assert!(placed.x >= 0 && placed.y >= 0);
-        assert!(placed.x + placed.width <= drawing.width, "{} fits the width", node.id);
-        assert!(placed.y + placed.height <= drawing.height, "{} fits the height", node.id);
+        assert!(
+            placed.x + placed.width <= drawing.width,
+            "{} fits the width",
+            node.id
+        );
+        assert!(
+            placed.y + placed.height <= drawing.height,
+            "{} fits the height",
+            node.id
+        );
         if let Some(parent) = &node.parent {
-            assert!(inside(placed, shape(&drawing, parent)), "{} is in {parent}", node.id);
+            assert!(
+                inside(placed, shape(&drawing, parent)),
+                "{} is in {parent}",
+                node.id
+            );
         }
     }
     for a in &graph.nodes {
         for b in &graph.nodes {
             if a.id != b.id && a.parent == b.parent {
-                assert!(!overlap(shape(&drawing, &a.id), shape(&drawing, &b.id)), "{} and {}", a.id, b.id);
+                assert!(
+                    !overlap(shape(&drawing, &a.id), shape(&drawing, &b.id)),
+                    "{} and {}",
+                    a.id,
+                    b.id
+                );
             }
         }
     }
@@ -241,7 +310,11 @@ fn a_node_is_below_what_leads_to_it() {
 fn edges_carry_their_case_and_loops_lead_back() {
     let drawing = draw(&graph());
     let line = |from: &str, to: &str| {
-        drawing.lines.iter().find(|line| line.from == from && line.to == to).expect("the edge is drawn")
+        drawing
+            .lines
+            .iter()
+            .find(|line| line.from == from && line.to == to)
+            .unwrap_or_else(|| panic!("the edge is drawn"))
     };
     assert_eq!(line("c6", "n8").label.as_deref(), Some("no"));
     assert!(line("n5", "c4").back);
@@ -255,10 +328,16 @@ fn edges_carry_their_case_and_loops_lead_back() {
     r#"{"nodes":[{"id":"a","kind":"flow","label":"a","parent":"b"},{"id":"b","kind":"flow","label":"b","parent":"a"},{"id":"c","kind":"fn","label":"c"}],"edges":[{"from":"a","to":"c"},{"from":"c","to":"nowhere"}]}"#,
     1
 )]
-#[case::in_itself(r#"{"nodes":[{"id":"a","kind":"flow","label":"a","parent":"a"}],"edges":[]}"#, 1)]
-#[case::group_not_there(r#"{"nodes":[{"id":"a","kind":"fn","label":"a","parent":"gone"}],"edges":[]}"#, 1)]
+#[case::in_itself(
+    r#"{"nodes":[{"id":"a","kind":"flow","label":"a","parent":"a"}],"edges":[]}"#,
+    1
+)]
+#[case::group_not_there(
+    r#"{"nodes":[{"id":"a","kind":"fn","label":"a","parent":"gone"}],"edges":[]}"#,
+    1
+)]
 fn a_graph_that_is_no_tree_is_drawn_as_far_as_it_goes(#[case] text: &str, #[case] placed: usize) {
-    let graph = Graph::parse(text).expect("the graph parses");
+    let graph = Graph::parse(text).unwrap_or_else(|error| panic!("{error}"));
     let drawing = draw(&graph);
     assert_eq!(drawing.shapes.len(), placed);
     assert!(drawing.lines.is_empty());
@@ -269,10 +348,17 @@ fn a_graph_that_is_no_tree_is_drawn_as_far_as_it_goes(#[case] text: &str, #[case
 fn deep_nesting_ends_as_a_step() {
     let mut nodes = Vec::new();
     for at in 0..200 {
-        let parent = if at == 0 { String::new() } else { format!(r#","parent":"g{}""#, at - 1) };
-        nodes.push(format!(r#"{{"id":"g{at}","kind":"flow","label":"g","name":"g{at}"{parent}}}"#));
+        let parent = if at == 0 {
+            String::new()
+        } else {
+            format!(r#","parent":"g{}""#, at - 1)
+        };
+        nodes.push(format!(
+            r#"{{"id":"g{at}","kind":"flow","label":"g","name":"g{at}"{parent}}}"#
+        ));
     }
-    let graph = Graph::parse(&format!(r#"{{"nodes":[{}],"edges":[]}}"#, nodes.join(","))).expect("it parses");
+    let graph = Graph::parse(&format!(r#"{{"nodes":[{}],"edges":[]}}"#, nodes.join(",")))
+        .unwrap_or_else(|| panic!("it parses"));
     let drawing = draw(&graph);
     assert!(drawing.shapes.len() < 200);
     assert!(!drawing.shapes.is_empty());
@@ -289,7 +375,10 @@ fn summary(id: &str, state: RunState) -> RunSummary {
 
 #[test]
 fn only_runs_that_start_while_looking_are_new() {
-    let runs = [summary("a", RunState::Running), summary("b", RunState::Done)];
+    let runs = [
+        summary("a", RunState::Running),
+        summary("b", RunState::Done),
+    ];
     let (fresh, known) = new_runs(None, &runs);
     assert!(fresh.is_empty(), "nothing is new on the first look");
     assert_eq!(known.len(), 2);

@@ -130,10 +130,7 @@ impl Layout<'_> {
             .unwrap_or(0);
         let height = rows.iter().map(|row| self.row_height(row)).sum::<i32>()
             + GAP_Y * i32::try_from(count.saturating_sub(1)).unwrap_or(0);
-        self.rows.insert(
-            group,
-            Rows { rows, width },
-        );
+        self.rows.insert(group, Rows { rows, width });
         (width, height)
     }
 
@@ -189,7 +186,9 @@ fn curve(a: &Shape, b: &Shape, back: bool) -> (String, i32, i32) {
         let (start_y, end_y) = (a.y, b.y);
         let over = start_y.min(end_y) - 26;
         return (
-            format!("M {a_mid_x} {start_y} C {a_mid_x} {over}, {b_mid_x} {over}, {b_mid_x} {end_y}"),
+            format!(
+                "M {a_mid_x} {start_y} C {a_mid_x} {over}, {b_mid_x} {over}, {b_mid_x} {end_y}"
+            ),
             (a_mid_x + b_mid_x) / 2,
             over + 8,
         );

@@ -9,6 +9,7 @@ mod child_view;
 mod clipboard;
 mod diff_pane;
 mod diff_view;
+mod flows;
 mod follow;
 mod gateways;
 mod icons;

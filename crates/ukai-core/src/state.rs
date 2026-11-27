@@ -292,6 +292,28 @@ mod tests {
         assert_eq!(back.ok(), Some(content));
     }
 
+    #[rstest]
+    #[case::this_machine(
+        ReportSource::Project,
+        r#"{"kind":"flow","project":"p1","run":"weekly-1a"}"#
+    )]
+    #[case::gateway(
+        ReportSource::Agent { agent: "cloud".into(), workspace: None },
+        r#"{"kind":"flow","project":"p1","run":"weekly-1a","place":{"kind":"agent","agent":"cloud"}}"#
+    )]
+    fn a_flow_pane_round_trips(#[case] place: ReportSource, #[case] json: &str) {
+        let mut projects = Projects::default();
+        let project = projects.add(Path::new("/work/ukai"));
+        let content = PaneContent::Flow {
+            project,
+            run: "weekly-1a".into(),
+            place,
+        };
+        assert_eq!(serde_json::to_string(&content).ok().as_deref(), Some(json));
+        let back: Result<PaneContent, _> = serde_json::from_str(json);
+        assert_eq!(back.ok(), Some(content));
+    }
+
     #[test]
     fn a_report_of_a_gateway_workspace_round_trips() {
         let mut projects = Projects::default();
