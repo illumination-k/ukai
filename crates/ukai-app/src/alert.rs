@@ -45,6 +45,28 @@ pub fn notify_if_away(summary: &str, body: &str) {
     }
 }
 
+/// The bundle's identifier (`[bundle] identifier` in `Dioxus.toml`).
+#[cfg(target_os = "macos")]
+const BUNDLE_IDENTIFIER: &str = "dev.illumination-k.ukai";
+
+/// Have macOS show notifications as this app's. Left alone, `notify-rust`
+/// sends them as Finder's, which macOS drops unless Finder may notify. Only
+/// a bundled app has an identity to send as; a bare binary keeps Finder's.
+///
+/// Call once, before the first notification.
+pub fn send_as_this_app() {
+    #[cfg(target_os = "macos")]
+    {
+        let bundled = std::env::current_exe().is_ok_and(|exe| {
+            exe.ancestors()
+                .any(|dir| dir.extension().is_some_and(|extension| extension == "app"))
+        });
+        if bundled && let Err(error) = notify_rust::set_application(BUNDLE_IDENTIFIER) {
+            tracing::warn!(%error, "cannot send desktop notifications as this app");
+        }
+    }
+}
+
 fn show(summary: String, body: String) {
     // Showing can block on the notification daemon.
     std::thread::spawn(move || {

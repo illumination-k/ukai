@@ -78,6 +78,7 @@ pub fn run() {
         )
         .with_writer(std::io::stderr)
         .init();
+    alert::send_as_this_app();
 
     let env = |name: &str| std::env::var(name).ok();
     let paths = Paths {
