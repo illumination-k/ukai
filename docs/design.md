@@ -510,7 +510,7 @@ workspace = { git = "https://github.com/o/r" }
 
 - **常駐**: 秘書は gateway のエージェントとして、専用の pane で開く（下の UI。固定の鍵の 1 つの
   ワークスペースは未実装で、`workspace` の既定に従う）。記憶はナレッジ（スコープは秘書のもの）、定期の仕事はスケジュールを
-  そのまま使う。セッションが接続より長く生きるのは relay の性質なので、新しく要るものはない。
+  そのまま使い、秘書自身も置ける（下の `create_schedule`）。セッションが接続より長く生きるのは relay の性質なので、新しく要るものはない。
 - **束ねる**: `secretary = true` のエージェントの Pod では、エージェントのコンテナに `UKAI_SECRETARY=true` が
   入り、relay は MCP サーバーに `--secretary` を渡して次のツールを出す（`mcp::secretary`）。答えるのは
   Pod 向けの gRPC `ukai.gateway.v1.WorkspaceSecretary`（gateway の `secretary`）で、gateway は relay の
@@ -530,6 +530,19 @@ workspace = { git = "https://github.com/o/r" }
     FAILED_PRECONDITION）。
   - `start_session`: Pod がなければ立て（`ensure_pod`。待つのは接続と同じ最大 15 分）、`POST /sessions` で
     新しいセッションを作って prompt を送る。新しい鍵を渡せば専用のワークスペースになる。
+  - `list_schedules` / `create_schedule` / `update_schedule` / `delete_schedule`: 定期の仕事（前述
+    「スケジュール」）を秘書自身が置く。gateway の `Scheduler` をそのまま使い、RPC は `WorkspaceSecretary` の
+    `ListSchedules`・`CreateSchedule`・`UpdateSchedule`・`DeleteSchedule`。
+    - 一覧は全エージェントのスケジュール（ユーザーのものも読める）。作れるのはどのエージェント（秘書自身も）の
+      ものでも、タスクは **prompt だけ**（`command` は PERMISSION_DENIED。コマンドはパーミッション要求なしに
+      Pod で走るので、秘書に許すとユーザーの確認を飛ばせる）。
+    - prompt は `marked` を付けて保存し（付いていた印は付け直す）、変更と削除はその印が自分のものだけ
+      （それ以外は PERMISSION_DENIED）。作り手の欄を足さずに済み、run のセッションでも誰の prompt か分かる。
+      アプリでユーザーが編集しても印が残っていれば秘書のもの。
+    - run は普通のスケジュールと同じく `schedule-<id>` のワークスペースで毎回新しいセッション。秘書の常駐
+      セッションには届かないので、run をまたいで残すものはナレッジに置くよう `instructions` に書く。
+      `utc_offset_minutes` は必須で、分からなければユーザーに聞かせる（Pod の時刻帯はユーザーのものではない）。
+    - `update_schedule` は渡した項目だけ変える（relay が一覧から今の spec を取って重ねる）。
   - relay は 1 セッションに 1 クライアントで、後から load したほうが引き継ぐ。gateway が ACP で繋ぐと
     ユーザーの pane からセッションを奪うので、prompt は**どの接続でもないところ**から hub に入れる
     （`Hub::prompt_unattached` / `start_unattached`、接続 `UNATTACHED`）。記録には普通の prompt と同じく残り、

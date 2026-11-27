@@ -285,6 +285,54 @@ impl SecretaryEndpoint {
             .into_inner()
             .session)
     }
+
+    /// Every agent's schedules.
+    pub async fn schedules(&self) -> Result<Vec<gw::ScheduleInfo>, SecretaryError> {
+        Ok(self
+            .client()
+            .list_schedules(gw::ListAllSchedulesRequest {})
+            .await?
+            .into_inner()
+            .schedules)
+    }
+
+    /// Create a schedule of `agent` (`id` empty) or replace the spec of its
+    /// schedule `id`: the saved schedule, or every reason it was refused.
+    pub async fn save_schedule(
+        &self,
+        agent: &str,
+        id: &str,
+        spec: gw::ScheduleSpec,
+    ) -> Result<gw::ScheduleChange, SecretaryError> {
+        let mut client = self.client();
+        let change = if id.is_empty() {
+            client
+                .create_schedule(gw::CreateScheduleRequest {
+                    agent: agent.to_owned(),
+                    spec: Some(spec),
+                })
+                .await?
+        } else {
+            client
+                .update_schedule(gw::UpdateScheduleRequest {
+                    agent: agent.to_owned(),
+                    id: id.to_owned(),
+                    spec: Some(spec),
+                })
+                .await?
+        };
+        Ok(change.into_inner())
+    }
+
+    pub async fn delete_schedule(&self, agent: &str, id: &str) -> Result<(), SecretaryError> {
+        self.client()
+            .delete_schedule(gw::ScheduleRequest {
+                agent: agent.to_owned(),
+                id: id.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
 }
 
 /// How long the overview may take: the gateway asks every relay, each

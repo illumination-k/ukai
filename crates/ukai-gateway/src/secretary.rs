@@ -4,6 +4,12 @@
 //! known by its relay's token, and only a pod whose agent `gateway.toml`
 //! marks `secretary = true` is answered. A prompt goes to the relay with no
 //! client of its own, so the user's pane keeps the session.
+//!
+//! A secretary also keeps schedules, of any agent: prompts only, never
+//! commands, since a command runs with no permission request for the user
+//! to answer. Each prompt is kept [`marked`] as the secretary's, and that
+//! mark is what lets it change or remove the schedule later; the user's own
+//! schedules it only reads.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,11 +17,13 @@ use std::time::Duration;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::StatusCode;
 use tonic::{Request, Response, Status};
-use ukai_acp::secretary::{Entry, PromptBody, SessionSummary, Started, marked};
+use ukai_acp::secretary::{Entry, PromptBody, SessionSummary, Started, marked, unmarked};
+use ukai_core::schedule::{ScheduleInfo, ScheduleSpec, Task};
 use ukai_proto::gateway::v1 as gw;
 
 use crate::Gateway;
 use crate::access;
+use crate::api::{change, spec};
 use crate::cluster::{RelayEndpoint, RunningPod};
 use crate::job::Plan;
 
@@ -75,6 +83,61 @@ impl PodSecretary {
             .await?
             .ok_or_else(|| Status::failed_precondition("the workspace is not running"))
     }
+}
+
+impl PodSecretary {
+    /// `id` of `agent`, if `asking` created it; NOT_FOUND or PERMISSION_DENIED otherwise.
+    fn own_schedule(&self, asking: &Asking, agent: &str, id: &str) -> Result<(), Status> {
+        access::agent(&self.gateway, agent)?;
+        let info = self
+            .gateway
+            .schedules
+            .info(agent, id)
+            .ok_or_else(|| Status::not_found("no such schedule"))?;
+        if made_by(&info, &asking.agent) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(
+                "a secretary changes only the schedules it created",
+            ))
+        }
+    }
+}
+
+/// Whether `secretary` created the schedule: its prompt carries its mark.
+fn made_by(info: &ScheduleInfo, secretary: &str) -> bool {
+    match &info.schedule.spec.task {
+        Task::Prompt { prompt } => unmarked(prompt).is_some_and(|(by, _)| by == secretary),
+        Task::Command { .. } => false,
+    }
+}
+
+/// `spec` as `secretary` may save it: a prompt, marked as its own (once,
+/// whatever mark it came with).
+fn secretary_spec(secretary: &str, spec: ScheduleSpec) -> Result<ScheduleSpec, Status> {
+    let ScheduleSpec {
+        name,
+        cron,
+        utc_offset_minutes,
+        task,
+        enabled,
+    } = spec;
+    let Task::Prompt { prompt } = task else {
+        return Err(Status::permission_denied(
+            "a secretary schedules prompts, not commands",
+        ));
+    };
+    let prompt = unmarked(&prompt).map_or(prompt.as_str(), |(_, prompt)| prompt);
+    prompt_problem(prompt)?;
+    Ok(ScheduleSpec {
+        name,
+        cron,
+        utc_offset_minutes,
+        task: Task::Prompt {
+            prompt: marked(secretary, prompt),
+        },
+        enabled,
+    })
 }
 
 fn address(session: Option<gw::SessionAddress>) -> Result<gw::SessionAddress, Status> {
@@ -293,6 +356,67 @@ impl gw::workspace_secretary_server::WorkspaceSecretary for PodSecretary {
             session: started.session,
         }))
     }
+
+    async fn list_schedules(
+        &self,
+        request: Request<gw::ListAllSchedulesRequest>,
+    ) -> Result<Response<gw::ListSchedulesResponse>, Status> {
+        self.asking(&request).await?;
+        Ok(Response::new(gw::ListSchedulesResponse {
+            schedules: self
+                .gateway
+                .schedules
+                .list_all()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }))
+    }
+
+    async fn create_schedule(
+        &self,
+        request: Request<gw::CreateScheduleRequest>,
+    ) -> Result<Response<gw::ScheduleChange>, Status> {
+        let asking = self.asking(&request).await?;
+        let request = request.into_inner();
+        access::agent(&self.gateway, &request.agent)?;
+        let spec = secretary_spec(&asking.agent, spec(request.spec)?)?;
+        let created = self.gateway.schedules.create(&request.agent, spec);
+        if created.is_ok() {
+            tracing::info!(secretary = %asking.agent, agent = %request.agent, "a secretary created a schedule");
+        }
+        change(created.map(Some))
+    }
+
+    async fn update_schedule(
+        &self,
+        request: Request<gw::UpdateScheduleRequest>,
+    ) -> Result<Response<gw::ScheduleChange>, Status> {
+        let asking = self.asking(&request).await?;
+        let request = request.into_inner();
+        self.own_schedule(&asking, &request.agent, &request.id)?;
+        let spec = secretary_spec(&asking.agent, spec(request.spec)?)?;
+        change(
+            self.gateway
+                .schedules
+                .update(&request.agent, &request.id, spec),
+        )
+    }
+
+    async fn delete_schedule(
+        &self,
+        request: Request<gw::ScheduleRequest>,
+    ) -> Result<Response<gw::DeleteScheduleResponse>, Status> {
+        let asking = self.asking(&request).await?;
+        let request = request.into_inner();
+        self.own_schedule(&asking, &request.agent, &request.id)?;
+        if self.gateway.schedules.delete(&request.agent, &request.id) {
+            tracing::info!(secretary = %asking.agent, agent = %request.agent, "a secretary removed a schedule");
+            Ok(Response::new(gw::DeleteScheduleResponse {}))
+        } else {
+            Err(Status::not_found("no such schedule"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +431,75 @@ mod tests {
     #[case::too_long(&"x".repeat(PROMPT_MAX_BYTES + 1), false)]
     fn checks_a_prompt(#[case] prompt: &str, #[case] fine: bool) {
         assert_eq!(prompt_problem(prompt).is_ok(), fine);
+    }
+
+    fn prompt_spec(prompt: &str) -> ScheduleSpec {
+        ScheduleSpec {
+            name: "triage".into(),
+            cron: "0 9 * * *".into(),
+            utc_offset_minutes: 540,
+            task: Task::Prompt {
+                prompt: prompt.into(),
+            },
+            enabled: true,
+        }
+    }
+
+    fn info(spec: ScheduleSpec) -> ScheduleInfo {
+        ScheduleInfo {
+            schedule: ukai_core::schedule::Schedule {
+                id: "s1".into(),
+                agent: "claude".into(),
+                spec,
+                workspace_key: "schedule-s1".into(),
+                last_due: 0,
+            },
+            next_due: None,
+            last_run: None,
+        }
+    }
+
+    #[test]
+    fn a_secretarys_schedule_is_marked_as_its_own_once() {
+        let saved = secretary_spec("aide", prompt_spec(&marked("other", "look at the issues")));
+        let task = saved.map(|spec| spec.task).map_err(|status| status.code());
+        assert_eq!(
+            task,
+            Ok(Task::Prompt {
+                prompt: marked("aide", "look at the issues")
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::command(
+        ScheduleSpec { task: Task::Command { command: "make".into() }, ..prompt_spec("") },
+        tonic::Code::PermissionDenied
+    )]
+    #[case::empty_prompt(prompt_spec(" "), tonic::Code::InvalidArgument)]
+    #[case::empty_marked_prompt(prompt_spec(&marked("aide", "")), tonic::Code::InvalidArgument)]
+    fn a_secretary_schedules_only_prompts(#[case] spec: ScheduleSpec, #[case] code: tonic::Code) {
+        assert_eq!(
+            secretary_spec("aide", spec)
+                .map(drop)
+                .map_err(|status| status.code()),
+            Err(code)
+        );
+    }
+
+    #[rstest]
+    #[case::its_own(marked("aide", "triage"), true)]
+    #[case::another_secretarys(marked("other", "triage"), false)]
+    #[case::the_users("triage".to_owned(), false)]
+    fn a_secretary_changes_only_what_it_created(#[case] prompt: String, #[case] own: bool) {
+        assert_eq!(made_by(&info(prompt_spec(&prompt)), "aide"), own);
+        let command = ScheduleSpec {
+            task: Task::Command {
+                command: "make".into(),
+            },
+            ..prompt_spec("")
+        };
+        assert!(!made_by(&info(command), "aide"));
     }
 
     #[test]

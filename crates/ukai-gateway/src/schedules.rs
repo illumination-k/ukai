@@ -122,6 +122,17 @@ impl Scheduler {
         list
     }
 
+    /// Every agent's schedules, by agent and then name.
+    pub fn list_all(&self) -> Vec<ScheduleInfo> {
+        let state = self.state();
+        let mut list: Vec<ScheduleInfo> = state.iter().filter_map(|s| state.info(&s.id)).collect();
+        list.sort_by(|a, b| {
+            (&a.schedule.agent, &a.schedule.spec.name)
+                .cmp(&(&b.schedule.agent, &b.schedule.spec.name))
+        });
+        list
+    }
+
     /// `id` if it is one of `agent`'s.
     pub fn info(&self, agent: &str, id: &str) -> Option<ScheduleInfo> {
         self.state()
