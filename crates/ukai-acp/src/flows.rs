@@ -268,7 +268,11 @@ impl Store {
             };
             for entry in entries.flatten() {
                 let folder = entry.path();
-                let Some(id) = entry.file_name().to_str().and_then(run_id).map(str::to_owned)
+                let Some(id) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(run_id)
+                    .map(str::to_owned)
                 else {
                     continue;
                 };
@@ -477,7 +481,13 @@ pub fn start(root: &Path, store: &Store, request: &StartRequest) -> Result<Start
                 .as_deref()
                 .unwrap_or("flow")
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
                 .take(64)
                 .collect();
             let name = name.trim_matches('-');
@@ -498,7 +508,10 @@ pub fn start(root: &Path, store: &Store, request: &StartRequest) -> Result<Start
         ));
     }
     let flow = folder.join("flow.ts");
-    let script = request.script.as_deref().filter(|script| !script.trim().is_empty());
+    let script = request
+        .script
+        .as_deref()
+        .filter(|script| !script.trim().is_empty());
     if script.is_none() && !flow.is_file() {
         return refused(match &request.run {
             Some(_) => format!("there is no saved flow for run {run}: pass script"),
@@ -543,9 +556,7 @@ pub fn start(root: &Path, store: &Store, request: &StartRequest) -> Result<Start
         use std::os::unix::process::CommandExt;
         ayaito.process_group(0);
     }
-    let mut child = ayaito
-        .spawn()
-        .map_err(|error| io("start ayaito", &error))?;
+    let mut child = ayaito.spawn().map_err(|error| io("start ayaito", &error))?;
     std::fs::write(folder.join(PID_FILE), child.id().to_string())
         .map_err(|error| io("record the run's process", &error))?;
     // Nobody waits for the run, but its end has to be taken, or the process
@@ -582,7 +593,12 @@ fn link_modules(store: &Path, modules: &Path) {
 
 /// Passes `order` to `run` through ayaito's command line, which knows
 /// whether the run and the node's agent are there to take it.
-pub async fn order(root: &Path, store: &Store, run: &str, order: &Order) -> Result<Ordered, FlowError> {
+pub async fn order(
+    root: &Path,
+    store: &Store,
+    run: &str,
+    order: &Order,
+) -> Result<Ordered, FlowError> {
     if let Some(problem) = order.problem() {
         return Err(FlowError::Refused(problem.to_owned()));
     }
@@ -592,7 +608,11 @@ pub async fn order(root: &Path, store: &Store, run: &str, order: &Order) -> Resu
     };
     let mut ayaito = tokio::process::Command::new(command);
     ayaito
-        .arg(if order.message.is_some() { "steer" } else { "stop" })
+        .arg(if order.message.is_some() {
+            "steer"
+        } else {
+            "stop"
+        })
         .arg("--store")
         .arg(folder.parent().unwrap_or(&store.dir))
         .arg("--")

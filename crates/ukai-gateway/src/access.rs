@@ -299,6 +299,7 @@ mod tests {
     #[case::secretary("/ukai.gateway.v1.WorkspaceSecretary/PromptSession", true)]
     #[case::persons_knowledge("/ukai.gateway.v1.Knowledge/Approve", false)]
     #[case::schedules("/ukai.gateway.v1.Schedules/Create", false)]
+    #[case::flows("/ukai.gateway.v1.Flows/Order", false)]
     #[case::acp("/agents/a/acp", false)]
     #[case::lookalike("/ukai.gateway.v1.WorkspaceKnowledgeX/Put", false)]
     #[case::reports_lookalike("/ukai.gateway.v1.WorkspaceReportsX/Publish", false)]

@@ -124,6 +124,11 @@ pub async fn run(options: Options) -> std::io::Result<()> {
             cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
             terminals.clone(),
         ))
+        // The runs of the flows the agent starts in the checkout; see
+        // `crate::flows`.
+        .merge(crate::flows::router(
+            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        ))
         .merge(crate::ports::router(crate::ports::Ports {
             own: options.listen.port(),
             previews: previews.clone(),
@@ -205,6 +210,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 (!options.secretary).then_some(review.as_path()),
                 Some(&sessions),
                 options.secretary,
+                // Nor about running workflows of agents.
+                !options.secretary,
             )]
         }
         (_, Err(error)) => {
@@ -293,7 +300,7 @@ async fn authorize(token: Option<Arc<str>>, request: Request, next: Next) -> Res
         return next.run(request).await;
     };
     // `/health` stays open for the kubelet's probes; `/acp`, the reports
-    // of the agent's checkout, its files and commands, its terminals, and its ports all
+    // of the agent's checkout, its files and commands, its terminals, its flows, and its ports all
     // want the token.
     if request.uri().path().starts_with("/health") {
         return next.run(request).await;

@@ -11,8 +11,9 @@ struct Checkout {
 
 impl Checkout {
     fn new() -> Self {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        std::fs::create_dir_all(dir.path().join("root")).expect("the checkout");
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("a temporary directory: {e:?}"));
+        std::fs::create_dir_all(dir.path().join("root"))
+            .unwrap_or_else(|e| panic!("the checkout: {e:?}"));
         Self { dir }
     }
 
@@ -26,8 +27,9 @@ impl Checkout {
 
     fn put(&self, run: &str, file: &str, text: &str) {
         let folder = self.store().dir.join(run);
-        std::fs::create_dir_all(&folder).expect("the run's folder");
-        std::fs::write(folder.join(file), text).expect("the file is written");
+        std::fs::create_dir_all(&folder).unwrap_or_else(|e| panic!("the run's folder: {e:?}"));
+        std::fs::write(folder.join(file), text)
+            .unwrap_or_else(|e| panic!("the file is written: {e:?}"));
     }
 
     /// A stand-in for ayaito's command line in the checkout, which records
@@ -36,15 +38,16 @@ impl Checkout {
     fn install(&self, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         let bin = self.root().join("node_modules").join(".bin");
-        std::fs::create_dir_all(&bin).expect("the bin directory");
+        std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("the bin directory: {e:?}"));
         let file = bin.join("ayaito");
         let args = self.dir.path().join("args");
         let text = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{script}\n",
             args.display()
         );
-        std::fs::write(&file, text).expect("the script is written");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("it runs");
+        std::fs::write(&file, text).unwrap_or_else(|e| panic!("the script is written: {e:?}"));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("it runs: {e:?}"));
     }
 
     #[cfg(unix)]
@@ -75,17 +78,29 @@ fn runs_are_listed_newest_first_with_their_state() {
     checkout.put("stopped", "graph.json", GRAPH);
     checkout.put("stopped", "result.json", r#"{"status":"stopped"}"#);
     checkout.put("failed", "graph.json", GRAPH);
-    checkout.put("failed", "result.json", r#"{"status":"failed","error":"x"}"#);
+    checkout.put(
+        "failed",
+        "result.json",
+        r#"{"status":"failed","error":"x"}"#,
+    );
     checkout.put("going", "graph.json", GRAPH);
     // An attempt that started leaves its result empty until it ends.
     checkout.put("going", "result.json", "");
     checkout.put("no-graph", "events.jsonl", "");
     checkout.put(".hidden", "graph.json", GRAPH);
-    std::fs::create_dir_all(checkout.root().join(".runs/legacy")).expect("the legacy store");
-    std::fs::write(checkout.root().join(".runs/legacy/graph.json"), GRAPH).expect("written");
+    std::fs::create_dir_all(checkout.root().join(".runs/legacy"))
+        .unwrap_or_else(|e| panic!("the legacy store: {e:?}"));
+    std::fs::write(checkout.root().join(".runs/legacy/graph.json"), GRAPH)
+        .unwrap_or_else(|e| panic!("written: {e:?}"));
 
     let listing = checkout.store().list();
-    let state = |id: &str| listing.runs.iter().find(|run| run.id == id).map(|run| run.state);
+    let state = |id: &str| {
+        listing
+            .runs
+            .iter()
+            .find(|run| run.id == id)
+            .map(|run| run.state)
+    };
     assert_eq!(listing.runs.len(), 5);
     assert_eq!(state("old"), Some(RunState::Done));
     assert_eq!(state("stopped"), Some(RunState::Stopped));
@@ -117,31 +132,49 @@ fn a_run_is_read_in_whole_lines_from_an_offset() {
     let checkout = Checkout::new();
     checkout.put("run", "graph.json", GRAPH);
     let store = checkout.store();
-    let empty = store.read("run", 0).expect("the run is read");
-    assert_eq!((empty.graph.as_str(), empty.events.as_str(), empty.next), (GRAPH, "", 0));
+    let empty = store
+        .read("run", 0)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
+    assert_eq!(
+        (empty.graph.as_str(), empty.events.as_str(), empty.next),
+        (GRAPH, "", 0)
+    );
     assert_eq!(empty.state, RunState::Running);
     assert_eq!(empty.result, None);
 
     checkout.put("run", "events.jsonl", "{\"a\":1}\n{\"b\":2}\n{\"c\":");
-    let first = store.read("run", 0).expect("the run is read");
+    let first = store
+        .read("run", 0)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
     assert_eq!(first.events, "{\"a\":1}\n{\"b\":2}\n");
     assert_eq!(first.next, 16);
-    let none = store.read("run", first.next).expect("the run is read");
+    let none = store
+        .read("run", first.next)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
     assert_eq!((none.events.as_str(), none.next), ("", 16));
 
     checkout.put("run", "events.jsonl", "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
-    let rest = store.read("run", first.next).expect("the run is read");
+    let rest = store
+        .read("run", first.next)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
     assert_eq!(rest.events, "{\"c\":3}\n");
 
     // Written anew, shorter than what was read: from the start.
     checkout.put("run", "events.jsonl", "{}\n");
-    let anew = store.read("run", rest.next).expect("the run is read");
+    let anew = store
+        .read("run", rest.next)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
     assert_eq!((anew.events.as_str(), anew.next), ("{}\n", 3));
 
     checkout.put("run", "result.json", r#"{"status":"done","output":1}"#);
-    let ended = store.read("run", 3).expect("the run is read");
+    let ended = store
+        .read("run", 3)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
     assert_eq!(ended.state, RunState::Done);
-    assert_eq!(ended.result.as_deref(), Some(r#"{"status":"done","output":1}"#));
+    assert_eq!(
+        ended.result.as_deref(),
+        Some(r#"{"status":"done","output":1}"#)
+    );
 }
 
 #[test]
@@ -154,7 +187,9 @@ fn long_events_are_read_in_parts() {
     let mut after = 0;
     let mut read = String::new();
     for _ in 0..10 {
-        let chunk = store.read("run", after).expect("the run is read");
+        let chunk = store
+            .read("run", after)
+            .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
         assert!(chunk.events.len() <= MAX_CHUNK);
         assert!(chunk.events.is_empty() || chunk.events.ends_with('\n'));
         read.push_str(&chunk.events);
@@ -184,8 +219,15 @@ fn a_line_longer_than_a_part_is_passed_whole() {
 #[case::not_an_id("../x", "is not a run id")]
 #[case::unknown("nope", "there is no run")]
 fn a_run_that_is_not_there_is_refused(#[case] run: &str, #[case] why: &str) {
-    let error = Checkout::new().store().read(run, 0).expect_err("it is refused");
-    assert!(matches!(&error, FlowError::Refused(text) if text.contains(why)), "{error}");
+    let error = Checkout::new()
+        .store()
+        .read(run, 0)
+        .err()
+        .unwrap_or_else(|| panic!("it is refused"));
+    assert!(
+        matches!(&error, FlowError::Refused(text) if text.contains(why)),
+        "{error}"
+    );
 }
 
 #[rstest]
@@ -218,19 +260,34 @@ async fn without_ayaito_nothing_is_ordered_or_started() {
     checkout.put("run", "graph.json", GRAPH);
     // Whatever is installed on this machine is not found.
     let path = std::env::var_os("PATH");
-    if path.is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("ayaito").is_file())) {
+    if path.is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("ayaito").is_file()))
+    {
         return;
     }
-    let error = order(&checkout.root(), &checkout.store(), "run", &Order::default())
-        .await
-        .expect_err("it is refused");
-    assert!(matches!(&error, FlowError::Refused(why) if why.contains("not installed")), "{error}");
+    let error = order(
+        &checkout.root(),
+        &checkout.store(),
+        "run",
+        &Order::default(),
+    )
+    .await
+    .err()
+    .unwrap_or_else(|| panic!("it is refused"));
+    assert!(
+        matches!(&error, FlowError::Refused(why) if why.contains("not installed")),
+        "{error}"
+    );
     let request = StartRequest {
         script: Some("export default 1".to_owned()),
         ..StartRequest::default()
     };
-    let error = start(&checkout.root(), &checkout.store(), &request).expect_err("it is refused");
-    assert!(matches!(&error, FlowError::Refused(why) if why.contains("not installed")), "{error}");
+    let error = start(&checkout.root(), &checkout.store(), &request)
+        .err()
+        .unwrap_or_else(|| panic!("it is refused"));
+    assert!(
+        matches!(&error, FlowError::Refused(why) if why.contains("not installed")),
+        "{error}"
+    );
 }
 
 #[cfg(unix)]
@@ -244,24 +301,38 @@ async fn orders_go_through_ayaito() {
         node: Some("fix".to_owned()),
         message: Some("leave the tests".to_owned()),
     };
-    let ordered = order(&checkout.root(), &store, "run", &steer).await.expect("it is sent");
+    let ordered = order(&checkout.root(), &store, "run", &steer)
+        .await
+        .unwrap_or_else(|e| panic!("it is sent: {e:?}"));
     assert_eq!(ordered.said, "sent");
     let dir = store.dir.to_string_lossy().into_owned();
     assert_eq!(
         checkout.args(),
-        ["steer", "--store", &dir, "--", "run", "fix", "leave the tests"]
+        [
+            "steer",
+            "--store",
+            &dir,
+            "--",
+            "run",
+            "fix",
+            "leave the tests"
+        ]
     );
-    order(&checkout.root(), &store, "run", &Order::default()).await.expect("it is sent");
+    order(&checkout.root(), &store, "run", &Order::default())
+        .await
+        .unwrap_or_else(|e| panic!("it is sent: {e:?}"));
     assert_eq!(checkout.args(), ["stop", "--store", &dir, "--", "run"]);
 
     checkout.install("echo 'Run run has ended.' >&2; exit 1");
     let error = order(&checkout.root(), &store, "run", &Order::default())
         .await
-        .expect_err("ayaito refuses");
+        .err()
+        .unwrap_or_else(|| panic!("ayaito refuses"));
     assert_eq!(error, FlowError::Refused("Run run has ended.".to_owned()));
     let error = order(&checkout.root(), &store, "nope", &Order::default())
         .await
-        .expect_err("there is no such run");
+        .err()
+        .unwrap_or_else(|| panic!("there is no such run"));
     assert!(matches!(error, FlowError::Refused(_)));
 }
 
@@ -280,33 +351,63 @@ async fn a_run_is_started_as_a_process_of_its_own() {
         input: Some(serde_json::json!({ "goal": "x" })),
         run: None,
     };
-    let started = start(&checkout.root(), &store, &request).expect("it starts");
+    let started =
+        start(&checkout.root(), &store, &request).unwrap_or_else(|e| panic!("it starts: {e:?}"));
     assert!(started.run.starts_with("fix-all-"), "{}", started.run);
     assert_eq!(started.folder, store.dir.join(&started.run));
     assert_eq!(
-        std::fs::read_to_string(started.folder.join("flow.ts")).ok().as_deref(),
+        std::fs::read_to_string(started.folder.join("flow.ts"))
+            .ok()
+            .as_deref(),
         Some("export default flow")
     );
     assert_eq!(
-        std::fs::read_to_string(started.folder.join("input.json")).ok().as_deref(),
+        std::fs::read_to_string(started.folder.join("input.json"))
+            .ok()
+            .as_deref(),
         Some(r#"{"goal":"x"}"#)
     );
     for _ in 0..200 {
-        if store.read(&started.run, 0).is_ok_and(|run| run.state == RunState::Done) {
+        if store
+            .read(&started.run, 0)
+            .is_ok_and(|run| run.state == RunState::Done)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(store.read(&started.run, 0).map(|run| run.state), Ok(RunState::Done));
-    let flow = started.folder.join("flow.ts").to_string_lossy().into_owned();
-    let input = started.folder.join("input.json").to_string_lossy().into_owned();
+    assert_eq!(
+        store.read(&started.run, 0).map(|run| run.state),
+        Ok(RunState::Done)
+    );
+    let flow = started
+        .folder
+        .join("flow.ts")
+        .to_string_lossy()
+        .into_owned();
+    let input = started
+        .folder
+        .join("input.json")
+        .to_string_lossy()
+        .into_owned();
     let dir = store.dir.to_string_lossy().into_owned();
     assert_eq!(
         checkout.args(),
-        ["run", &flow, "--run-id", &started.run, "--store", &dir, "--input-file", &input]
+        [
+            "run",
+            &flow,
+            "--run-id",
+            &started.run,
+            "--store",
+            &dir,
+            "--input-file",
+            &input
+        ]
     );
     assert_eq!(
-        std::fs::read_to_string(started.folder.join("run.log")).ok().as_deref(),
+        std::fs::read_to_string(started.folder.join("run.log"))
+            .ok()
+            .as_deref(),
         Some("out\n")
     );
 
@@ -315,7 +416,10 @@ async fn a_run_is_started_as_a_process_of_its_own() {
         run: Some(started.run.clone()),
         ..StartRequest::default()
     };
-    assert_eq!(start(&checkout.root(), &store, &again).map(|started| started.run), Ok(started.run));
+    assert_eq!(
+        start(&checkout.root(), &store, &again).map(|started| started.run),
+        Ok(started.run)
+    );
 }
 
 #[cfg(unix)]
@@ -332,8 +436,13 @@ async fn a_run_is_started_as_a_process_of_its_own() {
 fn a_start_that_cannot_run_is_refused(#[case] request: StartRequest, #[case] why: &str) {
     let checkout = Checkout::new();
     checkout.install("exit 0");
-    let error = start(&checkout.root(), &checkout.store(), &request).expect_err("it is refused");
-    assert!(matches!(&error, FlowError::Refused(text) if text.contains(why)), "{error}");
+    let error = start(&checkout.root(), &checkout.store(), &request)
+        .err()
+        .unwrap_or_else(|| panic!("it is refused"));
+    assert!(
+        matches!(&error, FlowError::Refused(text) if text.contains(why)),
+        "{error}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -347,10 +456,16 @@ fn a_run_that_is_going_is_not_started_again() {
         run: Some("long".to_owned()),
         ..StartRequest::default()
     };
-    start(&checkout.root(), &store, &request).expect("it starts");
-    let error = start(&checkout.root(), &store, &request).expect_err("it is going");
-    assert!(matches!(&error, FlowError::Refused(why) if why.contains("still going")), "{error}");
-    let pid = std::fs::read_to_string(store.dir.join("long").join("run.pid")).expect("the pid");
+    start(&checkout.root(), &store, &request).unwrap_or_else(|e| panic!("it starts: {e:?}"));
+    let error = start(&checkout.root(), &store, &request)
+        .err()
+        .unwrap_or_else(|| panic!("it is going"));
+    assert!(
+        matches!(&error, FlowError::Refused(why) if why.contains("still going")),
+        "{error}"
+    );
+    let pid = std::fs::read_to_string(store.dir.join("long").join("run.pid"))
+        .unwrap_or_else(|e| panic!("the pid: {e:?}"));
     let _ = std::process::Command::new("kill").arg(pid.trim()).status();
 }
 
@@ -358,13 +473,29 @@ fn a_run_that_is_going_is_not_started_again() {
 async fn the_store_is_in_the_git_common_dir() {
     let checkout = Checkout::new();
     let root = checkout.root();
-    let git = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+    let git = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(&root)
+        .status();
     if !git.is_ok_and(|status| status.success()) {
         return;
     }
     let store = Store::of(&root).await;
-    let expected = root.canonicalize().expect("the root").join(".git").join("ayaito-runs");
-    assert_eq!(store.dir.canonicalize().ok().or(Some(store.dir.clone())).map(|dir| dir.ends_with(".git/ayaito-runs")), Some(true));
+    let expected = root
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("the root: {e:?}"))
+        .join(".git")
+        .join("ayaito-runs");
+    assert_eq!(
+        store
+            .dir
+            .canonicalize()
+            .ok()
+            .or(Some(store.dir.clone()))
+            .map(|dir| dir.ends_with(".git/ayaito-runs")),
+        Some(true)
+    );
     let _ = expected;
 }
 
@@ -383,7 +514,14 @@ fn the_wire_keeps_a_run(#[case] state: RunState) {
     };
     assert_eq!(RunChunk::from(gw::FlowRun::from(chunk.clone())), chunk);
     let listing = FlowListing {
-        runs: vec![RunSummary { id: "a".to_owned(), state, at: 7 }],
+        runs: vec![RunSummary {
+            id: "a".to_owned(),
+            state,
+            at: 7,
+        }],
     };
-    assert_eq!(FlowListing::from(gw::FlowListing::from(listing.clone())), listing);
+    assert_eq!(
+        FlowListing::from(gw::FlowListing::from(listing.clone())),
+        listing
+    );
 }

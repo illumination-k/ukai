@@ -22,6 +22,11 @@
 //! answers the user in an annotation's thread, and `read_review` reads it
 //! back (`crate::review`, `ukai_core::annotation`).
 //!
+//! With flows, the agent runs workflows of agents and code with ayaito
+//! ([`flows`]): `run_flow` starts one in the background, which the user
+//! follows on its graph in a pane, `read_flow` says how far it is, and
+//! `steer_flow` and `stop_flow` reach its agents.
+//!
 //! In a gateway's pod, `publish_report` lets the agent say that this
 //! session wrote a report for the user, so the user finds it under the
 //! session rather than among every report the checkout holds. The gateway
@@ -201,6 +206,8 @@ pub struct Session {
     /// The gateway's answers about the other workspaces; without it the
     /// secretary's tools are not offered.
     secretary: Option<Box<dyn secretary::Secretary>>,
+    /// Whether the tools that run ayaito flows are offered.
+    flows: bool,
 }
 
 impl Default for Session {
@@ -218,6 +225,7 @@ impl Session {
             review: None,
             publishing: None,
             secretary: None,
+            flows: false,
         }
     }
 
@@ -225,6 +233,13 @@ impl Session {
     #[must_use]
     pub fn with_secretary(mut self, secretary: Box<dyn secretary::Secretary>) -> Self {
         self.secretary = Some(secretary);
+        self
+    }
+
+    /// Offer the tools that run ayaito flows in the checkout.
+    #[must_use]
+    pub fn with_flows(mut self) -> Self {
+        self.flows = true;
         self
     }
 
@@ -284,7 +299,8 @@ pub struct Gateway {
 /// ask for its servers to be shown, recorded in that file; with `review`, it
 /// can review its changes, kept in that file. With `sessions` and a
 /// gateway, it can publish reports for its session, which it finds in that
-/// file.
+/// file. With `flows`, it can run ayaito flows in the checkout.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub fn server_entry(
     program: &Path,
     root: &Path,
@@ -293,6 +309,7 @@ pub fn server_entry(
     review: Option<&Path>,
     sessions: Option<&Path>,
     secretary: bool,
+    flows: bool,
 ) -> Value {
     let mut args = vec![
         json!(SUBCOMMAND),
@@ -307,6 +324,9 @@ pub fn server_entry(
     }
     if let Some(sessions) = sessions {
         args.extend([json!("--sessions"), json!(sessions.to_string_lossy())]);
+    }
+    if flows {
+        args.push(json!("--flows"));
     }
     let mut env = Vec::new();
     if let Some(gateway) = gateway {
@@ -327,7 +347,7 @@ pub fn server_entry(
 /// Serve MCP on stdin/stdout for the checkout at `root` until stdin closes,
 /// with the knowledge at `notes` when there is a gateway to keep it,
 /// previews recorded in `previews` and the review kept in `review` when the
-/// relay reads them.
+/// relay reads them, and the tools that run flows with `flows`.
 pub async fn serve(
     root: &Path,
     notes: Option<KnowledgeEndpoint>,
@@ -335,6 +355,7 @@ pub async fn serve(
     review: Option<PathBuf>,
     publishing: Option<Publishing>,
     secretary: Option<Box<dyn secretary::Secretary>>,
+    flows: bool,
 ) -> io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -350,6 +371,9 @@ pub async fn serve(
     }
     if let Some(secretary) = secretary {
         session = session.with_secretary(secretary);
+    }
+    if flows {
+        session = session.with_flows();
     }
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -410,6 +434,7 @@ pub async fn handle<N: Notes>(
                     "instructions": instructions(root, known.as_ref(), session.previews.is_some(), session.publishing.is_some())
                         + &session.review.as_ref().map(|_| review_instructions(root)).unwrap_or_default()
                         + &session.secretary.as_ref().map(|_| secretary::instructions()).unwrap_or_default()
+                        + if session.flows { flows::INSTRUCTIONS } else { "" }
                 }),
             )
         }
@@ -419,6 +444,7 @@ pub async fn handle<N: Notes>(
             json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some(), session.publishing.is_some())
                 .into_iter()
                 .chain(session.secretary.iter().flat_map(|_| secretary::tools()))
+                .chain(session.flows.then(flows::tools).into_iter().flatten())
                 .collect::<Vec<_>>() }),
         ),
         "tools/call" => {
@@ -432,6 +458,10 @@ pub async fn handle<N: Notes>(
                     secretary::call(secretary.as_ref(), tool, &arguments).await
                 }
                 _ => None,
+            };
+            let theirs = match (theirs, name) {
+                (None, Some(tool)) if session.flows => flows::call(root, tool, &arguments).await,
+                (theirs, _) => theirs,
             };
             let outcome = match (name, notes, &session.previews, &session.publishing) {
                 _ if theirs.is_some() => theirs.unwrap_or_else(|| Err(String::new())),
@@ -1459,6 +1489,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+pub mod flows;
 pub mod secretary;
 
 #[cfg(test)]
