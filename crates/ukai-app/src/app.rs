@@ -19,6 +19,7 @@ use crate::secretary::FollowSecretaries;
 use crate::shortcuts::{Shortcuts, on_keydown};
 use crate::sidebar::Sidebar;
 use crate::terminal_pane::use_terminal_cleanup;
+use crate::text_field::use_composition;
 use crate::voice::Voice;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -108,6 +109,7 @@ pub fn App() -> Element {
         }
     });
 
+    use_composition();
     let shortcuts = use_context_provider(|| Shortcuts::load(&paths));
     use_context_provider(|| Voice::load(&paths));
     let palette = app.palette;

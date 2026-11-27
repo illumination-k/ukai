@@ -1171,6 +1171,10 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
 - **IME。** 入力欄・差分コメント・パレットのキーは、`isComposing` に加えて `compositionend` 直後の 1 キーも IME の
   ものとして扱う（`shortcuts::Ime`）。macOS の WKWebView は変換確定の Enter を `compositionend` の後に
   `isComposing = false` で送るため、`isComposing` だけでは確定の Enter で送信してしまう。
+  変換中のキー（`isComposing` か `keyCode` 229）は、テキスト欄ではそもそもアプリに届けない（`text_field.js`）。
+  アプリが聞くイベントは 1 つごとに web view が待つ同期リクエストで、変換中の 1 打鍵に 3 つ（keydown・input・keyup）
+  かかると入力が遅れる。欄の値は変換が終わったときにまとめて届き、補完やパレットの絞り込みもそのとき動く。
+  入力欄の高さだけは変換中も web view の側で下書きの写しを更新して追う。端末 pane は xterm.js が自前で扱う。
 - **スケジュール。** 後述「スケジュール」の通り gateway が持って回し、アプリは編集と結果の表示だけをする。
   サイドバーの各プロジェクトの「Schedules」に gateway エージェントごとの一覧（アプリ全体で 15 秒ごとに読み直す）、
   schedule pane（`PaneContent::Schedule { project, agent, schedule }`、未保存は `schedule: None`）で名前・中身・
