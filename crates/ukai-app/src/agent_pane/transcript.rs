@@ -2,12 +2,15 @@
 //! queued behind a turn.
 
 use dioxus::prelude::*;
+use ukai_core::tail::Tail;
 use ukai_core::{PaneId, Queued, Status};
 
 use super::Composer;
 use super::entry::{Attachments, EntryView};
 use super::session::restart_to_update;
 use crate::projects::AppSignals;
+
+const PIN: &str = include_str!("pin.js");
 
 #[component]
 pub(super) fn TranscriptView(pane: PaneId) -> Element {
@@ -20,6 +23,9 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
             .get(&pane)
             .map(|session| (session.transcript, session.composer))
     });
+    // Only the end of a long transcript is mounted, until the user reaches
+    // back for more.
+    let mut tail = use_signal(Tail::default);
     let Some((mut transcript, composer)) = current() else {
         return rsx! {};
     };
@@ -30,10 +36,23 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
     let empty = transcript.read().entries.is_empty();
     let update = transcript.read().update.clone();
     let steer = transcript.read().queued.clone();
+    let start = tail().start(transcript.read().entries.len());
 
     rsx! {
-        // `column-reverse` keeps the view pinned to the newest entry.
-        div { class: "pane-body transcript",
+        // `pin.js` keeps the view at the newest entry.
+        div {
+            id: "transcript-{pane}",
+            class: "pane-body transcript",
+            onmounted: move |_| {
+                let mut pin = document::eval(
+                    &PIN.replace("__ID__", &format!("transcript-{pane}")),
+                );
+                spawn(async move {
+                    while let Ok(following) = pin.recv::<bool>().await {
+                        tail.write().follow(following, transcript.peek().entries.len());
+                    }
+                });
+            },
             div { class: "entries",
                 if let Some(update) = update {
                     div { class: "connect update-offer",
@@ -73,7 +92,14 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
                         p { class: "muted", "Send a message to start the session." }
                     }
                 }
-                for (index, entry) in transcript.read().entries.iter().enumerate() {
+                if start > 0 {
+                    button {
+                        class: "small outline earlier",
+                        onclick: move |_| tail.write().earlier(transcript.peek().entries.len()),
+                        "Show earlier messages"
+                    }
+                }
+                for (index, entry) in transcript.read().entries.iter().enumerate().skip(start) {
                     EntryView { key: "{index}", pane, entry: entry.clone() }
                 }
                 if busy && !awaiting {

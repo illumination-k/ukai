@@ -1412,9 +1412,11 @@ button.new-tab {
 
 /* ---- agent pane: transcript ------------------------------------------- */
 
+/* Not `column-reverse`, though it would keep the view at the newest entry:
+   WebKit pays for it on every frame (`agent_pane/pin.js`). */
 .transcript {
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
 }
 
 .entries {
@@ -1429,6 +1431,11 @@ button.new-tab {
   color: var(--chat-fg);
   font-size: 13.5px;
   line-height: 1.625;
+}
+
+/* Above the entries mounted of a long transcript (`ukai_core::tail`). */
+.entries > .earlier {
+  align-self: center;
 }
 
 .chat-empty {

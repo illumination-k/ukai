@@ -29,6 +29,7 @@ pub mod shell;
 pub mod sidebar;
 pub mod slash;
 pub mod state;
+pub mod tail;
 pub mod terminal;
 mod transcript;
 
