@@ -40,12 +40,13 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
     else {
         return;
     };
-    let mut transcript = Signal::new_in_scope(Transcript::default(), ScopeId::APP);
+    // In the root scope, where the task below runs: see `AppSignals::new`.
+    let mut transcript = Signal::new_in_scope(Transcript::default(), ScopeId::ROOT);
     let (composer, unread, dictation) = sessions.peek().get(&pane).map_or_else(
         || {
             let composer = Composer::new();
             let owner = Rc::new(DictationOwner(composer.dictation));
-            (composer, Signal::new_in_scope(false, ScopeId::APP), owner)
+            (composer, Signal::new_in_scope(false, ScopeId::ROOT), owner)
         },
         |session| (session.composer, session.unread, session.dictation.clone()),
     );

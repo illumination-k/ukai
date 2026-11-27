@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use ukai_core::{History, PaneId, Status, session_label, updated_label};
 
 use super::branch::{new_session, open_session};
+use super::use_transcript;
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 
@@ -13,16 +14,23 @@ use crate::projects::AppSignals;
 pub fn HistoryMenu(pane: PaneId) -> Element {
     let app = use_context::<AppSignals>();
     let mut open = use_signal(|| false);
+    // Read apart from the transcript, which changes with every chunk.
+    let shown = use_transcript(pane, |transcript| {
+        (
+            transcript.history.clone(),
+            transcript.status == Status::Busy,
+        )
+    });
     let Some(session) = app.sessions.read().get(&pane).cloned() else {
         return rsx! {};
     };
     let mut transcript = session.transcript;
-    let history = transcript.read().history.clone();
-    if history == History::Unsupported {
+    // `busy`: switching drops the connection, which would cut a running
+    // turn short.
+    let Some((history, busy)) = shown.filter(|(history, _)| *history != History::Unsupported)
+    else {
         return rsx! {};
-    }
-    // Switching drops the connection, which would cut a running turn short.
-    let busy = transcript.read().status == Status::Busy;
+    };
     let handle = session.handle;
 
     rsx! {
