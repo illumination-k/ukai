@@ -52,8 +52,12 @@ panes are placed rather than remounted (`layout::tests` checks the same
 without timing), and each reports what it allocates. `benches/memory.rs`
 reports the heap the virtual DOM keeps for mounted tabs (`alloc` less
 `dealloc`): the tabs shown last (`KEPT_TABS`) stay mounted, so it grows
-with their transcripts, not just the shown one's. Run both before and
-after a change to how panes or messages render.
+with their transcripts, not just the shown one's. `benches/stream.rs`
+measures a chunk of an agent's message streaming in: it should cost about
+the same however many entries came before it and however long the message
+already is, since only the entry that changed, and of its Markdown only
+what follows the blocks that stand, is drawn again. Run all three before
+and after a change to how panes or messages render.
 
 Session tests in `crates/ukai-acp/src/session/tests.rs` run against an
 in-process mock agent over `Channel::duplex`; extend the mock rather than

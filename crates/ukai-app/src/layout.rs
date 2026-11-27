@@ -19,7 +19,9 @@ use ukai_core::{
     ReportSource, Side,
 };
 
-use crate::agent_pane::{AgentView, HistoryMenu, Sessions, agent_status, connect, session_title};
+use crate::agent_pane::{
+    AgentView, HistoryMenu, Sessions, agent_status, connect, session_title, use_session,
+};
 use crate::alert::{is_unread, mark_read};
 use crate::browser_pane::BrowserView;
 use crate::diff_pane::DiffPane;
@@ -417,7 +419,9 @@ fn TabBar() -> Element {
     let shortcuts = use_context::<Shortcuts>();
     let mut layout = app.layout;
     let moving = app.drag.read().as_ref().and_then(Drag::moving);
-    let (tabs, active) = {
+    // A memo: the tabs name their sessions and show their state, read from
+    // transcripts that change with every chunk an agent streams.
+    let tabs = use_memo(move || {
         let current = layout.read();
         let projects = app.projects.read();
         let schedules = app.schedule_names.read();
@@ -451,7 +455,8 @@ fn TabBar() -> Element {
             })
             .collect();
         (tabs, current.active())
-    };
+    });
+    let (tabs, active) = tabs();
 
     let mut sidebar_hidden = app.sidebar_hidden;
 
@@ -685,13 +690,11 @@ fn PaneView(pane: PaneId) -> Element {
             ),
         )
     };
-    let status = match &content {
-        PaneContent::Agent { .. } => Some(agent_status(app.sessions, pane)),
-        _ => None,
-    };
+    let status = use_session(pane, agent_status);
+    let status = matches!(content, PaneContent::Agent { .. }).then_some(status);
     let unread = is_unread(app.sessions, pane);
     let is_agent = status.is_some();
-    let session = session_title(app.sessions, pane);
+    let session = use_session(pane, session_title);
     let mut drag = app.drag;
     let moving = drag.read().as_ref().and_then(Drag::moving);
     let class = match (focused, moving == Some(pane)) {

@@ -36,6 +36,20 @@ mod voice;
 pub mod bench {
     pub use crate::layout::{KEPT_TABS, PlacedPanes, use_kept_panes};
     pub use crate::markdown::Markdown;
+
+    /// A transcript's entries as an agent pane draws them, under
+    /// [`use_app`].
+    pub use crate::agent_pane::Entries;
+
+    /// Provides the app's state, empty, which [`Entries`] reads.
+    pub fn use_app() {
+        dioxus::prelude::use_context_provider(|| {
+            crate::projects::AppSignals::new(
+                ukai_core::state::AppState::default(),
+                std::collections::HashMap::new(),
+            )
+        });
+    }
 }
 
 use std::path::{Path, PathBuf};

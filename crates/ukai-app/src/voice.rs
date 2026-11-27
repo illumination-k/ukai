@@ -78,12 +78,14 @@ impl Drop for DictationOwner {
 }
 
 /// Start recording into `draft`, or stop and transcribe what was recorded.
-/// Problems go to `error`.
+/// Problems go to `error`. `keep` is held until the work this starts has
+/// written the signals: what keeps them from being dropped meanwhile.
 pub fn toggle(
     voice: &Voice,
     mut dictation: Signal<Dictation>,
     mut draft: Signal<String>,
     mut error: Signal<Option<String>>,
+    keep: impl Sized + 'static,
 ) {
     let current = std::mem::take(&mut *dictation.write());
     match current {
@@ -102,6 +104,7 @@ pub fn toggle(
                         if let Err(message) = voice.transcriber().await {
                             error.set(Some(message));
                         }
+                        drop(keep);
                     });
                 }
                 Err(e) => error.set(Some(e.to_string())),
@@ -134,6 +137,7 @@ pub fn toggle(
                     Err(message) => error.set(Some(message)),
                 }
                 dictation.set(Dictation::Idle);
+                drop(keep);
             });
         }
         // Wait for the transcript; the next press starts a new recording.

@@ -34,9 +34,14 @@ webbrowser = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
+ukai-acp = { workspace = true }
 
 [[bench]]
 name = "panes"
+harness = false
+
+[[bench]]
+name = "stream"
 harness = false
 
 [[bench]]

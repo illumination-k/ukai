@@ -242,7 +242,10 @@ fn SecretaryPin(secretary: Secretary, several: bool) -> Element {
     let app = use_context::<AppSignals>();
     // Read, not peeked: the row follows the pane as it opens and closes.
     let pane = pane_of(&app.layout.read(), &secretary.0, &secretary.1);
-    let state = pane.map_or("idle", |pane| agent_status(app.sessions, pane).0);
+    // Apart from the transcript, which changes with every chunk.
+    let state = use_memo(use_reactive((&pane,), move |(pane,)| {
+        pane.map_or("idle", |pane| agent_status(app.sessions, pane).0)
+    }))();
     let focused = pane.is_some_and(|pane| app.layout.read().focused() == pane);
     let unread = pane.is_some_and(|pane| is_unread(app.sessions, pane));
     let listed = items(app, &secretary);

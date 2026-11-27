@@ -1,9 +1,11 @@
 //! Saving the layout and project registry as they change.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
+use tokio::sync::Notify;
 use ukai_core::branch::SessionBranches;
 use ukai_core::sidebar::{Folds, Hidden};
 use ukai_core::state::{self, AppState};
@@ -22,30 +24,50 @@ pub fn use_autosave(
     sidebar_hidden: Signal<Hidden>,
     branches: Signal<SessionBranches>,
 ) {
-    let mut generation = use_signal(|| 0_u64);
-    use_effect(move || {
-        // Reading them subscribes this effect to them.
-        let snapshot = AppState::new(
-            projects.read().clone(),
-            layout.read().clone(),
-            folds.read().clone(),
-            sidebar_hidden(),
-            branches.read().clone(),
-        );
-        let Some(path) = path.clone() else {
-            return;
-        };
-        let current = *generation.peek() + 1;
-        generation.set(current);
-        spawn(async move {
-            tokio::time::sleep(DEBOUNCE).await;
-            if *generation.peek() != current {
+    let changed = use_hook(|| Rc::new(Notify::new()));
+    use_effect({
+        let changed = changed.clone();
+        move || {
+            // Reading them subscribes this effect to them. Nothing is cloned
+            // here: dragging a boundary changes the layout with every move.
+            projects.read();
+            layout.read();
+            folds.read();
+            sidebar_hidden.read();
+            branches.read();
+            changed.notify_one();
+        }
+    });
+    // One task writes, so a slow write is never overtaken by the next.
+    use_future(move || {
+        let changed = changed.clone();
+        let path = path.clone();
+        async move {
+            let Some(path) = path else {
                 return;
+            };
+            loop {
+                changed.notified().await;
+                while tokio::time::timeout(DEBOUNCE, changed.notified())
+                    .await
+                    .is_ok()
+                {}
+                let snapshot = AppState::new(
+                    projects.peek().clone(),
+                    layout.peek().clone(),
+                    folds.peek().clone(),
+                    *sidebar_hidden.peek(),
+                    branches.peek().clone(),
+                );
+                // Off the UI thread: saving syncs the file to disk.
+                let to = path.clone();
+                match tokio::task::spawn_blocking(move || state::save(&to, &snapshot)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(%error, "failed to save state"),
+                    Err(error) => tracing::warn!(%error, "failed to save state"),
+                }
             }
-            if let Err(error) = state::save(&path, &snapshot) {
-                tracing::warn!(%error, "failed to save state");
-            }
-        });
+        }
     });
 }
 
