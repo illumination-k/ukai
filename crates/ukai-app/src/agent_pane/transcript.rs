@@ -1,16 +1,20 @@
 //! A pane's transcript: the update offer, the entries, and the message
 //! queued behind a turn.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use dioxus::prelude::*;
 use ukai_core::tail::Tail;
-use ukai_core::{PaneId, Queued, Status};
+use ukai_core::{Entry, PaneId, Queued, Status, Transcript};
 
 use super::Composer;
 use super::entry::{Attachments, EntryView};
 use super::session::restart_to_update;
+use super::use_transcript;
 use crate::projects::AppSignals;
 
-const PIN: &str = include_str!("pin.js");
+const TAIL: &str = include_str!("tail.js");
 
 #[component]
 pub(super) fn TranscriptView(pane: PaneId) -> Element {
@@ -26,29 +30,37 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
     // Only the end of a long transcript is mounted, until the user reaches
     // back for more.
     let mut tail = use_signal(Tail::default);
+    // Not the entries: those are for `Entries` to render with every chunk.
+    let shown = use_transcript(pane, |transcript| {
+        (
+            transcript.status.clone(),
+            transcript.awaiting_permission(),
+            transcript.entries.is_empty(),
+            transcript.update.clone(),
+            transcript.queued.clone(),
+        )
+    });
     let Some((mut transcript, composer)) = current() else {
         return rsx! {};
     };
-    let status = transcript.read().status.clone();
+    let Some((status, awaiting, empty, update, steer)) = shown else {
+        return rsx! {};
+    };
     let idle = status == Status::Idle;
     let busy = status == Status::Busy;
-    let awaiting = transcript.read().awaiting_permission();
-    let empty = transcript.read().entries.is_empty();
-    let update = transcript.read().update.clone();
-    let steer = transcript.read().queued.clone();
-    let start = tail().start(transcript.read().entries.len());
 
     rsx! {
-        // `pin.js` keeps the view at the newest entry.
+        // `column-reverse` keeps the view pinned to the newest entry;
+        // `tail.js` says when the view leaves it and comes back.
         div {
             id: "transcript-{pane}",
             class: "pane-body transcript",
             onmounted: move |_| {
-                let mut pin = document::eval(
-                    &PIN.replace("__ID__", &format!("transcript-{pane}")),
+                let mut view = document::eval(
+                    &TAIL.replace("__ID__", &format!("transcript-{pane}")),
                 );
                 spawn(async move {
-                    while let Ok(following) = pin.recv::<bool>().await {
+                    while let Ok(following) = view.recv::<bool>().await {
                         tail.write().follow(following, transcript.peek().entries.len());
                     }
                 });
@@ -92,16 +104,7 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
                         p { class: "muted", "Send a message to start the session." }
                     }
                 }
-                if start > 0 {
-                    button {
-                        class: "small outline earlier",
-                        onclick: move |_| tail.write().earlier(transcript.peek().entries.len()),
-                        "Show earlier messages"
-                    }
-                }
-                for (index, entry) in transcript.read().entries.iter().enumerate().skip(start) {
-                    EntryView { key: "{index}", pane, entry: entry.clone() }
-                }
+                Entries { pane, transcript, tail }
                 if busy && !awaiting {
                     div { class: "working",
                         span { class: "dot busy" }
@@ -116,6 +119,75 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
                     QueuedMessage { pane, steer, composer }
                 }
             }
+        }
+    }
+}
+
+/// The transcript's entries, from where `tail` has them start. This is what
+/// renders with every chunk an agent streams, so only the entries that
+/// changed are drawn again.
+#[component]
+pub fn Entries(pane: PaneId, transcript: Signal<Transcript>, mut tail: Signal<Tail>) -> Element {
+    let entries = use_shared(&transcript.read().entries);
+    // Whole pages: pages starting an entry later with each entry that
+    // arrives would all be drawn again.
+    let start = tail().start(entries.len()) / PAGE * PAGE;
+    rsx! {
+        if start > 0 {
+            button {
+                class: "small outline earlier",
+                onclick: move |_| tail.write().earlier(transcript.peek().entries.len()),
+                "Show earlier messages"
+            }
+        }
+        {pages(pane, entries.get(start..).unwrap_or_default())}
+    }
+}
+
+/// Entries a [`Page`] draws. Each render of a list builds something for
+/// every page and for every entry of the pages that changed, so a long
+/// transcript wants pages neither few nor long.
+const PAGE: usize = 16;
+
+/// `entries` drawn in order, a [`Page`] at a time.
+pub(super) fn pages(pane: PaneId, entries: &[Rc<Entry>]) -> Element {
+    rsx! {
+        for page in entries.chunks(PAGE) {
+            Page { pane, entries: page.to_vec() }
+        }
+    }
+}
+
+/// A run of entries, drawn again only when one of them is another [`Rc`]:
+/// while an agent streams that is the last page alone, whatever came before.
+#[component]
+fn Page(pane: PaneId, entries: Vec<Rc<Entry>>) -> Element {
+    rsx! {
+        for entry in entries {
+            EntryView { pane, entry }
+        }
+    }
+}
+
+/// `entries` behind [`Rc`]s that stay the same from one render to the next
+/// for the entries that did, so that a component given one sees at once
+/// that it need not draw it again.
+pub(super) fn use_shared(entries: &[Entry]) -> Vec<Rc<Entry>> {
+    let shared = use_hook(|| Rc::new(RefCell::new(Vec::new())));
+    let mut shared = shared.borrow_mut();
+    share(&mut shared, entries);
+    shared.clone()
+}
+
+/// Makes `shared` hold `entries`, keeping the [`Rc`] of each entry that is
+/// as it was: comparing an entry costs far less than cloning and drawing it.
+fn share(shared: &mut Vec<Rc<Entry>>, entries: &[Entry]) {
+    shared.truncate(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        match shared.get_mut(index) {
+            Some(kept) if **kept == *entry => {}
+            Some(kept) => *kept = Rc::new(entry.clone()),
+            None => shared.push(Rc::new(entry.clone())),
         }
     }
 }
@@ -147,5 +219,52 @@ fn QueuedMessage(pane: PaneId, steer: Queued, composer: Composer) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use ukai_core::Entry;
+
+    use super::share;
+
+    fn agent(text: &str) -> Entry {
+        Entry::Agent {
+            text: text.to_owned(),
+        }
+    }
+
+    /// Which of `after` are the very entries of `before`.
+    fn kept(before: &[Rc<Entry>], after: &[Rc<Entry>]) -> Vec<bool> {
+        after
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| before.get(index).is_some_and(|was| Rc::ptr_eq(was, entry)))
+            .collect()
+    }
+
+    #[test]
+    fn only_entries_that_changed_are_shared_anew() {
+        let mut shared = Vec::new();
+        share(&mut shared, &[agent("one"), agent("two"), agent("thr")]);
+        let before = shared.clone();
+
+        let entries = [agent("one"), agent("two!"), agent("thr"), agent("four")];
+        share(&mut shared, &entries);
+        assert_eq!(kept(&before, &shared), [true, false, true, false]);
+        assert!(shared.iter().map(|entry| &**entry).eq(&entries));
+    }
+
+    #[test]
+    fn entries_that_are_gone_are_dropped() {
+        let mut shared = Vec::new();
+        share(&mut shared, &[agent("one"), agent("two")]);
+        let before = shared.clone();
+
+        share(&mut shared, &[agent("one")]);
+        assert_eq!(kept(&before, &shared), [true]);
+        assert_eq!(shared.len(), 1);
     }
 }

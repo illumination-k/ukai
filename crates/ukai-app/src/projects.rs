@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use ukai_config::Config;
 use ukai_core::branch::SessionBranches;
 use ukai_core::sidebar::Folds;
+use ukai_core::state::AppState;
 use ukai_core::{Layout, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
@@ -80,6 +81,39 @@ pub struct AppSignals {
 }
 
 impl AppSignals {
+    /// The app's state as it starts, from what was saved.
+    pub fn new(state: AppState, configs: HashMap<ProjectId, Result<Config, String>>) -> Self {
+        // Owned by the root scope, as a session's own signals are: the tasks
+        // that follow sessions run there (`spawn_forever`), and a signal
+        // used above its owner is warned about at every use in a dev build,
+        // which for a transcript is every chunk.
+        fn root<T: 'static>(value: T) -> Signal<T> {
+            Signal::new_in_scope(value, ScopeId::ROOT)
+        }
+        Self {
+            projects: root(state.projects),
+            configs: root(configs),
+            gateways: root(HashMap::new()),
+            layout: root(state.layout),
+            sessions: root(HashMap::new()),
+            reports: root(HashMap::new()),
+            ports: root(HashMap::new()),
+            schedules: root(HashMap::new()),
+            knowledge: root(HashMap::new()),
+            folds: root(state.sidebar),
+            sidebar_hidden: root(state.sidebar_hidden),
+            branches: root(state.branches),
+            palette: root(false),
+            drag: root(None),
+            schedule_names: root(HashMap::new()),
+            schedule_revision: root(0),
+            knowledge_revision: root(0),
+            editing_notes: root(HashSet::new()),
+            terminals: root(HashMap::new()),
+            secretaries: root(HashMap::new()),
+        }
+    }
+
     /// Whether something of the DOM is drawn over the panes, so the native
     /// views of reports and browser panes hide.
     pub fn covered(&self) -> bool {

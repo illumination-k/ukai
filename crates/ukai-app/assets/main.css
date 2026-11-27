@@ -1412,11 +1412,9 @@ button.new-tab {
 
 /* ---- agent pane: transcript ------------------------------------------- */
 
-/* Not `column-reverse`, though it would keep the view at the newest entry:
-   WebKit pays for it on every frame (`agent_pane/pin.js`). */
 .transcript {
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
 }
 
 .entries {
@@ -1433,7 +1431,11 @@ button.new-tab {
   line-height: 1.625;
 }
 
-/* Above the entries mounted of a long transcript (`ukai_core::tail`). */
+/* Above the entries mounted of a long transcript (`ukai_core::tail`). Not
+   `content-visibility: auto` on the entries to skip those out of view:
+   with only the end mounted it saves nothing measurable, and an entry that
+   takes its height as it comes into view moves what is being read when
+   earlier entries are shown. */
 .entries > .earlier {
   align-self: center;
 }
