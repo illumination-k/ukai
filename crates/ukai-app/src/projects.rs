@@ -81,30 +81,37 @@ pub struct AppSignals {
 }
 
 impl AppSignals {
-    /// The app as `state` left it, with nothing open or listed yet. The
-    /// signals belong to the current scope.
+    /// The app's state as it starts, from what was saved.
     pub fn new(state: AppState, configs: HashMap<ProjectId, Result<Config, String>>) -> Self {
+        // Owned by the root scope, where a session's own signals are made
+        // too (which a `Lease` frees, in `agent_pane`): the tasks
+        // that follow sessions run there (`spawn_forever`), and a signal
+        // used above its owner is warned about at every use in a dev build,
+        // which for a transcript is every chunk.
+        fn root<T: 'static>(value: T) -> Signal<T> {
+            Signal::new_in_scope(value, ScopeId::ROOT)
+        }
         Self {
-            projects: Signal::new(state.projects),
-            configs: Signal::new(configs),
-            gateways: Signal::new(HashMap::new()),
-            layout: Signal::new(state.layout),
-            sessions: Signal::new(HashMap::new()),
-            reports: Signal::new(HashMap::new()),
-            ports: Signal::new(HashMap::new()),
-            schedules: Signal::new(HashMap::new()),
-            knowledge: Signal::new(HashMap::new()),
-            folds: Signal::new(state.sidebar),
-            sidebar_hidden: Signal::new(state.sidebar_hidden),
-            branches: Signal::new(state.branches),
-            palette: Signal::new(false),
-            drag: Signal::new(None),
-            schedule_names: Signal::new(HashMap::new()),
-            schedule_revision: Signal::new(0),
-            knowledge_revision: Signal::new(0),
-            editing_notes: Signal::new(HashSet::new()),
-            terminals: Signal::new(HashMap::new()),
-            secretaries: Signal::new(HashMap::new()),
+            projects: root(state.projects),
+            configs: root(configs),
+            gateways: root(HashMap::new()),
+            layout: root(state.layout),
+            sessions: root(HashMap::new()),
+            reports: root(HashMap::new()),
+            ports: root(HashMap::new()),
+            schedules: root(HashMap::new()),
+            knowledge: root(HashMap::new()),
+            folds: root(state.sidebar),
+            sidebar_hidden: root(state.sidebar_hidden),
+            branches: root(state.branches),
+            palette: root(false),
+            drag: root(None),
+            schedule_names: root(HashMap::new()),
+            schedule_revision: root(0),
+            knowledge_revision: root(0),
+            editing_notes: root(HashSet::new()),
+            terminals: root(HashMap::new()),
+            secretaries: root(HashMap::new()),
         }
     }
 

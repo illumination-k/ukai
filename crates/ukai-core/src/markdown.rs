@@ -6,6 +6,8 @@
 //! instead of loading, and a link keeps its target only for the schemes the
 //! app hands to the system browser. Bare `http(s)://` URLs become links too.
 
+use std::rc::Rc;
+
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 /// Schemes a link may open with; anything else renders as plain text.
@@ -78,13 +80,147 @@ enum Frame {
 
 /// Parses CommonMark with tables, strikethrough, and task lists.
 pub fn parse(source: &str) -> Vec<Node> {
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut builder = Builder::default();
-    for event in Parser::new_ext(source, options) {
-        builder.event(event);
+    autolink(Blocks::of(source).root)
+}
+
+/// The top-level nodes of a source, before [`autolink`].
+struct Blocks {
+    root: Vec<Node>,
+    /// Where the last top-level block that parses the same on its own
+    /// starts, whatever is added after it: its byte offset, and how many of
+    /// `root` come before it.
+    last: Option<(usize, usize)>,
+    /// The source defines link references, which a link anywhere in it may
+    /// use: no part of it parses the same on its own.
+    references: bool,
+}
+
+impl Blocks {
+    fn of(source: &str) -> Self {
+        let options =
+            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        let parser = Parser::new_ext(source, options);
+        let references = parser.reference_definitions().iter().next().is_some();
+        let mut builder = Builder::default();
+        // Where each top-level block starts, as `last` has it.
+        let mut starts = Vec::new();
+        for (event, range) in parser.into_offset_iter() {
+            if builder.open.is_empty() {
+                // From the start of its line: its indentation is part of it.
+                let start = source[..range.start].rfind('\n').map_or(0, |end| end + 1);
+                starts.push((start, builder.root.len()));
+            }
+            builder.event(event);
+        }
+        while !builder.open.is_empty() {
+            builder.close();
+        }
+        let root = builder.root;
+        // A block parses the same on its own only if nothing before it can
+        // take it in, whatever is added to it:
+        // - a blank line comes before it, or it could turn out to continue
+        //   the paragraph above (as a code fence does once its line goes on);
+        // - no list comes right before it, which a number that becomes
+        //   `2.` would join as an item, even past a blank line;
+        // - no text right under the root is next to it (a block of raw HTML
+        //   is such), which joins the text beside it into one node.
+        let is_text = |index: usize| matches!(root.get(index), Some(Node::Text(_)));
+        let is_list = |index: usize| {
+            matches!(
+                root.get(index),
+                Some(Node::Element {
+                    kind: Kind::List { .. },
+                    ..
+                })
+            )
+        };
+        let after_blank = |start: usize| {
+            source[..start].strip_suffix('\n').is_none_or(|before| {
+                before
+                    .rsplit('\n')
+                    .next()
+                    .is_some_and(|line| line.trim().is_empty())
+            })
+        };
+        let last = starts.into_iter().rev().find(|&(start, index)| {
+            after_blank(start)
+                && !is_text(index)
+                && !(index > 0 && (is_text(index - 1) || is_list(index - 1)))
+        });
+        Self {
+            root,
+            last,
+            references,
+        }
     }
-    builder.finish()
+}
+
+/// Parses a message again and again as it streams in, without parsing all of
+/// it each time: text added at the end changes only the last block, so the
+/// blocks before it are set aside in parts that stand, each to be parsed
+/// (and drawn) once, and only what follows them is parsed again.
+#[derive(Debug)]
+pub struct Stream {
+    parts: Vec<Rc<str>>,
+    /// Blocks a part has, or more.
+    part_blocks: usize,
+}
+
+/// Blocks a part of a [`Stream`] has, or more: enough that a long message
+/// is few parts, and few enough that what follows them stays short.
+const PART_BLOCKS: usize = 8;
+
+impl Default for Stream {
+    fn default() -> Self {
+        Self {
+            parts: Vec::new(),
+            part_blocks: PART_BLOCKS,
+        }
+    }
+}
+
+impl Stream {
+    /// The start of the source last parsed, in parts that each parse on
+    /// their own to the nodes they have in the whole: [`parse`] of each, one
+    /// after the other, then what [`Self::parse`] returned, is [`parse`] of
+    /// the source. A part stays the same [`Rc`] while the source only grows.
+    pub fn parts(&self) -> &[Rc<str>] {
+        &self.parts
+    }
+
+    /// Parses `source` and returns the nodes that follow [`Self::parts`].
+    /// Any source will do; one that only grew since the last call keeps the
+    /// parts it had.
+    pub fn parse(&mut self, source: &str) -> Vec<Node> {
+        let mut rest = source;
+        for part in &self.parts {
+            match rest.strip_prefix(&**part) {
+                Some(after) => rest = after,
+                None => {
+                    // Another source: what stood in the last one, whatever
+                    // was added to it, need not stand in this one.
+                    self.parts.clear();
+                    rest = source;
+                    break;
+                }
+            }
+        }
+        let mut blocks = Blocks::of(rest);
+        if blocks.references {
+            if !self.parts.is_empty() {
+                self.parts.clear();
+                blocks = Blocks::of(source);
+            }
+            return autolink(blocks.root);
+        }
+        if let Some((start, index)) = blocks.last
+            && index >= self.part_blocks
+        {
+            self.parts.push(rest[..start].into());
+            blocks.root.drain(..index);
+        }
+        autolink(blocks.root)
+    }
 }
 
 #[derive(Default)]
@@ -223,13 +359,6 @@ impl Builder {
         } else {
             children.push(Node::Text(text.to_owned()));
         }
-    }
-
-    fn finish(mut self) -> Vec<Node> {
-        while !self.open.is_empty() {
-            self.close();
-        }
-        autolink(self.root)
     }
 }
 

@@ -2,8 +2,11 @@
 //! Every node becomes an rsx! element, so text is escaped and nothing in the
 //! source turns into live HTML.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use dioxus::prelude::*;
-use ukai_core::markdown::{self, Align, Kind, Node};
+use ukai_core::markdown::{self, Align, Kind, Node, Stream};
 
 use crate::clipboard;
 use crate::icons::{Icon, Svg};
@@ -38,9 +41,33 @@ const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[component]
 pub fn Markdown(source: String) -> Element {
+    // A message that streams in renders with every chunk, but all that
+    // changes is its last block: the blocks before it are set aside in
+    // parts, each parsed and drawn once, and only what follows them is
+    // parsed and drawn again.
+    let stream = use_hook(|| Rc::new(RefCell::new(Stream::default())));
+    let (parts, nodes) = {
+        let mut stream = stream.borrow_mut();
+        let nodes = stream.parse(&source);
+        (stream.parts().to_vec(), nodes)
+    };
+    rsx! {
+        div { class: "md",
+            for source in parts {
+                Part { source }
+            }
+            {nodes.iter().map(render)}
+        }
+    }
+}
+
+/// Blocks of a message that stand, whatever is added after them: drawn
+/// again only when given another source.
+#[component]
+fn Part(source: Rc<str>) -> Element {
     let nodes = markdown::parse(&source);
     rsx! {
-        div { class: "md", {nodes.iter().map(render)} }
+        {nodes.iter().map(render)}
     }
 }
 

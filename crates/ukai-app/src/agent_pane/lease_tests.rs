@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use dioxus::core::{NoOpMutations, Runtime};
+use dioxus::core::NoOpMutations;
 use dioxus::prelude::*;
 use ukai_acp::Checkout;
 use ukai_core::state::AppState;
@@ -36,9 +36,7 @@ fn app() -> (VirtualDom, AppSignals, PaneId) {
             workspace: None,
         },
     );
-    let app = dom.in_runtime(|| {
-        Runtime::current().in_scope(ScopeId::ROOT, || AppSignals::new(state, HashMap::new()))
-    });
+    let app = dom.in_runtime(|| AppSignals::new(state, HashMap::new()));
     (dom, app, pane)
 }
 

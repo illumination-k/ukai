@@ -1,6 +1,7 @@
 //! One entry of a pane's transcript.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 use ukai_acp::checkout::CommandOutput;
@@ -8,6 +9,7 @@ use ukai_acp::{FileDiff, ToolStatus};
 use ukai_core::report::ReportKind;
 use ukai_core::{Entry, PaneContent, PaneId, ProjectId, ReportSource, Sent, review, shell};
 
+use super::transcript::{pages, use_shared};
 use super::use_review;
 use crate::diff_view::DiffLines;
 use crate::icons::{Icon, Svg};
@@ -65,10 +67,31 @@ pub(super) fn Attachments(attachments: Vec<Sent>) -> Element {
 }
 
 #[component]
-pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
+pub(super) fn EntryView(pane: PaneId, entry: Rc<Entry>) -> Element {
     let app = use_context::<AppSignals>();
     let sessions = app.sessions;
-    match entry {
+    // A subagent's entries stay behind the `Rc`: they change with every
+    // chunk the subagent streams.
+    if let Entry::Tool {
+        title,
+        kind,
+        status,
+        children,
+        ..
+    } = &*entry
+        && !children.is_empty()
+    {
+        return rsx! {
+            Subagent {
+                pane,
+                title,
+                kind,
+                state: tool_state(*status),
+                call: entry.clone(),
+            }
+        };
+    }
+    match Rc::unwrap_or_clone(entry) {
         Entry::User { text, attachments } => match ukai_acp::secretary::unmarked(&text) {
             // Sent by a secretary, not typed here: said so, and drawn apart.
             Some((secretary, prompt)) => rsx! {
@@ -93,43 +116,16 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
             AgentMessage { text }
         },
         Entry::Thought { text } => rsx! {
-            details { class: "thought",
-                summary {
-                    span { class: "chevron",
-                        Svg { icon: Icon::Chevron, size: 12 }
-                    }
-                    "Thinking"
-                }
-                div { class: "body",
-                    Markdown { source: text }
-                }
-            }
+            Thought { text }
         },
         Entry::Tool {
             title,
             kind,
             status,
             diffs,
-            children,
             ..
         } => {
-            let state = match status {
-                ToolStatus::Pending => "pending",
-                ToolStatus::InProgress => "running",
-                ToolStatus::Completed => "done",
-                ToolStatus::Failed => "failed",
-            };
-            if !children.is_empty() {
-                return rsx! {
-                    Subagent {
-                        pane,
-                        title,
-                        kind,
-                        state,
-                        entries: children,
-                    }
-                };
-            }
+            let state = tool_state(status);
             if diffs.is_empty() {
                 return rsx! {
                     div { class: "tool {state}", title: "{kind} · {state}",
@@ -139,26 +135,13 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
                     }
                 };
             }
-            let (added, removed) = diffs
-                .iter()
-                .map(|d| review::stats(&review::hunks(d.old_text.as_deref(), &d.new_text)))
-                .fold((0, 0), |(a, r), (da, dr)| (a + da, r + dr));
             rsx! {
-                details { class: "tool-diffs",
-                    summary {
-                        class: "tool {state}",
-                        title: "{kind} · {state} · click to review",
-                        span { class: "tool-icon" }
-                        span { class: "verb", "{kind}" }
-                        span { class: "name", "{title}" }
-                        span { class: "diffstat",
-                            span { class: "added", "+{added}" }
-                            span { class: "removed", "−{removed}" }
-                        }
-                    }
-                    for (index, diff) in diffs.into_iter().enumerate() {
-                        DiffView { key: "{index}", pane, diff }
-                    }
+                ToolDiffs {
+                    pane,
+                    title,
+                    kind,
+                    state,
+                    diffs,
                 }
             }
         }
@@ -261,24 +244,116 @@ pub(super) fn EntryView(pane: PaneId, entry: Entry) -> Element {
     }
 }
 
+/// How a tool call's status is named in classes and hints.
+fn tool_state(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Pending => "pending",
+        ToolStatus::InProgress => "running",
+        ToolStatus::Completed => "done",
+        ToolStatus::Failed => "failed",
+    }
+}
+
+/// Whether a `details` has been opened, and the handler for its `summary`
+/// that notes it. What a closed one holds is not drawn until then: most are
+/// never opened, and a thought or a subagent would otherwise be drawn again
+/// with every chunk that streams into it, out of sight. Once opened it stays
+/// drawn, so closing and opening it again keeps what it showed.
+fn use_opened() -> (bool, EventHandler<MouseEvent>) {
+    let mut opened = use_signal(|| false);
+    let open = use_callback(move |_| {
+        if !opened() {
+            opened.set(true);
+        }
+    });
+    (opened(), open)
+}
+
+/// What the agent thought, folded away.
+#[component]
+fn Thought(text: String) -> Element {
+    let (opened, open) = use_opened();
+    rsx! {
+        details { class: "thought",
+            summary { onclick: open,
+                span { class: "chevron",
+                    Svg { icon: Icon::Chevron, size: 12 }
+                }
+                "Thinking"
+            }
+            if opened {
+                div { class: "body",
+                    Markdown { source: text }
+                }
+            }
+        }
+    }
+}
+
+/// A tool call that changed files: how much, and the changes to review.
+#[component]
+fn ToolDiffs(
+    pane: PaneId,
+    title: String,
+    kind: String,
+    state: &'static str,
+    diffs: Vec<FileDiff>,
+) -> Element {
+    let (opened, open) = use_opened();
+    let (added, removed) = diffs
+        .iter()
+        .map(|d| review::stats(&review::hunks(d.old_text.as_deref(), &d.new_text)))
+        .fold((0, 0), |(a, r), (da, dr)| (a + da, r + dr));
+    rsx! {
+        details { class: "tool-diffs",
+            summary {
+                class: "tool {state}",
+                title: "{kind} · {state} · click to review",
+                onclick: open,
+                span { class: "tool-icon" }
+                span { class: "verb", "{kind}" }
+                span { class: "name", "{title}" }
+                span { class: "diffstat",
+                    span { class: "added", "+{added}" }
+                    span { class: "removed", "−{removed}" }
+                }
+            }
+            if opened {
+                for (index, diff) in diffs.into_iter().enumerate() {
+                    DiffView { key: "{index}", pane, diff }
+                }
+            }
+        }
+    }
+}
+
 /// A tool call that started a subagent, with what the subagent said and did
 /// folded under it: subagents run side by side, and their output would
-/// otherwise interleave with the agent's own.
+/// otherwise interleave with the agent's own. `call` is the tool call.
 #[component]
 fn Subagent(
     pane: PaneId,
     title: String,
     kind: String,
     state: &'static str,
-    entries: Vec<Entry>,
+    call: Rc<Entry>,
 ) -> Element {
+    let (opened, open) = use_opened();
+    let entries = match &*call {
+        Entry::Tool { children, .. } => children.as_slice(),
+        _ => &[],
+    };
     let calls = entries
         .iter()
         .filter(|child| matches!(child, Entry::Tool { .. }))
         .count();
+    let entries = use_shared(if opened { entries } else { &[] });
     rsx! {
         details { class: "subagent",
-            summary { class: "tool {state}", title: "{kind} · {state}",
+            summary {
+                class: "tool {state}",
+                title: "{kind} · {state}",
+                onclick: open,
                 span { class: "tool-icon" }
                 span { class: "verb", "{kind}" }
                 span { class: "name", "{title}" }
@@ -290,10 +365,8 @@ fn Subagent(
                     }
                 }
             }
-            div { class: "body",
-                for (index, entry) in entries.into_iter().enumerate() {
-                    EntryView { key: "{index}", pane, entry }
-                }
+            if opened {
+                div { class: "body", {pages(pane, &entries)} }
             }
         }
     }
