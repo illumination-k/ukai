@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use ukai_core::{History, PaneId, Status, session_label, updated_label};
 
 use super::branch::{new_session, open_session};
+use super::use_lease;
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
 
@@ -13,7 +14,9 @@ use crate::projects::AppSignals;
 pub fn HistoryMenu(pane: PaneId) -> Element {
     let app = use_context::<AppSignals>();
     let mut open = use_signal(|| false);
-    let Some(session) = app.sessions.read().get(&pane).cloned() else {
+    let session = app.sessions.read().get(&pane).cloned();
+    use_lease(session.as_ref().map(|session| &session.lease));
+    let Some(session) = session else {
         return rsx! {};
     };
     let mut transcript = session.transcript;

@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use dioxus::core::spawn_forever;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use ukai_acp::checkout::CheckoutError;
@@ -16,7 +15,7 @@ use ukai_core::recall::{self, Recall};
 use ukai_core::{PaneId, Queued, Sent, Status, Transcript, review, shell, slash, usage_label};
 
 use super::config::ConfigControls;
-use super::{Composer, Pending, stop_turn};
+use super::{Composer, Lease, Pending, stop_turn, use_lease};
 use crate::clipboard::{self, Pasted};
 use crate::icons::{Icon, Svg};
 use crate::projects::AppSignals;
@@ -45,13 +44,16 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
             .map(|session| session.composer.draft.read().clone())
             .unwrap_or_default()
     });
-    let Some(session) = app.sessions.read().get(&pane).cloned() else {
+    let session = app.sessions.read().get(&pane).cloned();
+    use_lease(session.as_ref().map(|session| &session.lease));
+    let Some(session) = session else {
         return rsx! {};
     };
     let handle = session.handle;
     let transcript = session.transcript;
     let composer = session.composer;
     let checkout = session.checkout;
+    let lease = session.lease;
     let Composer {
         mut draft,
         mut error,
@@ -62,21 +64,15 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
 
     let send = {
         let checkout = checkout.clone();
-        move || {
-            send_draft(
-                app,
-                pane,
-                composer,
-                transcript,
-                handle.as_ref(),
-                checkout.clone(),
-            )
-        }
+        let lease = lease.clone();
+        move || send_draft(app, pane, &lease, handle.as_ref(), checkout.clone())
     };
     let send_on_click = send.clone();
     let attach_checkout = checkout.clone();
     let paste_checkout = checkout.clone();
     let pick_checkout = checkout.clone();
+    let (drop_lease, paste_lease, pick_lease) = (lease.clone(), lease.clone(), lease.clone());
+    let (files_lease, mic_lease) = (lease.clone(), lease);
     let status = transcript.read().status.clone();
     let busy = status == Status::Busy;
     // A message sent while a turn runs steers it: it joins the turn, or for
@@ -149,16 +145,17 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                     for file in event.files() {
                         let checkout = attach_checkout.clone();
                         // An upload goes on when the pane is closed meanwhile.
-                        spawn_forever(async move {
-                            let path = file.path();
-                            match file.read_bytes().await {
-                                Ok(bytes) => {
-                                    attach(composer, transcript, checkout, &path, bytes.to_vec())
-                                        .await;
+                        drop_lease
+                            .spawn(async move {
+                                let path = file.path();
+                                match file.read_bytes().await {
+                                    Ok(bytes) => {
+                                        attach(composer, transcript, checkout, &path, bytes.to_vec())
+                                            .await;
+                                    }
+                                    Err(e) => error.set(Some(format!("{}: {e}", path.display()))),
                                 }
-                                Err(e) => error.set(Some(format!("{}: {e}", path.display()))),
-                            }
-                        });
+                            });
                     }
                 },
                 PendingItems { composer }
@@ -180,7 +177,7 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                         oninput: move |event: FormEvent| {
                             let value = event.value();
                             if mention::query(&value).is_some() {
-                                refresh_files(checkout.clone(), files);
+                                refresh_files(&files_lease, checkout.clone());
                             }
                             input.typed(&value);
                             draft.set(value);
@@ -194,7 +191,7 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                                 return;
                             };
                             event.prevent_default();
-                            paste(composer, transcript, paste_checkout.clone(), pasted);
+                            paste(&paste_lease, paste_checkout.clone(), pasted);
                         },
                         onkeydown: {
                             let shortcuts = shortcuts.clone();
@@ -249,13 +246,13 @@ pub(super) fn ComposerView(pane: PaneId) -> Element {
                     button {
                         class: "icon",
                         title: "Attach files…",
-                        onclick: move |_| pick_attachments(composer, transcript, pick_checkout.clone()),
+                        onclick: move |_| pick_attachments(&pick_lease, pick_checkout.clone()),
                         Svg { icon: Icon::Paperclip }
                     }
                     button {
                         class: mic_class,
                         title: "{mic_title}",
-                        onclick: move |_| voice::toggle(&voice, dictation, draft, error),
+                        onclick: move |_| voice::toggle(&voice, dictation, draft, error, mic_lease.clone()),
                         Svg { icon: Icon::Mic }
                     }
                     if !config.is_empty() {
@@ -469,11 +466,11 @@ fn pick_suggestion(composer: Composer, suggestions: &Suggestions, index: usize) 
 fn send_draft(
     app: AppSignals,
     pane: PaneId,
-    composer: Composer,
-    mut transcript: Signal<Transcript>,
+    lease: &Lease,
     handle: Option<&ukai_acp::SessionHandle>,
     checkout: Option<Checkout>,
 ) {
+    let mut transcript = lease.transcript();
     let Composer {
         mut draft,
         mut attachments,
@@ -482,10 +479,10 @@ fn send_draft(
         mut mentions,
         uploading,
         ..
-    } = composer;
+    } = lease.composer();
     let text = draft.read().trim().to_owned();
     if let Some(command) = shell::command(&text) {
-        run_shell(checkout, transcript, command.to_owned());
+        run_shell(lease, checkout, command.to_owned());
         draft.set(String::new());
         return;
     }
@@ -563,7 +560,8 @@ fn send_draft(
 }
 
 /// Read the checkout's files again, unless a recent listing will do.
-fn refresh_files(checkout: Option<Checkout>, mut files: Signal<Files>) {
+fn refresh_files(lease: &Lease, checkout: Option<Checkout>) {
+    let mut files = lease.composer().files;
     if !files.peek().stale(Instant::now()) {
         return;
     }
@@ -578,7 +576,7 @@ fn refresh_files(checkout: Option<Checkout>, mut files: Signal<Files>) {
     if matches!(*files.peek(), Files::Unread | Files::Failed(..)) {
         files.set(Files::Loading);
     }
-    spawn_forever(async move {
+    lease.spawn(async move {
         let listed = match checkout.files().await {
             Ok(listing) => Files::Listed(listing, Instant::now()),
             Err(error) => Files::Failed(error.to_string(), Instant::now()),
@@ -587,10 +585,12 @@ fn refresh_files(checkout: Option<Checkout>, mut files: Signal<Files>) {
     });
 }
 
-/// Run `command` in the checkout, as the user's `!`, into the transcript.
-fn run_shell(checkout: Option<Checkout>, mut transcript: Signal<Transcript>, command: String) {
+/// Run `command` in the checkout, as the user's `!`, into the transcript:
+/// the one it started in, also when the pane has reconnected or closed.
+pub(super) fn run_shell(lease: &Lease, checkout: Option<Checkout>, command: String) {
+    let mut transcript = lease.transcript();
     let id = transcript.write().start_shell(command.clone());
-    spawn_forever(async move {
+    lease.spawn(async move {
         let result = match checkout {
             Some(checkout) => checkout
                 .run(&command)
@@ -603,16 +603,13 @@ fn run_shell(checkout: Option<Checkout>, mut transcript: Signal<Transcript>, com
 }
 
 /// Attach what was pasted: an image, or the files copied in a file manager.
-fn paste(
-    composer: Composer,
-    transcript: Signal<Transcript>,
-    checkout: Option<Checkout>,
-    pasted: Pasted,
-) {
+fn paste(lease: &Lease, checkout: Option<Checkout>, pasted: Pasted) {
+    let composer = lease.composer();
+    let transcript = lease.transcript();
     let mut error = composer.error;
     match pasted {
         Pasted::Image(bytes) => {
-            spawn_forever(async move {
+            lease.spawn(async move {
                 let path = Path::new("pasted-image.png");
                 attach(composer, transcript, checkout, path, bytes).await;
             });
@@ -620,7 +617,7 @@ fn paste(
         Pasted::Files(paths) => {
             for path in paths {
                 let checkout = checkout.clone();
-                spawn_forever(async move {
+                lease.spawn(async move {
                     let read = {
                         let path = path.clone();
                         tokio::task::spawn_blocking(move || std::fs::read(path)).await
@@ -638,7 +635,8 @@ fn paste(
 
 /// Add the file at `path` to the next prompt, in the form the agent accepts.
 /// An agent working elsewhere cannot read it here: it is uploaded to the
-/// agent's workspace first, and the prompt links that copy.
+/// agent's workspace first, and the prompt links that copy. Await it in
+/// [`Lease::spawn`]: it writes the composer after the upload.
 async fn attach(
     composer: Composer,
     transcript: Signal<Transcript>,
@@ -688,12 +686,10 @@ async fn attach(
 }
 
 /// Ask for files with the native dialog and attach them.
-fn pick_attachments(
-    composer: Composer,
-    transcript: Signal<Transcript>,
-    checkout: Option<Checkout>,
-) {
-    spawn_forever(async move {
+fn pick_attachments(lease: &Lease, checkout: Option<Checkout>) {
+    let composer = lease.composer();
+    let transcript = lease.transcript();
+    lease.spawn(async move {
         let Some(files) = rfd::AsyncFileDialog::new()
             .set_title("Attach files")
             .pick_files()

@@ -4,9 +4,9 @@
 use dioxus::prelude::*;
 use ukai_core::{PaneId, Queued, Status};
 
-use super::Composer;
 use super::entry::{Attachments, EntryView};
 use super::session::restart_to_update;
+use super::{Composer, use_lease};
 use crate::projects::AppSignals;
 
 #[component]
@@ -18,9 +18,11 @@ pub(super) fn TranscriptView(pane: PaneId) -> Element {
         app.sessions
             .read()
             .get(&pane)
-            .map(|session| (session.transcript, session.composer))
+            .map(|session| (session.transcript, session.composer, session.lease.clone()))
     });
-    let Some((mut transcript, composer)) = current() else {
+    let current = current();
+    use_lease(current.as_ref().map(|(_, _, lease)| lease));
+    let Some((mut transcript, composer, _)) = current else {
         return rsx! {};
     };
     let status = transcript.read().status.clone();

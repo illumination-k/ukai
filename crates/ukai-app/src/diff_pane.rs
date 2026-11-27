@@ -22,7 +22,7 @@ use ukai_core::diff::{self, ChangeKind, FileChange};
 use ukai_core::review::PULL_REQUEST_PROMPT;
 use ukai_core::{PaneContent, PaneId, ProjectId, ReportSource, sidebar};
 
-use crate::agent_pane::{agent_idle, ask, review_of};
+use crate::agent_pane::{agent_idle, ask, use_review};
 use crate::diff_view::{AnnotationCard, DiffLines, LineNote, NoteActions};
 use crate::follow::poll;
 use crate::icons::{Icon, Svg};
@@ -174,7 +174,7 @@ pub fn DiffPane(pane: PaneId, project: ProjectId, place: ReportSource) -> Elemen
         .filter(|pane| agents.iter().any(|agent| agent.pane == *pane))
         .or_else(|| agents.first().map(|agent| agent.pane));
     // Where comments on lines wait for the target's next prompt.
-    let comments = target.and_then(|pane| review_of(app, pane));
+    let comments = use_review(app, target);
     let pending = comments.map_or(0, |comments| comments.read().len());
     let target_name = target
         .and_then(|pane| agents.iter().find(|agent| agent.pane == pane))

@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use ukai_config::Config;
 use ukai_core::branch::SessionBranches;
 use ukai_core::sidebar::Folds;
+use ukai_core::state::AppState;
 use ukai_core::{Layout, PaneId, ProjectId, Projects};
 
 use crate::agent_pane::Sessions;
@@ -80,6 +81,33 @@ pub struct AppSignals {
 }
 
 impl AppSignals {
+    /// The app as `state` left it, with nothing open or listed yet. The
+    /// signals belong to the current scope.
+    pub fn new(state: AppState, configs: HashMap<ProjectId, Result<Config, String>>) -> Self {
+        Self {
+            projects: Signal::new(state.projects),
+            configs: Signal::new(configs),
+            gateways: Signal::new(HashMap::new()),
+            layout: Signal::new(state.layout),
+            sessions: Signal::new(HashMap::new()),
+            reports: Signal::new(HashMap::new()),
+            ports: Signal::new(HashMap::new()),
+            schedules: Signal::new(HashMap::new()),
+            knowledge: Signal::new(HashMap::new()),
+            folds: Signal::new(state.sidebar),
+            sidebar_hidden: Signal::new(state.sidebar_hidden),
+            branches: Signal::new(state.branches),
+            palette: Signal::new(false),
+            drag: Signal::new(None),
+            schedule_names: Signal::new(HashMap::new()),
+            schedule_revision: Signal::new(0),
+            knowledge_revision: Signal::new(0),
+            editing_notes: Signal::new(HashSet::new()),
+            terminals: Signal::new(HashMap::new()),
+            secretaries: Signal::new(HashMap::new()),
+        }
+    }
+
     /// Whether something of the DOM is drawn over the panes, so the native
     /// views of reports and browser panes hide.
     pub fn covered(&self) -> bool {
