@@ -104,6 +104,18 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // What the gateway asks about the sessions for a secretary; see
     // `crate::sessions`.
     let (queries_tx, mut queries) = mpsc::unbounded_channel();
+    // The runs of flows that sessions started and wait for: the relay tells
+    // each when its run has ended; see `crate::flows::watch`.
+    let flows_awaited = match (&cwd, options.secretary) {
+        (Some(root), false) => {
+            let waits = crate::mcp::flows::waits_file(&sessions);
+            if let Err(error) = std::fs::write(&waits, b"") {
+                tracing::warn!(%error, path = %waits.display(), "cannot record flows' runs");
+            }
+            Some(crate::flows::watch(root.clone(), waits, queries_tx.clone()))
+        }
+        _ => None,
+    };
     // A shell in the checkout, for a terminal pane; see `crate::terminal`.
     let terminals = crate::terminal::Terminals::default();
     let router = server
@@ -266,8 +278,12 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                 dispatch(outputs, &conns, &mut answers);
             }
             _ = tick.tick() => {
-                // Someone typing in a terminal is as busy as a turn.
-                if hub.busy() || terminals.open() > 0 {
+                // Someone typing in a terminal is as busy as a turn, and so
+                // is a flow whose end a session waits for.
+                let flows = flows_awaited
+                    .as_ref()
+                    .map_or(0, |awaited| awaited.load(Ordering::Relaxed));
+                if hub.busy() || terminals.open() > 0 || flows > 0 {
                     idle_since = None;
                 } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= options.idle_timeout {
                     tracing::info!(idle = ?options.idle_timeout, "idle, exiting");

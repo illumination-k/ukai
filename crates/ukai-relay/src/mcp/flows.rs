@@ -4,10 +4,16 @@
 //! A run is a process of its own (`ukai_acp::flows::start`), so it goes on
 //! when the turn ends, and ayaito saves what it does where the relay reads
 //! it back for the user (`crate::flows`), who follows it on its graph in a
-//! pane. Nothing tells the agent that a run ended: `read_flow` says how far
-//! it is. Messages to a run's agents go through ayaito's command line.
+//! pane. Messages to a run's agents go through ayaito's command line.
+//!
+//! The server cannot start a turn, so by itself nothing tells the agent
+//! that a run ended. With a [`Waking`], `run_flow` records which session
+//! started the run ([`waiting`]), and the relay, which watches those runs
+//! (`crate::flows::watch`), sends that session the run's [`report`] as a
+//! prompt once it has ended. A run the agent has already read the end of,
+//! or stopped itself, wakes nobody.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use ukai_acp::flows::{FlowError, Order, RunState, StartRequest, Store};
@@ -25,26 +31,120 @@ const SHOWN: usize = 8000;
 /// How many parts of a run's events one `read_flow` reads at most.
 const MAX_READS: usize = 64;
 
+/// How the flow tools are offered.
+#[derive(Debug, Clone, Default)]
+pub struct Offer {
+    /// How the relay learns which session to wake when a run ends; without
+    /// it, the agent has to look for itself.
+    pub waking: Option<Waking>,
+}
+
+impl Offer {
+    /// The session this server serves and where to record that it waits
+    /// for a run, when both are known.
+    fn waiter(&self) -> Option<(PathBuf, String)> {
+        let waking = self.waking.as_ref()?;
+        let session = super::session_of(&waking.sessions, waking.key.as_deref()?)?;
+        Some((waits_file(&waking.sessions), session))
+    }
+
+    /// What the agent is told of a run's end.
+    fn end(&self) -> &'static str {
+        if self.waking.is_some() {
+            "When it ends, a message with its result starts a new turn of this conversation: \
+             end your turn rather than wait or poll for it."
+        } else {
+            "No message reaches you when it ends: `read_flow` says how far it is."
+        }
+    }
+}
+
+/// What tells which session a server serves: the relay's record of
+/// sessions, and this server's key in it.
+#[derive(Debug, Clone)]
+pub struct Waking {
+    /// Where the relay records which session each key is.
+    pub sessions: PathBuf,
+    /// This server's key, from [`crate::hub::SESSION_KEY_ENV`].
+    pub key: Option<String>,
+}
+
+/// Where the runs sessions wait for are recorded, given the relay's record
+/// of sessions: beside it, so the relay finds it without being told.
+pub fn waits_file(sessions: &Path) -> PathBuf {
+    sessions.with_file_name("flows.jsonl")
+}
+
+fn record(file: &Path, line: &Value) {
+    use std::io::Write;
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()));
+    if let Err(error) = written {
+        tracing::warn!(%error, path = %file.display(), "cannot record a flow's run");
+    }
+}
+
+/// A run whose end a session waits for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Wait {
+    pub run: String,
+    pub session: String,
+    /// Which start of the run this is: the line that recorded it.
+    pub start: usize,
+}
+
+/// The runs recorded in `file` that a session still waits for: started,
+/// and since then neither read to their end nor stopped by the agent.
+pub fn waiting(file: &Path) -> Vec<Wait> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let mut waits: Vec<Wait> = Vec::new();
+    for (start, line) in text.lines().enumerate() {
+        let Ok(line) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(run) = line.get("run").and_then(Value::as_str) else {
+            continue;
+        };
+        waits.retain(|wait| wait.run != run);
+        if let Some(session) = line.get("session").and_then(Value::as_str) {
+            waits.push(Wait {
+                run: run.to_owned(),
+                session: session.to_owned(),
+                start,
+            });
+        }
+    }
+    waits
+}
+
 /// What the agent is told about flows.
-pub const INSTRUCTIONS: &str = "\n\nFlows: when work is better orchestrated across several agents \
+pub fn instructions(offer: &Offer) -> String {
+    format!("{INSTRUCTIONS} {}", offer.end())
+}
+
+const INSTRUCTIONS: &str = "\n\nFlows: when work is better orchestrated across several agents \
      than done in this conversation — a plan whose tasks are fixed side by side, each in its own \
      git worktree, then tested; a check repeated until it passes — or when the user asks for an \
      ayaito flow or workflow, write it as an ayaito flow (a typed graph of agents and code) and \
      start it with `run_flow`. It runs in the background, in this checkout, and the user follows \
      it live on its graph in a ukai pane next to this conversation: which nodes run, what each \
-     agent is doing, what it cost. Nothing tells you when a run ends: `read_flow` says how far \
-     it is and, once it has ended, its result. `steer_flow` corrects an agent of a run while it \
+     agent is doing, what it cost. `read_flow` says how far a run is and, once it has ended, \
+     its result. `steer_flow` corrects an agent of a run while it \
      works, and `stop_flow` stops one, or the run. The user can do both from the pane too.";
 
 /// The tools on offer.
-pub fn tools() -> Vec<Value> {
+pub fn tools(offer: &Offer) -> Vec<Value> {
+    let end = offer.end();
     let run_id =
         json!({ "type": "string", "description": "The run's id, as `run_flow` answered it." });
     let node = "its node's name, name#item in a forEach (fix#2), or its session id";
     vec![
         json!({
             "name": RUN_FLOW,
-            "description": format!("Runs a workflow of agents and code that you write, in the background, with ayaito (a typed graph engine). Use it when the user asks for an ayaito flow or workflow, or for work to be orchestrated across several agents. The call returns at once with a run id; the user sees the run on its graph in a ukai pane. No message reaches you when it ends: check with `{READ_FLOW}`, and do not wait for it in a loop of calls.\n\n{SCRIPT_GUIDE}"),
+            "description": format!("Runs a workflow of agents and code that you write, in the background, with ayaito (a typed graph engine). Use it when the user asks for an ayaito flow or workflow, or for work to be orchestrated across several agents. The call returns at once with a run id; the user sees the run on its graph in a ukai pane. {end}\n\n{SCRIPT_GUIDE}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -170,17 +270,22 @@ fn tail(text: &str) -> String {
 
 /// The outcome of a flow tool in the checkout at `root`, or `None` when
 /// `tool` is not one.
-pub async fn call(root: &Path, tool: &str, arguments: &Value) -> Option<Result<String, String>> {
+pub async fn call(
+    root: &Path,
+    offer: &Offer,
+    tool: &str,
+    arguments: &Value,
+) -> Option<Result<String, String>> {
     Some(match tool {
-        RUN_FLOW => run(root, arguments).await,
-        READ_FLOW => read(root, arguments).await,
-        STEER_FLOW => order(root, arguments, true).await,
-        STOP_FLOW => order(root, arguments, false).await,
+        RUN_FLOW => run(root, offer, arguments).await,
+        READ_FLOW => read(root, offer, arguments).await,
+        STEER_FLOW => order(root, offer, arguments, true).await,
+        STOP_FLOW => order(root, offer, arguments, false).await,
         _ => return None,
     })
 }
 
-async fn run(root: &Path, arguments: &Value) -> Result<String, String> {
+async fn run(root: &Path, offer: &Offer, arguments: &Value) -> Result<String, String> {
     let request = StartRequest {
         name: text(arguments, "name").map(str::to_owned),
         script: text(arguments, "script").map(str::to_owned),
@@ -197,18 +302,51 @@ async fn run(root: &Path, arguments: &Value) -> Result<String, String> {
             .await
             .map_err(|error| error.to_string())?
             .map_err(said)?;
+    // Without a session to wake, the agent is told to look for itself.
+    let end = match offer.waiter() {
+        Some((file, session)) => {
+            record(&file, &json!({ "run": started.run, "session": session }));
+            offer.end()
+        }
+        None => Offer::default().end(),
+    };
     Ok(format!(
         "Started run {} in the background ({}: flow.ts, run.log, events.jsonl, and result.json \
          once it ends). The user sees it live on its graph in a ukai pane; tell them it is \
-         running. No message reaches you when it ends: `{READ_FLOW}` says how far it is.",
+         running. {end}",
         started.run,
         started.folder.display()
     ))
 }
 
-async fn read(root: &Path, arguments: &Value) -> Result<String, String> {
-    let run = required(arguments, "run_id")?.to_owned();
+async fn read(root: &Path, offer: &Offer, arguments: &Value) -> Result<String, String> {
+    let run = required(arguments, "run_id")?;
+    let (text, state) = report(root, run).await?;
+    // The agent has seen the end: no need to wake it for it.
+    if state != RunState::Running
+        && let Some((file, _)) = offer.waiter()
+    {
+        record(&file, &json!({ "run": run }));
+    }
+    Ok(text)
+}
+
+/// How far `run` is, as the agent reads it, with its state: each node with
+/// what it is doing or why it failed, and once the run has ended, its
+/// result — or the end of its log, when it left none.
+pub async fn report(root: &Path, run: &str) -> Result<(String, RunState), String> {
+    let run = run.to_owned();
     let store = Store::of(root).await;
+    // A run that ended before it saved its graph (its script did not load)
+    // is nothing to read, but it has a log.
+    if let (Ok(RunState::Failed), Err(_), Ok(folder)) =
+        (store.state(&run), store.folder(&run), store.started(&run))
+    {
+        return Ok((
+            format!("Run is failed.{}", log_tail(&folder)),
+            RunState::Failed,
+        ));
+    }
     let (first, events, folder) = tokio::task::spawn_blocking(move || {
         let first = store.read(&run, 0)?;
         let mut events = first.events.clone();
@@ -246,25 +384,33 @@ async fn read(root: &Path, arguments: &Value) -> Result<String, String> {
             folder.join("result.json").display(),
             cut(result)
         )),
-        (None, RunState::Failed) => {
-            let log = folder.join("run.log");
-            let said = std::fs::read_to_string(&log).unwrap_or_default();
-            text.push_str(&format!(
-                "\n\nIt ended without a result. Its log ({}):\n{}",
-                log.display(),
-                if said.trim().is_empty() {
-                    "(empty)".to_owned()
-                } else {
-                    tail(&said)
-                }
-            ));
-        }
+        (None, RunState::Failed) => text.push_str(&log_tail(&folder)),
         (None, _) => {}
     }
-    Ok(text)
+    Ok((text, first.state))
 }
 
-async fn order(root: &Path, arguments: &Value, steer: bool) -> Result<String, String> {
+/// The end of the log of the run in `folder`, which left no result.
+fn log_tail(folder: &Path) -> String {
+    let log = folder.join("run.log");
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    format!(
+        "\n\nIt ended without a result. Its log ({}):\n{}",
+        log.display(),
+        if said.trim().is_empty() {
+            "(empty)".to_owned()
+        } else {
+            tail(&said)
+        }
+    )
+}
+
+async fn order(
+    root: &Path,
+    offer: &Offer,
+    arguments: &Value,
+    steer: bool,
+) -> Result<String, String> {
     let run = required(arguments, "run_id")?;
     let sent = if steer {
         Order {
@@ -277,9 +423,14 @@ async fn order(root: &Path, arguments: &Value, steer: bool) -> Result<String, St
             message: None,
         }
     };
+    let whole_run = sent.node.is_none();
     let store = Store::of(root).await;
-    ukai_acp::flows::order(root, &store, run, &sent)
+    let ordered = ukai_acp::flows::order(root, &store, run, &sent)
         .await
-        .map(|ordered| ordered.said)
-        .map_err(said)
+        .map_err(said)?;
+    // The agent stopped the run itself: its end is no news to it.
+    if whole_run && let Some((file, _)) = offer.waiter() {
+        record(&file, &json!({ "run": run }));
+    }
+    Ok(ordered.said)
 }

@@ -1561,3 +1561,147 @@ esac"#,
     let (text, failed) = flow_tool(dir.path(), "stop_flow", json!({ "run_id": run }));
     assert_eq!((text, failed), (format!("Run {run} has ended."), true));
 }
+
+/// A session offered the flow tools, whose server knows it serves `s1`.
+fn waking_session(dir: &TempDir) -> (Session, PathBuf) {
+    let sessions = dir.path().join("relay").join("sessions.jsonl");
+    fs::create_dir_all(dir.path().join("relay")).unwrap_or_else(|e| panic!("mkdir: {e}"));
+    record_session(&sessions, "k1", "s1").unwrap_or_else(|e| panic!("{e}"));
+    let waking = flows::Waking {
+        sessions: sessions.clone(),
+        key: Some("k1".to_owned()),
+    };
+    (session().with_waking(waking), flows::waits_file(&sessions))
+}
+
+fn waking_tool(root: &Path, session: &Session, name: &str, arguments: Value) -> String {
+    let message = req(
+        "tools/call",
+        json!({ "name": name, "arguments": arguments }),
+    );
+    // The flow tools start processes, which want a runtime with I/O.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| panic!("runtime: {e}"));
+    let reply = runtime
+        .block_on(handle(root, None::<&Fake>, session, &message))
+        .unwrap_or_else(|| panic!("no reply to {name}"));
+    reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text in {reply}"))
+        .to_owned()
+}
+
+#[test]
+fn the_runs_a_session_waits_for_are_the_ones_not_seen_to_their_end() {
+    let dir = checkout(None);
+    let file = dir.path().join("flows.jsonl");
+    assert_eq!(flows::waiting(&file), []);
+    write(
+        &dir,
+        "flows.jsonl",
+        concat!(
+            "{\"run\":\"a\",\"session\":\"s1\"}\n",
+            "{\"run\":\"b\",\"session\":\"s2\"}\n",
+            "not json\n",
+            "{\"run\":\"a\"}\n",
+            "{\"run\":\"c\",\"session\":\"s1\"}\n",
+            "{\"run\":\"c\"}\n",
+            "{\"run\":\"c\",\"session\":\"s3\"}\n",
+        ),
+    );
+    let waits: Vec<(String, String, usize)> = flows::waiting(&file)
+        .into_iter()
+        .map(|wait| (wait.run, wait.session, wait.start))
+        .collect();
+    assert_eq!(
+        waits,
+        [
+            ("b".to_owned(), "s2".to_owned(), 1),
+            // Started again after its end was seen: a wait of its own.
+            ("c".to_owned(), "s3".to_owned(), 6)
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_flow_records_the_session_to_wake_and_reading_the_end_takes_it_back() {
+    let dir = checkout(None);
+    // Like ayaito: save the graph, then end with a result.
+    install_ayaito(
+        &dir,
+        r#"mkdir -p "$6/$4"; echo '{"nodes":[],"edges":[]}' > "$6/$4/graph.json"; echo '{"status":"done"}' > "$6/$4/result.json""#,
+    );
+    let git = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status();
+    if !git.is_ok_and(|status| status.success()) {
+        return;
+    }
+    let (session, waits) = waking_session(&dir);
+    let listed = block_on(handle(
+        dir.path(),
+        None::<&Fake>,
+        &session,
+        &req("initialize", json!({})),
+    ))
+    .unwrap_or_else(|| panic!("no reply"));
+    let told = listed["result"]["instructions"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(told.contains("starts a new turn"), "{told}");
+
+    let said = waking_tool(
+        dir.path(),
+        &session,
+        "run_flow",
+        json!({ "script": "export default flow", "run_id": "r1" }),
+    );
+    assert!(said.contains("starts a new turn"), "{said}");
+    let waiting: Vec<(String, String)> = flows::waiting(&waits)
+        .into_iter()
+        .map(|wait| (wait.run, wait.session))
+        .collect();
+    assert_eq!(waiting, [("r1".to_owned(), "s1".to_owned())]);
+
+    let mut read = String::new();
+    for _ in 0..200 {
+        read = waking_tool(dir.path(), &session, "read_flow", json!({ "run_id": "r1" }));
+        if read.starts_with("Run is done") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(read.starts_with("Run is done"), "{read}");
+    assert_eq!(flows::waiting(&waits), []);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_server_that_cannot_tell_its_session_says_to_look() {
+    let dir = checkout(None);
+    install_ayaito(&dir, "exit 0");
+    let git = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status();
+    if !git.is_ok_and(|status| status.success()) {
+        return;
+    }
+    let sessions = dir.path().join("sessions.jsonl");
+    let session = session().with_waking(flows::Waking {
+        sessions: sessions.clone(),
+        key: Some("unknown".to_owned()),
+    });
+    let said = waking_tool(
+        dir.path(),
+        &session,
+        "run_flow",
+        json!({ "script": "x", "run_id": "r1" }),
+    );
+    assert!(said.contains("No message reaches you"), "{said}");
+    assert_eq!(flows::waiting(&flows::waits_file(&sessions)), []);
+}

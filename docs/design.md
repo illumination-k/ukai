@@ -1331,13 +1331,31 @@ ukai が ayaito について知っているのは、run のフォルダの中身
   セッションが終わっても run は続く。同じ `run_id` を渡すと、保存済みの（または新しい）フローでチェックポイントから
   再開する。動いている run は二重に始めない。
 - `read_flow { run_id }` … 状態と、ノードごとの進み具合（`ukai_core::flow::outline`）、終わっていれば結果。
-  **run が終わってもエージェントには通知が行かない**（MCP サーバーからターンは始められない）ので、エージェントが
-  これで確かめる。
 - `steer_flow { run_id, node, message }` / `stop_flow { run_id, node }` … 上の CLI 経由の指示。
 - フローはエージェントが書いたコードで、エージェントの権限で動く（エージェントがシェルで実行できることと同じ）。
   フローの中のエージェント（`claudeRuntime` など）の資格情報は、Pod のエージェント自身のものを使う。
 - run の状態は `result.json` があればその `status`、なければ `run.pid` のプロセスが生きているか（Linux の
   `/proc`）で決める: 結果を残さずに死んだ run は failed。pid のない run（手で始めたもの）は結果が出るまで running。
+
+### 終わったらエージェントを起こす
+
+run は始めたターンより長く続き、MCP サーバーからターンは始められない。そこで relay が、run が終わったら
+**始めたセッションに結果を prompt として送る**（`ukai-relay/src/flows.rs` の `watch`）。
+
+- `run_flow` は「この run をこのセッションが待っている」を relay の一時ディレクトリの `flows.jsonl`
+  （`sessions.jsonl` の隣。relay の起動時に空にする）に追記する。自分のセッションは、レポートの
+  `publish_report` と同じく `UKAI_SESSION_KEY` を `sessions.jsonl` で引いて知る。引けなければ記録せず、
+  エージェントには「自分で `read_flow` で確かめる」と伝える。
+- relay は 2 秒ごとに待たれている run の状態を見て（`Store::state`）、終わっていれば `read_flow` と同じ本文
+  （`mcp::flows::report`。結果を残さずに死んだ run は `run.log` の末尾）を、秘書と同じ「クライアントのない
+  prompt」（`Hub::prompt_unattached`）で送る。つないでいるクライアントには自分のターンとして見える。
+  本文の先頭で、人が打ったものではないと断る。
+- セッションがターンの途中なら終わるまで待って送る。relay がもう知らないセッションには送らない。
+  1 回の起動につき 1 回だけ（同じ run id で再開すれば、また待つ）。
+- エージェントがすでに終わりを知っている run では起こさない: `read_flow` で終わった run を読んだとき、
+  `stop_flow` で run 全体を止めたとき。pane からユーザーが止めた run では起こす。
+- **待たれている run がある間、relay は idle で終了しない**（ターンもクライアントもなくても）。そうしないと、
+  長い run の途中で Pod が落ちる。
 
 ### 読み方（relay / gateway）
 
@@ -1365,7 +1383,6 @@ ukai が ayaito について知っているのは、run のフォルダの中身
 
 ### 今後
 
-- run が終わったことをエージェントに伝える（relay の hub がセッションに prompt を入れる）。
 - 手元の stdio エージェントにも MCP のツールを渡す（relay の MCP サーバーを手元でも足すことになる。
   ナレッジ・`open_preview` と同じ課題）。今は手元では、エージェントがシェルで `ayaito run` した run が見える。
 - Pod が落ちた後の run（store は checkout の `.git` の中なので、スナップショットには入らない）。

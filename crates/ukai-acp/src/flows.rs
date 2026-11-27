@@ -248,6 +248,24 @@ impl Store {
         self.find(run)
     }
 
+    /// How far `run` is, as soon as it has a folder: one that was started
+    /// and ended before it saved its graph is not listed, but it has failed.
+    pub fn state(&self, run: &str) -> Result<RunState, FlowError> {
+        self.started(run).map(|folder| state(&folder))
+    }
+
+    /// The folder of `run` once it was started, whatever is in it yet.
+    pub fn started(&self, run: &str) -> Result<PathBuf, FlowError> {
+        let Some(run) = run_id(run) else {
+            return Err(FlowError::Refused(format!("`{run}` is not a run id")));
+        };
+        [&self.legacy, &self.dir]
+            .into_iter()
+            .map(|dir| dir.join(run))
+            .find(|folder| folder.is_dir())
+            .ok_or_else(|| FlowError::Refused(format!("there is no run `{run}`")))
+    }
+
     fn find(&self, run: &str) -> Result<PathBuf, FlowError> {
         let Some(run) = run_id(run) else {
             return Err(FlowError::Refused(format!("`{run}` is not a run id")));

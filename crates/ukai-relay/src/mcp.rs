@@ -206,8 +206,9 @@ pub struct Session {
     /// The gateway's answers about the other workspaces; without it the
     /// secretary's tools are not offered.
     secretary: Option<Box<dyn secretary::Secretary>>,
-    /// Whether the tools that run ayaito flows are offered.
-    flows: bool,
+    /// How the tools that run ayaito flows are offered; without it they
+    /// are not.
+    flows: Option<flows::Offer>,
 }
 
 impl Default for Session {
@@ -225,7 +226,7 @@ impl Session {
             review: None,
             publishing: None,
             secretary: None,
-            flows: false,
+            flows: None,
         }
     }
 
@@ -239,7 +240,17 @@ impl Session {
     /// Offer the tools that run ayaito flows in the checkout.
     #[must_use]
     pub fn with_flows(mut self) -> Self {
-        self.flows = true;
+        self.flows = Some(flows::Offer::default());
+        self
+    }
+
+    /// Offer them, with the relay waking this server's session when a run
+    /// it started ends.
+    #[must_use]
+    pub fn with_waking(mut self, waking: flows::Waking) -> Self {
+        self.flows = Some(flows::Offer {
+            waking: Some(waking),
+        });
         self
     }
 
@@ -355,7 +366,7 @@ pub async fn serve(
     review: Option<PathBuf>,
     publishing: Option<Publishing>,
     secretary: Option<Box<dyn secretary::Secretary>>,
-    flows: bool,
+    flows: Option<flows::Offer>,
 ) -> io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -372,9 +383,7 @@ pub async fn serve(
     if let Some(secretary) = secretary {
         session = session.with_secretary(secretary);
     }
-    if flows {
-        session = session.with_flows();
-    }
+    session.flows = flows;
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -434,7 +443,7 @@ pub async fn handle<N: Notes>(
                     "instructions": instructions(root, known.as_ref(), session.previews.is_some(), session.publishing.is_some())
                         + &session.review.as_ref().map(|_| review_instructions(root)).unwrap_or_default()
                         + &session.secretary.as_ref().map(|_| secretary::instructions()).unwrap_or_default()
-                        + if session.flows { flows::INSTRUCTIONS } else { "" }
+                        + &session.flows.as_ref().map(flows::instructions).unwrap_or_default()
                 }),
             )
         }
@@ -444,7 +453,7 @@ pub async fn handle<N: Notes>(
             json!({ "tools": tools(notes.is_some(), session.previews.is_some(), session.review.is_some(), session.publishing.is_some())
                 .into_iter()
                 .chain(session.secretary.iter().flat_map(|_| secretary::tools()))
-                .chain(session.flows.then(flows::tools).into_iter().flatten())
+                .chain(session.flows.iter().flat_map(flows::tools))
                 .collect::<Vec<_>>() }),
         ),
         "tools/call" => {
@@ -460,7 +469,10 @@ pub async fn handle<N: Notes>(
                 _ => None,
             };
             let theirs = match (theirs, name) {
-                (None, Some(tool)) if session.flows => flows::call(root, tool, &arguments).await,
+                (None, Some(tool)) => match &session.flows {
+                    Some(offer) => flows::call(root, offer, tool, &arguments).await,
+                    None => None,
+                },
                 (theirs, _) => theirs,
             };
             let outcome = match (name, notes, &session.previews, &session.publishing) {

@@ -134,15 +134,26 @@ async fn serve(cli: Cli) -> ExitCode {
         flows,
     }) = cli.mode
     {
+        let key = std::env::var(ukai_relay::hub::SESSION_KEY_ENV)
+            .ok()
+            .filter(|key| !key.is_empty());
+        // With the relay's record of sessions, it wakes this server's
+        // session when a run it started ends.
+        let flows = flows.then(|| ukai_relay::mcp::flows::Offer {
+            waking: sessions
+                .clone()
+                .map(|sessions| ukai_relay::mcp::flows::Waking {
+                    sessions,
+                    key: key.clone(),
+                }),
+        });
         let publishing = match (&gateway, &token, sessions) {
             (Some(gateway), Some(token), Some(sessions)) => {
                 match ukai_acp::reports::PublishEndpoint::for_workspace(gateway, token) {
                     Ok(endpoint) => Some(ukai_relay::mcp::Publishing {
                         publisher: Box::new(endpoint),
                         sessions,
-                        key: std::env::var(ukai_relay::hub::SESSION_KEY_ENV)
-                            .ok()
-                            .filter(|key| !key.is_empty()),
+                        key: key.clone(),
                     }),
                     Err(error) => {
                         tracing::warn!(%error, "cannot publish reports through the gateway");
