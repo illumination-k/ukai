@@ -181,6 +181,22 @@ impl Layout<'_> {
 fn curve(a: &Shape, b: &Shape, back: bool) -> (String, i32, i32) {
     let (a_mid_x, a_mid_y) = (a.x + a.width / 2, a.y + a.height / 2);
     let (b_mid_x, b_mid_y) = (b.x + b.width / 2, b.y + b.height / 2);
+    if back && a.x >= b.x + b.width {
+        // The body of a loop, beside its check: out of the side that faces
+        // the check and into the check from below, beside the way out.
+        let (end_x, end_y) = (b.x + b.width * 3 / 4, b.y + b.height);
+        let bend = (a.x - end_x).max(40) / 2;
+        return (
+            format!(
+                "M {} {a_mid_y} C {} {a_mid_y}, {end_x} {}, {end_x} {end_y}",
+                a.x,
+                a.x - bend,
+                end_y + bend
+            ),
+            (a.x + end_x) / 2,
+            (a_mid_y + end_y) / 2,
+        );
+    }
     if back {
         // Over the top of both, from the later node back to the earlier.
         let (start_y, end_y) = (a.y, b.y);

@@ -307,7 +307,7 @@ pub fn listed_runs(app: AppSignals) -> Vec<(ProjectId, ReportSource, RunSummary)
             }
         }
     }
-    found.sort_by(|a, b| b.2.at.cmp(&a.2.at));
+    found.sort_by_key(|found| std::cmp::Reverse(found.2.at));
     found
 }
 
@@ -354,7 +354,11 @@ pub fn FlowGroup(project: ProjectId, place: ReportSource, depth: u8) -> Element 
         }
         if open {
             if let Some(problem) = problem {
-                pre { class: "config-error tree-hint", style: "--depth: {inner}", "{problem}" }
+                pre {
+                    class: "config-error tree-hint",
+                    style: "--depth: {inner}",
+                    "{problem}"
+                }
             }
             for run in runs.into_iter().take(RUNS_SHOWN) {
                 FlowRow {
@@ -640,7 +644,11 @@ fn Canvas(
                     let status = node.map_or("none", |node| node.status.name());
                     let kind = shape.kind.name();
                     let group = if shape.group { "group" } else { "step" };
-                    let picked = if chosen.as_deref() == Some(shape.id.as_str()) { "selected" } else { "" };
+                    let picked = if chosen.as_deref() == Some(shape.id.as_str()) {
+                        "selected"
+                    } else {
+                        ""
+                    };
                     let label = node
                         .map(|node| node.label.clone())
                         .or_else(|| plain.map(|node| node.label.clone()))
@@ -660,7 +668,12 @@ fn Canvas(
                                     selected.set(Some(id.clone()));
                                 }
                             },
-                            NodeBody { label, kind: shape.kind, group: shape.group, node: node.cloned() }
+                            NodeBody {
+                                label,
+                                kind: shape.kind,
+                                group: shape.group,
+                                node: node.cloned(),
+                            }
                         }
                     }
                 }
@@ -790,10 +803,11 @@ fn Detail(node: NodeView, on_order: EventHandler<Order>, on_close: EventHandler<
                         class: "outline small",
                         title: "The agent answers from what it has done so far, and the run goes on",
                         onclick: move |_| {
-                            on_order.call(Order {
-                                node: Some(reach.clone()),
-                                message: None,
-                            });
+                            on_order
+                                .call(Order {
+                                    node: Some(reach.clone()),
+                                    message: None,
+                                });
                         },
                         "Stop this agent"
                     }

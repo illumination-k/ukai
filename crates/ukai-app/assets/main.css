@@ -3884,8 +3884,24 @@ button.outline.danger {
 }
 
 .flow-mark {
+  width: 12px;
+  height: 12px;
+  overflow: hidden;
   font-size: 11px;
-  line-height: 1;
+  line-height: 12px;
+  text-align: center;
+}
+
+.report-row.open .row-icon.flow-mark.running {
+  color: var(--working);
+}
+
+.report-row.open .row-icon.flow-mark.done {
+  color: var(--ready);
+}
+
+.report-row.open .row-icon.flow-mark.failed {
+  color: var(--error);
 }
 
 .flow-problem,
@@ -3906,8 +3922,10 @@ button.outline.danger {
   margin: 0 auto;
 }
 
+/* Over the groups and their labels, under the steps (which follow it). */
 .flow-lines {
   position: absolute;
+  z-index: 1;
   inset: 0;
   overflow: visible;
   pointer-events: none;
@@ -4039,7 +4057,16 @@ button.outline.danger {
   text-overflow: ellipsis;
 }
 
+.flow-node.group > .flow-label {
+  width: fit-content;
+  padding: 0 4px;
+  margin-left: -4px;
+  border-radius: 4px;
+  background: var(--bg);
+}
+
 .flow-label .detail {
+  margin-left: 0;
   overflow: hidden;
   color: var(--muted-fg);
   font-size: 11px;
@@ -4099,6 +4126,8 @@ button.outline.danger {
 }
 
 .flow-detail-head .name {
+  flex: none;
+  max-width: 60%;
   overflow: hidden;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -4106,6 +4135,7 @@ button.outline.danger {
 }
 
 .flow-detail-head .meta {
+  margin-left: 0;
   color: var(--muted-fg);
   font-size: 11px;
   white-space: nowrap;
@@ -4125,6 +4155,20 @@ button.outline.danger {
 .flow-steer input {
   flex: 1;
   min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px var(--font);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.flow-steer input:focus {
+  border-color: var(--ring);
 }
 
 .flow-result {

@@ -40,7 +40,9 @@ fn seen(events: &str) -> RunView {
 }
 
 fn status(view: &RunView, id: &str) -> Status {
-    view.node(id).unwrap_or_else(|| panic!("the node is shown")).status
+    view.node(id)
+        .unwrap_or_else(|| panic!("the node is shown"))
+        .status
 }
 
 #[test]
@@ -136,7 +138,9 @@ fn a_case_not_taken_is_skipped() {
         r#"{"type":"error","node":"publish","at":"t","error":"no token"}"#,
         "\n",
     ));
-    let publish = view.node("n7").unwrap_or_else(|| panic!("publish is shown"));
+    let publish = view
+        .node("n7")
+        .unwrap_or_else(|| panic!("publish is shown"));
     assert_eq!(publish.status, Status::Failed);
     assert_eq!(publish.error.as_deref(), Some("no token"));
     assert_eq!(publish.when.as_deref(), Some("yes"));
@@ -211,7 +215,8 @@ fn what_is_no_graph_is_refused(#[case] text: &str) {
 fn an_unknown_kind_is_a_step() {
     let graph = Graph::parse(
         r#"{"nodes":[{"id":"a","kind":"quantum","label":"a","name":"a"}],"edges":[]}"#,
-    ).unwrap_or_else(|error| panic!("{error}"));
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(graph.nodes[0].kind, NodeKind::Other);
     assert_eq!(view(&graph, &[]).total, 1);
 }
@@ -358,7 +363,7 @@ fn deep_nesting_ends_as_a_step() {
         ));
     }
     let graph = Graph::parse(&format!(r#"{{"nodes":[{}],"edges":[]}}"#, nodes.join(",")))
-        .unwrap_or_else(|| panic!("it parses"));
+        .unwrap_or_else(|error| panic!("{error}"));
     let drawing = draw(&graph);
     assert!(drawing.shapes.len() < 200);
     assert!(!drawing.shapes.is_empty());
