@@ -6,11 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
-use ukai_config::Config;
+use ukai_acp::{PaneWorkspace, WorkspaceScope};
+use ukai_config::{AgentSpec, Config};
 use ukai_core::branch::SessionBranches;
 use ukai_core::sidebar::Folds;
 use ukai_core::state::AppState;
-use ukai_core::{Layout, PaneId, ProjectId, Projects};
+use ukai_core::{Layout, PaneId, ProjectId, Projects, ReportSource};
 
 use crate::agent_pane::Sessions;
 use crate::gateways::{GatewayListings, list_gateways};
@@ -155,6 +156,35 @@ pub fn project_context(
         root: project.root.clone(),
         config,
     })
+}
+
+/// What `place` names in `project`: `local` makes it of the project's own
+/// folder, and `remote` of a gateway agent's workspace, from the agent's
+/// declaration, the workspace, and the project's folder; `remote` has
+/// nothing for an agent that is no gateway's.
+pub fn at_place<T, E: std::fmt::Display>(
+    app: AppSignals,
+    project: &ProjectId,
+    place: &ReportSource,
+    local: impl FnOnce(PathBuf) -> Result<T, String>,
+    remote: impl FnOnce(&AgentSpec, &PaneWorkspace, &Path) -> Result<Option<T>, E>,
+) -> Result<T, String> {
+    let context = project_context(&app.projects.peek(), &app.configs.peek(), project)?;
+    let ReportSource::Agent { agent, workspace } = place else {
+        return local(context.root);
+    };
+    let spec = context
+        .config
+        .agent(agent)
+        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
+    // A place names the shared workspace by leaving the key out.
+    let workspace = workspace.clone().unwrap_or(PaneWorkspace {
+        key: String::new(),
+        scope: WorkspaceScope::Shared,
+    });
+    remote(&spec, &workspace, &context.root)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("agent `{agent}` names no gateway agent"))
 }
 
 /// Register `root` as a project (or select it if already registered) and

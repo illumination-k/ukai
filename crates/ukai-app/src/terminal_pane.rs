@@ -21,12 +21,11 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use tokio::sync::mpsc;
 use ukai_acp::terminal::{Size, Terminal, TerminalEvent, TerminalPlace};
-use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_core::terminal::Backlog;
 use ukai_core::{Layout, PaneContent, PaneId, ProjectId, ReportSource};
 
 use crate::layout::launch_target;
-use crate::projects::{AppSignals, project_context};
+use crate::projects::{AppSignals, at_place};
 
 const SCRIPT: &str = include_str!("terminal_pane.js");
 
@@ -101,27 +100,15 @@ fn terminal_place(
     project: &ProjectId,
     place: &ReportSource,
 ) -> Result<TerminalPlace, String> {
-    let context = project_context(&app.projects.peek(), &app.configs.peek(), project)?;
-    let ReportSource::Agent { agent, workspace } = place else {
-        return Ok(TerminalPlace::Local(context.root));
-    };
-    let spec = context
-        .config
-        .agent(agent)
-        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    // A place names the shared workspace by leaving the key out.
-    let workspace = workspace.clone().unwrap_or(PaneWorkspace {
-        key: String::new(),
-        scope: WorkspaceScope::Shared,
-    });
-    TerminalPlace::resolve(
-        &spec,
-        ukai_acp::system_lookup,
-        Some(&workspace),
-        &context.root,
+    at_place(
+        app,
+        project,
+        place,
+        |root| Ok(TerminalPlace::Local(root)),
+        |spec, workspace, root| {
+            TerminalPlace::resolve(spec, ukai_acp::system_lookup, Some(workspace), root)
+        },
     )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| format!("agent `{agent}` names no gateway agent"))
 }
 
 /// Start `pane`'s shell, `size` large, in place of any it had: the view the

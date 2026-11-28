@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ pub struct Options {
     pub args: Vec<String>,
     /// Touched after every finished turn, for the pod's workspace sidecar to
     /// take a snapshot.
-    pub snapshot_trigger: Option<std::path::PathBuf>,
+    pub snapshot_trigger: Option<PathBuf>,
     /// The agent is a secretary: its MCP server offers the tools that read
     /// and prompt the other workspaces, which the gateway answers only for
     /// a secretary's pod.
@@ -87,20 +88,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // The agent's reports live in the directory it works in, and the relay
     // is the only thing that can read them; see `crate::reports`.
     let cwd = std::env::current_dir().ok();
-    // The servers the agent runs in the pod are as out of reach as its
-    // reports; the MCP server records the ones it asks the user to look
-    // at in `previews`. See `crate::ports`.
-    let previews = previews_file();
-    // The agent's review of its changes, written through the MCP server
-    // and read with the diff; see `crate::review`.
-    let review = previews.with_file_name("review.json");
-    // Which session each of its MCP servers serves, for them to publish
-    // reports for it; see `crate::mcp::record_session`.
-    let sessions = previews.with_file_name("sessions.jsonl");
-    if let Err(error) = std::fs::write(&sessions, b"") {
-        tracing::warn!(%error, path = %sessions.display(), "cannot record sessions");
-    }
-    let token = options.token.clone().map(Arc::<str>::from);
+    let records = Records::start();
     // What the gateway asks about the sessions for a secretary; see
     // `crate::sessions`.
     let (queries_tx, mut queries) = mpsc::unbounded_channel();
@@ -108,7 +96,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     // each when its run has ended; see `crate::flows::watch`.
     let flows_awaited = match (&cwd, options.secretary) {
         (Some(root), false) => {
-            let waits = crate::mcp::flows::waits_file(&sessions);
+            let waits = crate::mcp::flows::waits_file(&records.sessions);
             if let Err(error) = std::fs::write(&waits, b"") {
                 tracing::warn!(%error, path = %waits.display(), "cannot record flows' runs");
             }
@@ -118,36 +106,14 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     };
     // A shell in the checkout, for a terminal pane; see `crate::terminal`.
     let terminals = crate::terminal::Terminals::default();
-    let router = server
-        .into_router()
-        .merge(crate::reports::router(
-            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
-        ))
-        .merge(crate::checkout::router(
-            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
-            review.clone(),
-            // What the user attaches, next to the previews: this relay's,
-            // and out of the checkout.
-            previews.with_file_name("attachments"),
-        ))
-        .merge(crate::review::router(review.clone()))
-        .merge(crate::sessions::router(queries_tx))
-        .merge(crate::terminal::router(
-            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
-            terminals.clone(),
-        ))
-        // The runs of the flows the agent starts in the checkout; see
-        // `crate::flows`.
-        .merge(crate::flows::router(
-            cwd.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
-        ))
-        .merge(crate::ports::router(crate::ports::Ports {
-            own: options.listen.port(),
-            previews: previews.clone(),
-        }))
-        .layer(middleware::from_fn(move |request, next| {
-            authorize(token.clone(), request, next)
-        }));
+    let router = routes(
+        server.into_router(),
+        &options,
+        cwd.clone().unwrap_or_else(|| PathBuf::from(".")),
+        &records,
+        queries_tx,
+        terminals.clone(),
+    );
     let listener = tokio::net::TcpListener::bind(options.listen).await?;
     tracing::info!(listen = %options.listen, command = %options.command, "relay serving");
     tokio::spawn(async move {
@@ -155,50 +121,6 @@ pub async fn run(options: Options) -> std::io::Result<()> {
             tracing::error!(%error, "relay server failed");
         }
     });
-
-    let send_agent = |message: Value| {
-        if let Some(frame) = frame(message) {
-            let _ = to_agent.unbounded_send(frame);
-        }
-    };
-    let mut conns: HashMap<ConnId, UnboundedSender<TransportFrame>> = HashMap::new();
-    let trigger = options.snapshot_trigger.clone();
-    let mut answers = crate::sessions::Answers::default();
-    // What each turn took, for the gateway to keep; see `crate::metrics`.
-    let meter = crate::metrics::Meter::new(match (&options.gateway, &options.token) {
-        (Some(url), Some(token)) => ukai_acp::metrics::MetricsEndpoint::for_workspace(url, token)
-            .inspect_err(|error| tracing::warn!(%error, "cannot reach the gateway for metrics"))
-            .ok(),
-        _ => None,
-    });
-    let dispatch = |outputs: Vec<Output>,
-                    conns: &HashMap<ConnId, UnboundedSender<TransportFrame>>,
-                    answers: &mut crate::sessions::Answers| {
-        for output in outputs {
-            match output {
-                Output::Agent(message) => send_agent(message),
-                Output::Client(conn, message) => {
-                    if let (Some(tx), Some(frame)) = (conns.get(&conn), frame(message)) {
-                        let _ = tx.unbounded_send(frame);
-                    }
-                }
-                Output::SessionKey { key, session } => {
-                    if let Err(error) = crate::mcp::record_session(&sessions, &key, &session) {
-                        tracing::warn!(%error, path = %sessions.display(), "cannot record a session");
-                    }
-                }
-                Output::Started { ticket, outcome } => answers.started(ticket, outcome),
-                Output::Metered { session, event } => meter.observe(&session, &event),
-                Output::TurnEnded(session) => {
-                    if let Some(path) = &trigger
-                        && let Err(error) = std::fs::write(path, session.as_bytes())
-                    {
-                        tracing::warn!(%error, path = %path.display(), "could not request a snapshot");
-                    }
-                }
-            }
-        }
-    };
 
     // The agent starts this binary again as an MCP server that tells it
     // what ukai does with its reports, and hands it the project's
@@ -210,27 +132,24 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         }),
         _ => None,
     };
-    let mcp_servers = match (&cwd, std::env::current_exe()) {
-        (Some(root), Ok(program)) => {
-            vec![crate::mcp::server_entry(
-                &program,
-                root,
-                gateway.as_ref(),
-                // A secretary hands work off rather than doing it, so it is
-                // told nothing about showing servers or reviewing changes.
-                (!options.secretary).then_some(previews.as_path()),
-                (!options.secretary).then_some(review.as_path()),
-                Some(&sessions),
-                options.secretary,
-                // Nor about running workflows of agents.
-                !options.secretary,
-            )]
-        }
-        (_, Err(error)) => {
-            tracing::warn!(%error, "cannot find the relay binary; sessions get no ukai MCP server");
-            Vec::new()
-        }
-        (None, _) => Vec::new(),
+    let mcp_servers = mcp_servers(&options, cwd.as_deref(), gateway.as_ref(), &records);
+    let mut outlet = Outlet {
+        to_agent,
+        conns: HashMap::new(),
+        answers: crate::sessions::Answers::default(),
+        sessions: records.sessions,
+        // What each turn took, for the gateway to keep; see `crate::metrics`.
+        meter: crate::metrics::Meter::new(match (&options.gateway, &options.token) {
+            (Some(url), Some(token)) => {
+                ukai_acp::metrics::MetricsEndpoint::for_workspace(url, token)
+                    .inspect_err(
+                        |error| tracing::warn!(%error, "cannot reach the gateway for metrics"),
+                    )
+                    .ok()
+            }
+            _ => None,
+        }),
+        snapshot_trigger: options.snapshot_trigger.clone(),
     };
     let (mut hub, init) = Hub::new(
         cwd.map(|dir| dir.to_string_lossy().into_owned()),
@@ -240,7 +159,7 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     if options.secretary && gateway.is_some() {
         hub.append_system_prompt(crate::mcp::secretary::system_prompt());
     }
-    dispatch(init, &conns, &mut answers);
+    outlet.dispatch(init);
     let mut idle_since = Some(Instant::now());
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let terminate = terminate_signal();
@@ -253,29 +172,29 @@ pub async fn run(options: Options) -> std::io::Result<()> {
                     break;
                 };
                 for message in values(frame) {
-                    dispatch(hub.from_agent(message), &conns, &mut answers);
+                    outlet.dispatch(hub.from_agent(message));
                 }
             }
             Some(event) = events.recv() => match event {
                 Event::Open(conn, tx) => {
                     tracing::info!(conn, "client connected");
-                    conns.insert(conn, tx);
+                    outlet.conns.insert(conn, tx);
                     hub.connect(conn);
                 }
                 Event::Frame(conn, frame) => {
                     for message in values(frame) {
-                        dispatch(hub.from_client(conn, message), &conns, &mut answers);
+                        outlet.dispatch(hub.from_client(conn, message));
                     }
                 }
                 Event::Close(conn) => {
                     tracing::info!(conn, "client disconnected");
-                    conns.remove(&conn);
+                    outlet.conns.remove(&conn);
                     hub.disconnect(conn);
                 }
             },
             Some(query) = queries.recv() => {
-                let outputs = answers.answer(&mut hub, query);
-                dispatch(outputs, &conns, &mut answers);
+                let outputs = outlet.answers.answer(&mut hub, query);
+                outlet.dispatch(outputs);
             }
             _ = tick.tick() => {
                 // Someone typing in a terminal is as busy as a turn, and so
@@ -299,10 +218,152 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The files this relay's MCP servers write and its routes read, under the
+/// temporary directory and out of the checkout.
+struct Records {
+    /// The servers the agent runs in the pod are as out of reach as its
+    /// reports; the MCP server records the ones it asks the user to look
+    /// at here. See `crate::ports`.
+    previews: PathBuf,
+    /// The agent's review of its changes, written through the MCP server
+    /// and read with the diff; see `crate::review`.
+    review: PathBuf,
+    /// Which session each of its MCP servers serves, for them to publish
+    /// reports for it; see `crate::mcp::record_session`.
+    sessions: PathBuf,
+}
+
+impl Records {
+    /// This relay's files, with no session recorded yet.
+    fn start() -> Self {
+        let previews = previews_file();
+        let sessions = previews.with_file_name("sessions.jsonl");
+        if let Err(error) = std::fs::write(&sessions, b"") {
+            tracing::warn!(%error, path = %sessions.display(), "cannot record sessions");
+        }
+        Self {
+            review: previews.with_file_name("review.json"),
+            sessions,
+            previews,
+        }
+    }
+}
+
+/// Everything the relay serves: ACP at `acp`, and what a pane shows of the
+/// checkout at `root`, all behind the relay's token.
+fn routes(
+    acp: axum::Router,
+    options: &Options,
+    root: PathBuf,
+    records: &Records,
+    queries: mpsc::UnboundedSender<crate::sessions::Query>,
+    terminals: crate::terminal::Terminals,
+) -> axum::Router {
+    let token = options.token.clone().map(Arc::<str>::from);
+    acp.merge(crate::reports::router(root.clone()))
+        .merge(crate::checkout::router(
+            root.clone(),
+            records.review.clone(),
+            // What the user attaches, next to the previews: this relay's,
+            // and out of the checkout.
+            records.previews.with_file_name("attachments"),
+        ))
+        .merge(crate::review::router(records.review.clone()))
+        .merge(crate::sessions::router(queries))
+        .merge(crate::terminal::router(root.clone(), terminals))
+        // The runs of the flows the agent starts in the checkout; see
+        // `crate::flows`.
+        .merge(crate::flows::router(root))
+        .merge(crate::ports::router(crate::ports::Ports {
+            own: options.listen.port(),
+            previews: records.previews.clone(),
+        }))
+        .layer(middleware::from_fn(move |request, next| {
+            authorize(token.clone(), request, next)
+        }))
+}
+
+/// The MCP servers every session gets: this binary, started again by the
+/// agent.
+fn mcp_servers(
+    options: &Options,
+    cwd: Option<&Path>,
+    gateway: Option<&crate::mcp::Gateway>,
+    records: &Records,
+) -> Vec<Value> {
+    match (cwd, std::env::current_exe()) {
+        (Some(root), Ok(program)) => {
+            vec![crate::mcp::server_entry(
+                &program,
+                root,
+                gateway,
+                // A secretary hands work off rather than doing it, so it is
+                // told nothing about showing servers or reviewing changes.
+                (!options.secretary).then_some(records.previews.as_path()),
+                (!options.secretary).then_some(records.review.as_path()),
+                Some(&records.sessions),
+                options.secretary,
+                // Nor about running workflows of agents.
+                !options.secretary,
+            )]
+        }
+        (_, Err(error)) => {
+            tracing::warn!(%error, "cannot find the relay binary; sessions get no ukai MCP server");
+            Vec::new()
+        }
+        (None, _) => Vec::new(),
+    }
+}
+
+/// Where what the hub puts out goes.
+struct Outlet {
+    to_agent: UnboundedSender<TransportFrame>,
+    conns: HashMap<ConnId, UnboundedSender<TransportFrame>>,
+    answers: crate::sessions::Answers,
+    /// [`Records::sessions`].
+    sessions: PathBuf,
+    meter: crate::metrics::Meter,
+    /// [`Options::snapshot_trigger`].
+    snapshot_trigger: Option<PathBuf>,
+}
+
+impl Outlet {
+    fn dispatch(&mut self, outputs: Vec<Output>) {
+        for output in outputs {
+            match output {
+                Output::Agent(message) => {
+                    if let Some(frame) = frame(message) {
+                        let _ = self.to_agent.unbounded_send(frame);
+                    }
+                }
+                Output::Client(conn, message) => {
+                    if let (Some(tx), Some(frame)) = (self.conns.get(&conn), frame(message)) {
+                        let _ = tx.unbounded_send(frame);
+                    }
+                }
+                Output::SessionKey { key, session } => {
+                    if let Err(error) = crate::mcp::record_session(&self.sessions, &key, &session) {
+                        tracing::warn!(%error, path = %self.sessions.display(), "cannot record a session");
+                    }
+                }
+                Output::Started { ticket, outcome } => self.answers.started(ticket, outcome),
+                Output::Metered { session, event } => self.meter.observe(&session, &event),
+                Output::TurnEnded(session) => {
+                    if let Some(path) = &self.snapshot_trigger
+                        && let Err(error) = std::fs::write(path, session.as_bytes())
+                    {
+                        tracing::warn!(%error, path = %path.display(), "could not request a snapshot");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Where this relay's MCP servers record previews: a file of its own under
 /// the temporary directory, emptied at start, so the previews listed are
 /// this relay's and the checkout stays clean.
-fn previews_file() -> std::path::PathBuf {
+fn previews_file() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ukai-relay-{}", std::process::id()));
     let file = dir.join("previews.jsonl");
     if let Err(error) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&file, b"")) {

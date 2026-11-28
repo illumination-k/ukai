@@ -194,6 +194,23 @@ pub fn launch_target(app: AppSignals) -> Option<PaneId> {
     }
 }
 
+/// Show `content`: focus the pane already showing it, else open one where
+/// [`launch_target`] puts it.
+pub fn show_content(app: AppSignals, content: PaneContent) {
+    let mut layout = app.layout;
+    let shown = layout
+        .peek()
+        .contents()
+        .find_map(|(pane, open)| (*open == content).then_some(pane));
+    if let Some(pane) = shown {
+        layout.write().focus(pane);
+    } else if let Some(pane) = launch_target(app) {
+        let mut layout = layout.write();
+        layout.set_content(pane, content);
+        layout.focus(pane);
+    }
+}
+
 /// Open `agent` of `project` where [`launch_target`] puts it, a gateway
 /// agent in a workspace of `scope`, else of its default.
 pub fn launch_agent(

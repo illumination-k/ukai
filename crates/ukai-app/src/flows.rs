@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use dioxus::prelude::*;
+use ukai_acp::Flows;
 use ukai_acp::flows::{FlowError, FlowListing, MAX_CHUNK, Order, RunChunk, RunState, RunSummary};
-use ukai_acp::{Flows, PaneWorkspace, WorkspaceScope};
 use ukai_config::AgentSpec;
 use ukai_core::flow::{
     Drawing, Graph, NodeKind, NodeView, RunEvent, RunView, draw, new_runs, parse_events, run_mark,
@@ -30,7 +30,7 @@ use ukai_core::{Direction, PaneContent, PaneId, ProjectId, ReportSource};
 use crate::follow::{Endpoints, Workspace, followed};
 use crate::icons::{Icon, Svg};
 use crate::layout::launch_target;
-use crate::projects::{AppSignals, project_context};
+use crate::projects::{AppSignals, at_place};
 use crate::sidebar::Head;
 use crate::text_field::use_text_field;
 
@@ -124,22 +124,13 @@ fn resolve(spec: &AgentSpec, workspace: &Workspace) -> Result<Flows, String> {
 
 /// The flows of `place` in `project`.
 fn flows_at(app: AppSignals, project: &ProjectId, place: &ReportSource) -> Result<Flows, String> {
-    let context = project_context(&app.projects.peek(), &app.configs.peek(), project)?;
-    let ReportSource::Agent { agent, workspace } = place else {
-        return Ok(Flows::Local(context.root));
-    };
-    let spec = context
-        .config
-        .agent(agent)
-        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    // A place names the shared workspace by leaving the key out.
-    let workspace = workspace.clone().unwrap_or(PaneWorkspace {
-        key: String::new(),
-        scope: WorkspaceScope::Shared,
-    });
-    Flows::resolve(&spec, ukai_acp::system_lookup, Some(&workspace))
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent `{agent}` names no gateway agent"))
+    at_place(
+        app,
+        project,
+        place,
+        |root| Ok(Flows::Local(root)),
+        |spec, workspace, _| Flows::resolve(spec, ukai_acp::system_lookup, Some(workspace)),
+    )
 }
 
 async fn list(flows: Result<Flows, String>) -> Runs {
