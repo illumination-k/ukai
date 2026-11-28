@@ -10,8 +10,8 @@ use agent_client_protocol::schema::v1::{
     ResumeSessionResponse, SessionCapabilities, SessionConfigOptionCategory,
     SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo, SessionInfoUpdate,
     SessionListCapabilities, SessionResumeCapabilities, SetSessionConfigOptionResponse, StopReason,
-    ToolCall, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput, UsageUpdate,
-    WriteTextFileRequest,
+    ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+    UsageUpdate, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PromptRequest, SessionId};
 use agent_client_protocol::{Channel, ConnectionTo};
@@ -304,7 +304,9 @@ fn mock_agent(caps: Caps) -> impl ConnectTo<Client> {
                                         session.clone(),
                                         ToolCallUpdate::new(
                                             "call-1",
-                                            ToolCallUpdateFields::new().title("rm -rf build"),
+                                            ToolCallUpdateFields::new()
+                                                .title("rm -rf build")
+                                                .kind(ToolKind::Execute),
                                         ),
                                         vec![
                                             PermissionOption::new(
@@ -704,10 +706,19 @@ async fn offers_fs_only_with_a_root() {
 async fn permission_round_trip() {
     let mut harness = Harness::start().await;
     assert!(harness.handle.prompt("ask"));
-    let SessionEvent::PermissionRequested { id, title, options } = harness.next().await else {
+    let SessionEvent::PermissionRequested {
+        id,
+        tool_call,
+        title,
+        kind,
+        options,
+    } = harness.next().await
+    else {
         panic!("expected a permission request");
     };
+    assert_eq!(tool_call, "call-1");
     assert_eq!(title, "rm -rf build");
+    assert_eq!(kind.as_deref(), Some("execute"));
     assert_eq!(
         options
             .iter()

@@ -125,7 +125,12 @@ pub enum SessionEvent {
     /// Answer with [`SessionHandle::resolve_permission`].
     PermissionRequested {
         id: PermissionId,
+        /// The tool call the agent asks about.
+        tool_call: String,
         title: String,
+        /// The call's ACP `ToolKind` (`read`, `execute`, ...), when the
+        /// request says it.
+        kind: Option<String>,
         options: Vec<PermissionChoice>,
     },
     /// The agent wrote a file through `fs/write_text_file`.
@@ -1012,11 +1017,13 @@ fn on_extension(message: &UntypedMessage, handshake: &Handshake, events: &Events
 
 /// What the UI is told of a permission request it is to answer as `id`.
 fn permission_requested(id: PermissionId, request: RequestPermissionRequest) -> SessionEvent {
+    let tool_call = request.tool_call.tool_call_id.0.to_string();
+    let kind = request.tool_call.fields.kind.as_ref().map(serde_label);
     let title = request
         .tool_call
         .fields
         .title
-        .unwrap_or_else(|| request.tool_call.tool_call_id.0.to_string());
+        .unwrap_or_else(|| tool_call.clone());
     let options = request
         .options
         .into_iter()
@@ -1026,7 +1033,13 @@ fn permission_requested(id: PermissionId, request: RequestPermissionRequest) -> 
             kind: serde_label(&option.kind),
         })
         .collect();
-    SessionEvent::PermissionRequested { id, title, options }
+    SessionEvent::PermissionRequested {
+        id,
+        tool_call,
+        title,
+        kind,
+        options,
+    }
 }
 
 /// `initialize`, offering `fs/*` when the session has a root for it.

@@ -9,6 +9,8 @@ use ukai_acp::{
     Prompt, PromptCaps, RestoreOutcome, SessionEvent, SlashCommand, ToolStatus, Update, Usage,
 };
 
+use crate::permission::{Answer, Origin, Saved};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Connecting,
@@ -64,9 +66,13 @@ pub enum Entry {
     Permission {
         id: PermissionId,
         title: String,
+        /// The ACP `ToolKind` of the call it asks about, when known.
+        kind: Option<String>,
         options: Vec<PermissionChoice>,
         /// Name of the chosen option, or `cancelled`; `None` while pending.
         answer: Option<String>,
+        /// What the user had saved to always allow, when that answered it.
+        rule: Option<Saved>,
     },
     FileWritten {
         path: PathBuf,
@@ -364,14 +370,51 @@ impl Transcript {
 
     /// Record the user's answer to a permission request.
     pub fn answer_permission(&mut self, id: PermissionId, answer: impl Into<String>) {
-        if let Some(Entry::Permission { answer: slot, .. }) = self
-            .entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(entry, Entry::Permission { id: pid, .. } if *pid == id))
-        {
-            *slot = Some(answer.into());
+        self.set_answer(id, answer.into(), None);
+    }
+
+    /// Record that a rule answered a permission request (`permission::decide`).
+    pub fn answer_permission_by(&mut self, id: PermissionId, answer: &Answer) {
+        let rule = match &answer.origin {
+            Origin::Config => None,
+            Origin::Saved(saved) => Some(saved.clone()),
+        };
+        self.set_answer(id, answer.label(), rule);
+    }
+
+    fn set_answer(&mut self, id: PermissionId, answer: String, by: Option<Saved>) {
+        // A request asked again while reconnecting is in the replay.
+        let entries = self.replay.iter_mut().chain([&mut self.entries]);
+        for entry in entries.flat_map(|entries| entries.iter_mut().rev()) {
+            if let Entry::Permission {
+                id: asked,
+                answer: slot,
+                rule,
+                ..
+            } = entry
+                && *asked == id
+            {
+                *slot = Some(answer);
+                *rule = by;
+                return;
+            }
         }
+    }
+
+    /// The ACP `ToolKind` of tool call `id`, a subagent's included: what a
+    /// permission request that does not say its kind asks about.
+    pub fn tool_kind(&self, id: &str) -> Option<&str> {
+        fn find<'a>(entries: &'a [Entry], id: &str) -> Option<&'a str> {
+            entries.iter().rev().find_map(|entry| match entry {
+                Entry::Tool { id: call, kind, .. } if call == id => Some(kind.as_str()),
+                Entry::Tool { children, .. } => find(children, id),
+                _ => None,
+            })
+        }
+        self.replay
+            .iter()
+            .chain([&self.entries])
+            .find_map(|entries| find(entries, id))
     }
 
     /// Whether the agent is blocked on a permission request nobody answered.
@@ -568,12 +611,21 @@ impl Transcript {
             SessionEvent::Commands { commands } => self.commands = commands,
             SessionEvent::Title { title } => self.session_title = title,
             // A request asked again on reconnecting follows the replay.
-            SessionEvent::PermissionRequested { id, title, options } => {
+            SessionEvent::PermissionRequested {
+                id,
+                tool_call,
+                title,
+                kind,
+                options,
+            } => {
+                let kind = kind.or_else(|| self.tool_kind(&tool_call).map(str::to_owned));
                 self.history_mut().push(Entry::Permission {
                     id,
                     title,
+                    kind,
                     options,
                     answer: None,
+                    rule: None,
                 });
             }
             SessionEvent::FileWritten { path } => {
@@ -1287,7 +1339,7 @@ mod tests {
     #[case::refused(SessionEvent::TurnEnded { stop_reason: "refusal".into(), tokens: None }, Some(Alert::Finished))]
     #[case::cancelled(SessionEvent::TurnEnded { stop_reason: "cancelled".into(), tokens: None }, None)]
     #[case::permission(
-        SessionEvent::PermissionRequested { id: 0, title: "rm".into(), options: vec![] },
+        SessionEvent::PermissionRequested { id: 0, tool_call: "c".into(), title: "rm".into(), kind: None, options: vec![] },
         Some(Alert::NeedsInput { title: "rm".into() }),
     )]
     #[case::failed(
@@ -1388,7 +1440,9 @@ mod tests {
         let mut transcript = running();
         transcript.apply(SessionEvent::PermissionRequested {
             id: 1,
+            tool_call: "c".into(),
             title: "write".into(),
+            kind: None,
             options: Vec::new(),
         });
         transcript.queue(queued("instead", &[]));
@@ -1524,7 +1578,9 @@ mod tests {
     fn permissions_are_answered_individually_or_by_cancel() {
         let request = |id| SessionEvent::PermissionRequested {
             id,
+            tool_call: "c".into(),
             title: "t".into(),
+            kind: None,
             options: vec![],
         };
         let mut transcript = folded([request(0), request(1), request(2)]);
@@ -1607,7 +1663,9 @@ mod tests {
     fn asked(id: PermissionId) -> SessionEvent {
         SessionEvent::PermissionRequested {
             id,
+            tool_call: "call".into(),
             title: "write".into(),
+            kind: None,
             options: Vec::new(),
         }
     }
@@ -1760,6 +1818,80 @@ mod tests {
             .collect();
         assert_eq!(permissions, [(2, None), (0, Some("Allow"))]);
         assert!(transcript.awaiting_permission());
+    }
+
+    #[test]
+    fn a_request_takes_its_kind_from_the_call_it_asks_about() {
+        let call = |id: &str, kind: &str| SessionEvent::ToolCall {
+            id: id.into(),
+            title: id.into(),
+            kind: kind.into(),
+            status: ToolStatus::Pending,
+            diffs: Vec::new(),
+        };
+        let request = |id, tool_call: &str, kind: Option<&str>| SessionEvent::PermissionRequested {
+            id,
+            tool_call: tool_call.into(),
+            title: "t".into(),
+            kind: kind.map(str::to_owned),
+            options: Vec::new(),
+        };
+        let transcript = folded([
+            call("task", "think"),
+            subagent("task", call("ls", "execute")),
+            request(0, "ls", None),
+            request(1, "ls", Some("read")),
+            request(2, "unknown", None),
+        ]);
+        assert_eq!(transcript.tool_kind("task"), Some("think"));
+        let kinds: Vec<Option<&str>> = transcript
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Permission { kind, .. } => Some(kind.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [Some("execute"), Some("read"), None]);
+    }
+
+    #[rstest]
+    #[case::configured(Origin::Config, "Allow (by a configured rule)", false)]
+    #[case::saved(
+        Origin::Saved(Saved { agent: "claude".into(), tool_kind: None, title: Some("write".into()) }),
+        "Allow (always allowed)",
+        true,
+    )]
+    fn a_rule_answers_a_request_also_while_reconnecting(
+        #[case] origin: Origin,
+        #[case] label: &str,
+        #[case] remembered: bool,
+    ) {
+        let answer = Answer {
+            option: PermissionChoice {
+                id: "allow".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            },
+            origin,
+        };
+        let mut transcript = mid_turn();
+        transcript.apply(asked(0));
+        transcript.answer_permission_by(0, &answer);
+        transcript.apply(SessionEvent::Reconnecting { attempt: 1 });
+        transcript.apply(asked(1));
+        transcript.answer_permission_by(1, &answer);
+        assert!(!transcript.awaiting_permission());
+        transcript.apply(ready(None, RestoreOutcome::Replayed));
+        let answers: Vec<(Option<&str>, bool)> = transcript
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Permission { answer, rule, .. } => Some((answer.as_deref(), rule.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, [(Some(label), remembered); 2]);
     }
 
     #[rstest]

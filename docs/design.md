@@ -106,6 +106,7 @@ HTTP 系は `HttpClient::builder(url).configure_http(|b| …)` で reqwest を�
 ukai は ACP の "Client" なので、エージェントからの要求に応える:
 
 - `session/request_permission` … UI にダイアログを出し、ユーザー判断を返す。設定で自動許可ルールを持てる（後述 `permissions`）。
+  `SessionEvent::PermissionRequested` は要求の `toolCallId` と、要求が言うならツールの `kind` も運ぶ（規則の照合のため）。
 - `fs/read_text_file` / `fs/write_text_file` … **プロジェクトルート配下に限定して**提供。
   これは手元で動くエージェント（stdio と、手元のツリーを見ているリモートエージェント）の経路。
 - `terminal/*` … 初期は capability を広告しない（ユーザーが使うターミナルは別。後述「ターミナル」）。
@@ -726,10 +727,15 @@ url = "https://ukai.example.com" # gateway のルート（wss:// でも同じ）
 headers = { Authorization = "Bearer ${keychain:ukai-gateway}" }
 workspace = "pod" # 新しい pane の既定: shared | pod
 
-# ---- パーミッション自動応答（未実装） -------------------------------------
+# ---- パーミッション自動応答 ------------------------------------------------
+[[permissions]] # 上から順に、agent / tool_kind / title がすべて合う最初の規則が答える
+agent = "claude" # 省略ですべてのエージェント
+tool_kind = "read" # ACP ToolKind。省略ですべての種類
+decision = "allow" # allow | deny | ask
+
 [[permissions]]
-agent = "claude"
-tool_kind = "read" # ACP ToolKind
+tool_kind = "execute"
+title = "cargo test*" # 要求の題（カードに出るもの）全体への glob。`*` は `/` もまたぐ
 decision = "allow"
 
 # ---- レポート ------------------------------------------------------------
@@ -750,6 +756,12 @@ question = "決める前にユーザーに聞きたいこと"
 [review.priorities] # p0〜p3 の意味をプロジェクトごとに。書かなければ既定の意味
 p0 = "マージ不可（壊れる・危ない）"
 ```
+
+`[[permissions]]` は `ukai_core::permission::decide` が評価する。`allow` は要求の選択肢の `allow_once`（なければ
+`allow_always`）、`deny` は `reject_once`（なければ `reject_always`）で答え、そういう選択肢がなければユーザーに聞く。
+`ask` は探索をそこで止めてユーザーに聞く（カードから保存した規則より強い）。要求が `kind` を言わなければ、
+同じ `toolCallId` のツール呼び出し（サブエージェントのものも）の種類を使う。未知の `tool_kind` と読めない
+`title` の glob は検証エラー。設定の規則で決まらなければ、カードから保存した規則（下の「パーミッション要求」）を見る。
 
 `[review]` の説明は 1 行 200 文字まで、見えない文字は不可。タグは小文字・数字・`-` の 32 文字まで。
 
@@ -1005,6 +1017,13 @@ Pod が終わる前提のワークスペースでは、成果のレポートが 
   他の OS は WebView が自前で処理するのでメニューバーは出さない。
 - エージェント pane: メッセージのストリーミング表示、ツール呼び出しの折りたたみ、plan のチェックリスト、
   パーミッション要求はインラインのカードで応答。
+  - **パーミッション要求。** カードは選択肢のボタンの下に「Always allow in this project:」として `this`（同じエージェント・
+    種類・題の要求、題は glob でなく完全一致）と、種類が分かれば `every <kind>`（そのエージェントのその種類すべて）を出す。
+    押すとその場は `allow_once` で答え、規則をプロジェクトに保存する（`state.json` の `projects` の `permissions`。
+    `ukai.toml` は書き換えない）。以後、設定の規則で決まらない要求はこれで答え、カードには `Allow (always allowed)` と
+    「Forget」（規則を消す）を出す。設定の規則で答えたものは `(by a configured rule)`。規則で答えた要求は未読や通知にしない。
+    規則は要求のたびに読み直すので、保存・削除はすぐ効く。エージェント自身の `allow_always` は使わない（エージェントが
+    覚えるものはユーザーから見えず消せない）。
   - **長いトランスクリプトは末尾だけマウントする。** WebView は、入力欄の 1 キーごとの再描画でも、マウント済みの
     エントリ全体に比例した時間を使う（日本語入力のように 1 キーで何度も描き直す入力で顕著。`content-visibility` で
     画面外を描かなくしても減らない）。そこで末尾 100 件（`ukai_core::tail::PAGE`）だけを描き、先頭の
@@ -1456,7 +1475,7 @@ run は始めたターンより長く続き、MCP サーバーからターンは
 | 2     | HTTP / WebSocket 接続、`ukai-relay` と `ukai-gateway`（Kubernetes 上のワークスペース Pod、切断をまたぐセッション）、複数エージェント                                                                                                       |
 | 3     | 実行時のタブと pane、プロジェクト（複数・pane ごと）、配置とセッション id の保存・復元、パレット、未読と通知、差分レビュー、添付、スラッシュコマンド、音声入力、gateway のスケジュール（コマンドと prompt、済み）。リサイズ                |
 | 4     | HTML / 画像の report pane（IPC のない子 WebView、済み）、更新への追従（済み）、browser pane と gateway ワークスペースのポートへのトンネル・`open_preview`（済み）、ayaito のフローの実行と flow pane（済み）、ACP コンテンツからのレポート |
-| 5     | パーミッション規則、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                                            |
+| 5     | パーミッション規則（済み）、再接続・`session/load`、配布（`dx bundle`）                                                                                                                                                                    |
 
 ## Open questions
 

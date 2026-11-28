@@ -1922,7 +1922,19 @@ button.new-tab {
   padding: 0 14px 12px;
 }
 
+.permission .options.always {
+  align-items: center;
+}
+
+.permission .options.always .hint {
+  color: var(--muted-fg);
+  font-size: 12px;
+}
+
 .permission .answer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 0 14px 10px;
   color: var(--muted-fg);
   font-size: 12px;

@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use ukai_acp::checkout::CommandOutput;
-use ukai_acp::{FileDiff, ToolStatus};
+use ukai_acp::{FileDiff, PermissionChoice, PermissionId, ToolStatus};
+use ukai_core::permission::{self, Answer, Asked, Origin, Saved};
 use ukai_core::report::ReportKind;
 use ukai_core::{Entry, PaneContent, PaneId, ProjectId, ReportSource, Sent, review, shell};
 
@@ -66,10 +67,136 @@ pub(super) fn Attachments(attachments: Vec<Sent>) -> Element {
     }
 }
 
+/// The agent of `pane` and the project it was opened in.
+fn agent_of(app: AppSignals, pane: PaneId) -> Option<(ProjectId, String)> {
+    match app.layout.peek().content(pane) {
+        Some(PaneContent::Agent { project, agent, .. }) => Some((project.clone(), agent.clone())),
+        _ => None,
+    }
+}
+
+/// A permission request: its options while it waits, with buttons that also
+/// save a rule for the project (`ukai_core::permission`), then its answer,
+/// with a button to forget the saved rule that gave it.
+#[component]
+fn Permission(
+    pane: PaneId,
+    id: PermissionId,
+    title: String,
+    kind: Option<String>,
+    options: Vec<PermissionChoice>,
+    answer: Option<String>,
+    rule: Option<Saved>,
+) -> Element {
+    let app = use_context::<AppSignals>();
+    let sessions = app.sessions;
+    let mut projects = app.projects;
+    let Some(answer) = answer else {
+        // What "always" would save, and the option it answers with.
+        let always = permission::allowing(&options).zip(agent_of(app, pane)).map(
+            |(option, (project, agent))| {
+                let asked = Asked {
+                    agent: &agent,
+                    kind: kind.as_deref(),
+                    title: &title,
+                };
+                let rules = [Some(Saved::this(asked)), Saved::kind(asked)];
+                (option, project, rules)
+            },
+        );
+        return rsx! {
+            div { class: "permission pending",
+                div { class: "permission-head",
+                    span { class: "label", "Permission" }
+                    span { class: "title", "{title}" }
+                }
+                div { class: "options",
+                    for (index, option) in options.into_iter().enumerate() {
+                        button {
+                            key: "{option.id}",
+                            class: if index == 0 { "small primary" } else { "small outline" },
+                            onclick: move |_| {
+                                let Some(session) = sessions.read().get(&pane).cloned() else {
+                                    return;
+                                };
+                                if let Some(handle) = &session.handle {
+                                    handle.resolve_permission(id, Some(option.id.clone()));
+                                }
+                                let mut transcript = session.transcript;
+                                transcript.write().answer_permission(id, option.name.clone());
+                            },
+                            "{option.name}"
+                        }
+                    }
+                }
+                if let Some((option, project, rules)) = always {
+                    div { class: "options always",
+                        span { class: "hint", "Always allow in this project:" }
+                        for (index, saved) in rules.into_iter().flatten().enumerate() {
+                            button {
+                                key: "{index}",
+                                class: "small outline",
+                                title: "Allow this now, and from now on answer the same for {saved.label()} without asking",
+                                onclick: {
+                                    let option = option.clone();
+                                    let project = project.clone();
+                                    let saved = saved.clone();
+                                    move |_| {
+                                        let Some(session) = sessions.read().get(&pane).cloned() else {
+                                            return;
+                                        };
+                                        projects.write().allow_always(&project, saved.clone());
+                                        if let Some(handle) = &session.handle {
+                                            handle.resolve_permission(id, Some(option.id.clone()));
+                                        }
+                                        let answer = Answer {
+                                            option: option.clone(),
+                                            origin: Origin::Saved(saved.clone()),
+                                        };
+                                        let mut transcript = session.transcript;
+                                        transcript.write().answer_permission_by(id, &answer);
+                                    }
+                                },
+                                if index == 0 {
+                                    "this"
+                                } else {
+                                    "{saved.label()}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    };
+    // The rule that answered, while the project still has it.
+    let forget = rule
+        .zip(agent_of(app, pane))
+        .filter(|(rule, (project, _))| projects.read().permissions(project).contains(rule));
+    rsx! {
+        div { class: "permission",
+            div { class: "permission-head",
+                span { class: "label", "Permission" }
+                span { class: "title", "{title}" }
+            }
+            div { class: "answer",
+                "→ {answer}"
+                if let Some((rule, (project, _))) = forget {
+                    button {
+                        class: "small outline",
+                        title: "Ask again for {rule.label()} in this project",
+                        onclick: move |_| projects.write().forget_permission(&project, &rule),
+                        "Forget"
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn EntryView(pane: PaneId, entry: Rc<Entry>) -> Element {
     let app = use_context::<AppSignals>();
-    let sessions = app.sessions;
     // A subagent's entries stay behind the `Rc`: they change with every
     // chunk the subagent streams.
     if let Entry::Tool {
@@ -168,45 +295,21 @@ pub(super) fn EntryView(pane: PaneId, entry: Rc<Entry>) -> Element {
         Entry::Permission {
             id,
             title,
+            kind,
             options,
             answer,
-        } => {
-            let pending = answer.is_none();
-            rsx! {
-                div { class: if pending { "permission pending" } else { "permission" },
-                    div { class: "permission-head",
-                        span { class: "label", "Permission" }
-                        span { class: "title", "{title}" }
-                    }
-                    match answer {
-                        Some(answer) => rsx! {
-                            div { class: "answer", "→ {answer}" }
-                        },
-                        None => rsx! {
-                            div { class: "options",
-                                for (index, option) in options.into_iter().enumerate() {
-                                    button {
-                                        key: "{option.id}",
-                                        class: if index == 0 { "small primary" } else { "small outline" },
-                                        onclick: move |_| {
-                                            let Some(session) = sessions.read().get(&pane).cloned() else {
-                                                return;
-                                            };
-                                            if let Some(handle) = &session.handle {
-                                                handle.resolve_permission(id, Some(option.id.clone()));
-                                            }
-                                            let mut transcript = session.transcript;
-                                            transcript.write().answer_permission(id, option.name.clone());
-                                        },
-                                        "{option.name}"
-                                    }
-                                }
-                            }
-                        },
-                    }
-                }
+            rule,
+        } => rsx! {
+            Permission {
+                pane,
+                id,
+                title,
+                kind,
+                options,
+                answer,
+                rule,
             }
-        }
+        },
         Entry::FileWritten { path } => {
             let report = written_report(app, pane, &path);
             rsx! {

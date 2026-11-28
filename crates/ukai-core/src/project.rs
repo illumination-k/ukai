@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{SessionDefaults, Setting};
+use crate::permission::Saved;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -33,6 +34,9 @@ pub struct Project {
     /// What new sessions start with, by agent id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defaults: BTreeMap<String, SessionDefaults>,
+    /// What the user chose to always allow from a permission request's card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<Saved>,
 }
 
 impl Project {
@@ -86,6 +90,27 @@ impl Projects {
         }
     }
 
+    /// What the user chose to always allow in project `id`.
+    pub fn permissions(&self, id: &ProjectId) -> &[Saved] {
+        self.get(id).map_or(&[], |project| &project.permissions)
+    }
+
+    /// Always allow `rule` in project `id` from now on.
+    pub fn allow_always(&mut self, id: &ProjectId, rule: Saved) {
+        if let Some(project) = self.list.iter_mut().find(|project| &project.id == id)
+            && !project.permissions.contains(&rule)
+        {
+            project.permissions.push(rule);
+        }
+    }
+
+    /// Ask again in project `id` for what `rule` allowed.
+    pub fn forget_permission(&mut self, id: &ProjectId, rule: &Saved) {
+        if let Some(project) = self.list.iter_mut().find(|project| &project.id == id) {
+            project.permissions.retain(|saved| saved != rule);
+        }
+    }
+
     pub fn select(&mut self, id: &ProjectId) {
         if self.get(id).is_some() {
             self.selected = Some(id.clone());
@@ -104,6 +129,7 @@ impl Projects {
                     id: id.clone(),
                     root: root.to_owned(),
                     defaults: BTreeMap::new(),
+                    permissions: Vec::new(),
                 });
                 id
             }
@@ -169,6 +195,31 @@ mod tests {
         assert_eq!(claude.effort.as_deref(), Some("high"));
         assert_eq!(projects.defaults(&a, "codex"), SessionDefaults::default());
         assert_eq!(projects.defaults(&b, "claude"), SessionDefaults::default());
+    }
+
+    #[test]
+    fn what_is_always_allowed_is_kept_per_project_until_forgotten() {
+        let rule = |title: &str| Saved {
+            agent: "claude".into(),
+            tool_kind: Some("execute".into()),
+            title: Some(title.into()),
+        };
+        let mut projects = Projects::default();
+        let a = projects.add(Path::new("/a"));
+        let b = projects.add(Path::new("/b"));
+        projects.allow_always(&a, rule("ls"));
+        projects.allow_always(&a, rule("ls"));
+        projects.allow_always(&a, rule("pwd"));
+        assert_eq!(projects.permissions(&a), [rule("ls"), rule("pwd")]);
+        assert_eq!(projects.permissions(&b), []);
+        projects.forget_permission(&a, &rule("ls"));
+        assert_eq!(projects.permissions(&a), [rule("pwd")]);
+        let json = serde_json::to_value(&projects).unwrap_or_default();
+        assert_eq!(
+            json["list"][0]["permissions"],
+            serde_json::json!([{ "agent": "claude", "tool_kind": "execute", "title": "pwd" }])
+        );
+        assert_eq!(json["list"][1].get("permissions"), None);
     }
 
     #[test]

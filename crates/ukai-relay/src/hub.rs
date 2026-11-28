@@ -611,7 +611,9 @@ impl Hub {
             session: session.clone(),
             event: SessionEvent::PermissionRequested {
                 id: 0,
+                tool_call: String::new(),
                 title: String::new(),
+                kind: None,
                 options: Vec::new(),
             },
         });
