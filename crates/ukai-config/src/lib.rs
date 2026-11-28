@@ -18,8 +18,8 @@ pub use layered::{
 };
 pub use schema::{
     AgentSpec, Config, Decision, Gateway, Keys, PRIORITIES, PermissionRule, Project,
-    REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, Reports, Review, Voice, WorkspaceScope,
-    gateway_agent_id,
+    REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, Reports, Review, TOOL_KINDS, Voice, WorkspaceScope,
+    gateway_agent_id, title_glob,
 };
 pub use validate::{DescriptionProblem, Problem, is_tag};
 

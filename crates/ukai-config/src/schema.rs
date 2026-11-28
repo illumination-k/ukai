@@ -213,7 +213,9 @@ impl Voice {
     }
 }
 
-/// An automatic answer to `session/request_permission`.
+/// An automatic answer to `session/request_permission`. A request is
+/// answered by the first rule whose `agent`, `tool_kind`, and `title` all
+/// match it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionRule {
@@ -221,7 +223,31 @@ pub struct PermissionRule {
     pub agent: Option<String>,
     /// ACP `ToolKind` (`read`, `edit`, `execute`, ...); every kind when absent.
     pub tool_kind: Option<String>,
+    /// A glob over the request's title as its card shows it (for a command,
+    /// usually the command line); every title when absent. `*` also matches
+    /// `/`.
+    pub title: Option<String>,
     pub decision: Decision,
+}
+
+/// The ACP `ToolKind`s a rule's `tool_kind` may name.
+pub const TOOL_KINDS: [&str; 10] = [
+    "read",
+    "edit",
+    "delete",
+    "move",
+    "search",
+    "execute",
+    "think",
+    "fetch",
+    "switch_mode",
+    "other",
+];
+
+/// The matcher of a rule's `title`: the whole title, with `*` crossing `/`
+/// (a title is a command line as often as a path).
+pub fn title_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
+    globset::Glob::new(pattern).map(|glob| glob.compile_matcher())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

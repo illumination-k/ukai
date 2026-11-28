@@ -1227,7 +1227,9 @@ mod tests {
             200,
             SessionEvent::PermissionRequested {
                 id: 1,
+                tool_call: "t1".into(),
                 title: "run".into(),
+                kind: None,
                 options: Vec::new(),
             },
         );

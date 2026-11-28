@@ -4,11 +4,12 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use ukai_acp::{
-    Checkout, FsRoot, PaneWorkspace, RestartEndpoint, SessionEvent, SessionEvents, SessionHandle,
-    SessionOptions, UpdateCheck,
+    Checkout, FsRoot, PaneWorkspace, PermissionId, RestartEndpoint, SessionEvent, SessionEvents,
+    SessionHandle, SessionOptions, UpdateCheck,
 };
 use ukai_core::config::ApplyDefaults;
-use ukai_core::{Alert, PaneContent, PaneId, Status, Transcript};
+use ukai_core::permission::{self, Answer, Asked};
+use ukai_core::{Alert, PaneContent, PaneId, ProjectId, Status, Transcript};
 
 use super::{AgentSession, Composer, Lease, Sessions, branch};
 use crate::alert;
@@ -88,8 +89,17 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
                         handle.set_config(id, value);
                     }
                     let ended = matches!(event, SessionEvent::TurnEnded { .. });
-                    let raised = Alert::of(&event);
+                    // A rule answers the request in the user's place, so
+                    // it raises nothing.
+                    let ruled = ruled(app, &project, &agent, &transcript.peek(), &event);
+                    let raised = Alert::of(&event).filter(|_| ruled.is_none());
                     transcript.write().apply(event);
+                    if let Some((id, answer)) = ruled
+                        && let Some(handle) = handle_of(sessions, pane, transcript)
+                        && handle.resolve_permission(id, Some(answer.option.id.clone()))
+                    {
+                        transcript.write().answer_permission_by(id, &answer);
+                    }
                     if transcript.peek().queued.is_some() {
                         follow_queued(sessions, pane, transcript, composer);
                     }
@@ -123,6 +133,42 @@ fn connect_expecting(app: AppSignals, pane: PaneId, resume: bool, expecting: Opt
             lease,
         },
     );
+}
+
+/// The answer the project's rules give to `event`, when it is a permission
+/// request they cover: the configuration's `[[permissions]]`, then what the
+/// user chose to always allow. Read anew for each request, so a rule saved
+/// or forgotten a moment ago counts.
+fn ruled(
+    app: AppSignals,
+    project: &ProjectId,
+    agent: &str,
+    transcript: &Transcript,
+    event: &SessionEvent,
+) -> Option<(PermissionId, Answer)> {
+    let SessionEvent::PermissionRequested {
+        id,
+        tool_call,
+        title,
+        kind,
+        options,
+    } = event
+    else {
+        return None;
+    };
+    let configs = app.configs.peek();
+    let rules = match configs.get(project) {
+        Some(Ok(config)) => config.permissions.as_slice(),
+        _ => &[],
+    };
+    let asked = Asked {
+        agent,
+        kind: kind.as_deref().or_else(|| transcript.tool_kind(tool_call)),
+        title,
+    };
+    let projects = app.projects.peek();
+    permission::decide(rules, projects.permissions(project), asked, options)
+        .map(|answer| (*id, answer))
 }
 
 /// Whether `pane` still shows `transcript` but has dropped its handle.

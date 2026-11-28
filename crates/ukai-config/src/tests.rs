@@ -139,6 +139,18 @@ fn problems(src: &str) -> Vec<Problem> {
     "[[permissions]]\nagent = \"team/claude\"\ndecision = \"allow\"",
     Problem::UnknownAgent { context: "permissions[0]".into(), agent: "team/claude".into() }
 )]
+#[case::unknown_tool_kind(
+    "[[permissions]]\ntool_kind = \"exec\"\ndecision = \"allow\"",
+    Problem::UnknownToolKind { index: 0, kind: "exec".into() }
+)]
+#[case::invalid_permission_title(
+    "[[permissions]]\ntitle = \"[\"\ndecision = \"allow\"",
+    Problem::InvalidPermissionTitle {
+        index: 0,
+        glob: "[".into(),
+        message: "unclosed character class; missing ']'".into(),
+    }
+)]
 #[case::agent_id_with_slash(
     "[agents.\"team/claude\"]\ntransport = \"stdio\"\ncommand = \"a\"",
     Problem::AgentIdWithSlash("team/claude".into())
@@ -240,10 +252,28 @@ fn a_permission_names_a_declared_gateways_agent() {
 }
 
 #[test]
+fn a_permission_rule_names_a_kind_and_a_title() {
+    let src =
+        "[[permissions]]\ntool_kind = \"execute\"\ntitle = \"cargo test*\"\ndecision = \"allow\"";
+    let Ok(config) = parse(src) else {
+        panic!("expected the rule to parse");
+    };
+    let rule = &config.permissions[0];
+    assert_eq!(rule.tool_kind.as_deref(), Some("execute"));
+    let Some(Ok(title)) = rule.title.as_deref().map(title_glob) else {
+        panic!("expected a title glob");
+    };
+    assert!(title.is_match("cargo test -p ukai-core/x"));
+    assert!(!title.is_match("sudo cargo test"));
+}
+
+#[test]
 fn every_problem_is_reported() {
     let src = r#"
         [[permissions]]
         agent = "ghost"
+        tool_kind = "exec"
+        title = "["
         decision = "deny"
 
         [gateways."a/b"]
@@ -253,7 +283,7 @@ fn every_problem_is_reported() {
         dirs = ["ok", "../out"]
         globs = ["[", "**/*.html"]
     "#;
-    assert_eq!(problems(src).len(), 5);
+    assert_eq!(problems(src).len(), 7);
 }
 
 #[test]

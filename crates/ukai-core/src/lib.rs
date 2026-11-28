@@ -18,6 +18,7 @@ pub mod markdown;
 pub mod mention;
 pub mod metrics;
 pub mod palette;
+pub mod permission;
 mod project;
 pub mod publication;
 pub mod recall;

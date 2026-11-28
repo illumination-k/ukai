@@ -5,7 +5,9 @@
 use std::path::{Component, PathBuf};
 
 use crate::layered::{REPORT_ALLOW_NETWORK_ENV, REPORT_DIRS_ENV, REPORT_GLOBS_ENV};
-use crate::schema::{Config, PRIORITIES, REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, Review};
+use crate::schema::{
+    Config, PRIORITIES, REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, Review, TOOL_KINDS, title_glob,
+};
 
 /// One problem with a configuration. Validation collects all of them rather
 /// than stopping at the first, so a user fixes the file in one pass.
@@ -13,6 +15,14 @@ use crate::schema::{Config, PRIORITIES, REVIEW_DESCRIPTION_MAX, REVIEW_TAG_MAX, 
 pub enum Problem {
     #[error("{context} refers to unknown agent `{agent}`")]
     UnknownAgent { context: String, agent: String },
+    #[error("permissions[{index}].tool_kind: `{kind}` is not an ACP tool kind ({})", TOOL_KINDS.join(", "))]
+    UnknownToolKind { index: usize, kind: String },
+    #[error("permissions[{index}].title: `{glob}`: {message}")]
+    InvalidPermissionTitle {
+        index: usize,
+        glob: String,
+        message: String,
+    },
     #[error("agents.{0}: an agent id has no `/`, which names a gateway's agent")]
     AgentIdWithSlash(String),
     #[error("gateways.{0}: a gateway id is not empty and has no `/`")]
@@ -81,6 +91,30 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
                     agent: agent.clone(),
                 })
         });
+    let bad_rules = config
+        .permissions
+        .iter()
+        .enumerate()
+        .flat_map(|(index, rule)| {
+            let kind = rule
+                .tool_kind
+                .as_ref()
+                .filter(|kind| !TOOL_KINDS.contains(&kind.as_str()))
+                .map(|kind| Problem::UnknownToolKind {
+                    index,
+                    kind: kind.clone(),
+                });
+            let title = rule.title.as_ref().and_then(|glob| {
+                title_glob(glob)
+                    .err()
+                    .map(|error| Problem::InvalidPermissionTitle {
+                        index,
+                        glob: glob.clone(),
+                        message: error.kind().to_string(),
+                    })
+            });
+            kind.into_iter().chain(title)
+        });
     let slashed_agents = config
         .agents
         .keys()
@@ -118,6 +152,7 @@ pub(crate) fn validate(config: &Config) -> Vec<Problem> {
         })
         .map(|language| Problem::InvalidVoiceLanguage(language.clone()));
     unknown_agents
+        .chain(bad_rules)
         .chain(slashed_agents)
         .chain(bad_gateways)
         .chain(outside_dirs)
