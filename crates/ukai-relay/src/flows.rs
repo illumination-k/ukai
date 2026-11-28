@@ -39,7 +39,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use ukai_acp::flows::{FLOWS_PATH, FlowError, Order, ReadQuery, Store};
+use ukai_acp::flows::{FLOWS_PATH, FlowError, Order, ReadQuery, Store, blocking};
 
 /// `GET /flows`, and `GET` and `POST /flows/{run}`, for the checkout at
 /// `root`.
@@ -58,14 +58,6 @@ fn refusal(error: FlowError) -> Response {
             (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response()
         }
     }
-}
-
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, FlowError> + Send + 'static,
-) -> Result<T, FlowError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| FlowError::Failed(error.to_string()))?
 }
 
 async fn listing(State(root): State<PathBuf>) -> Response {

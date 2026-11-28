@@ -14,9 +14,9 @@
 use std::time::Duration;
 
 use dioxus::prelude::*;
+use ukai_acp::Checkout;
 use ukai_acp::checkout::{CheckoutDiff, DiffBase};
 use ukai_acp::review::{AnnotateRequest, Annotation, Priority, Review};
-use ukai_acp::{Checkout, PaneWorkspace, WorkspaceScope};
 use ukai_core::annotation::{self, Filter, Placement};
 use ukai_core::diff::{self, ChangeKind, FileChange};
 use ukai_core::review::PULL_REQUEST_PROMPT;
@@ -26,9 +26,9 @@ use crate::agent_pane::{agent_idle, ask, use_review};
 use crate::diff_view::{AnnotationCard, DiffLines, LineNote, NoteActions};
 use crate::follow::poll;
 use crate::icons::{Icon, Svg};
-use crate::layout::launch_target;
+use crate::layout::show_content;
 use crate::markdown::Markdown;
-use crate::projects::{AppSignals, project_context};
+use crate::projects::{AppSignals, at_place};
 
 /// How often an open diff pane reads the checkout again.
 const RELOAD: Duration = Duration::from_secs(10);
@@ -39,24 +39,13 @@ const MAX_FILE_LINES: usize = 3000;
 /// Show the changes of `place` in `project`: focus the pane already showing
 /// them, else open one where [`launch_target`] puts it.
 pub fn open_diff(app: AppSignals, project: &ProjectId, place: &ReportSource) {
-    let mut layout = app.layout;
-    let content = PaneContent::Diff {
-        project: project.clone(),
-        place: place.clone(),
-    };
-    let shown = layout
-        .peek()
-        .contents()
-        .find_map(|(pane, open)| (*open == content).then_some(pane));
-    if let Some(pane) = shown {
-        layout.write().focus(pane);
-        return;
-    }
-    if let Some(pane) = launch_target(app) {
-        let mut layout = layout.write();
-        layout.set_content(pane, content);
-        layout.focus(pane);
-    }
+    show_content(
+        app,
+        PaneContent::Diff {
+            project: project.clone(),
+            place: place.clone(),
+        },
+    );
     let mut projects = app.projects;
     projects.write().select(project);
 }
@@ -74,27 +63,15 @@ fn checkout_at(
     project: &ProjectId,
     place: &ReportSource,
 ) -> Result<Checkout, String> {
-    let context = project_context(&app.projects.peek(), &app.configs.peek(), project)?;
-    let ReportSource::Agent { agent, workspace } = place else {
-        return Ok(Checkout::Local(context.root));
-    };
-    let spec = context
-        .config
-        .agent(agent)
-        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    // A place names the shared workspace by leaving the key out.
-    let workspace = workspace.clone().unwrap_or(PaneWorkspace {
-        key: String::new(),
-        scope: WorkspaceScope::Shared,
-    });
-    Checkout::resolve(
-        &spec,
-        ukai_acp::system_lookup,
-        Some(&workspace),
-        &context.root,
+    at_place(
+        app,
+        project,
+        place,
+        |root| Ok(Checkout::Local(root)),
+        |spec, workspace, root| {
+            Checkout::resolve(spec, ukai_acp::system_lookup, Some(workspace), root)
+        },
     )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| format!("agent `{agent}` names no gateway agent"))
 }
 
 /// What the pane last read.

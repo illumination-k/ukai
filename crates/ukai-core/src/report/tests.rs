@@ -410,3 +410,21 @@ fn network_access_is_off_unless_allowed(#[case] allow_network: bool, #[case] has
         .unwrap_or_else(|e| panic!("open: {e}"));
     assert_eq!(report.content_security_policy().is_some(), has_csp);
 }
+
+#[test]
+fn the_newest_are_listed_when_there_are_too_many() {
+    let root = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let dir = root.path().join("reports");
+    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+    let long_ago = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    for index in 0..MAX_LISTED + 20 {
+        let file = fs::File::create(dir.join(format!("old {index}.html")))
+            .unwrap_or_else(|e| panic!("write: {e}"));
+        file.set_modified(long_ago)
+            .unwrap_or_else(|e| panic!("set the time: {e}"));
+    }
+    fs::write(dir.join("new.html"), "new").unwrap_or_else(|e| panic!("write: {e}"));
+    let listed = list(root.path(), &reports(&["reports"]));
+    assert_eq!(listed.len(), MAX_LISTED);
+    assert_eq!(listed[0], PathBuf::from("reports/new.html"));
+}

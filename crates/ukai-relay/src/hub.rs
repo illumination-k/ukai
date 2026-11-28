@@ -735,13 +735,14 @@ impl Hub {
                         .or_else(|| message.get("error").map(|_| "error".to_owned()));
                 }
                 if let Some(attached) = self.end_turn(&sid, conn) {
-                    // The client that asked is gone; tell whoever is here.
+                    // The client that asked follows the session no longer;
+                    // tell whoever does. The one that asked is answered
+                    // below all the same, if it is still connected.
                     let stop = message.pointer("/result/stopReason").cloned();
                     let usage = message.pointer("/result/usage").cloned();
                     outputs.extend(attached.map(|other| {
                         Output::Client(other, turn_state(&sid, "idle", stop.clone(), usage.clone()))
                     }));
-                    return outputs;
                 }
             }
             _ => {}

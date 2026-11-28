@@ -22,6 +22,7 @@ mod db;
 mod knowledge;
 mod metrics;
 mod reports;
+mod request;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;

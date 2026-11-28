@@ -11,14 +11,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dioxus::prelude::*;
 use ukai_acp::metrics::{Group, MetricsReader, Summary, TurnRecord, TurnsSummary};
-use ukai_acp::{PaneWorkspace, WorkspaceScope};
 use ukai_core::metrics::{age_label, count_label, duration_label, percent};
 use ukai_core::{PaneContent, ProjectId, ReportSource};
 
 use crate::follow::poll;
 use crate::icons::{Icon, Svg};
-use crate::layout::launch_target;
-use crate::projects::{AppSignals, project_context};
+use crate::layout::show_content;
+use crate::projects::{AppSignals, at_place};
 
 /// How often an open metrics pane reads the turns again.
 const RELOAD: Duration = Duration::from_secs(30);
@@ -62,24 +61,13 @@ impl Period {
 /// Show the turns of `place` in `project`: focus the pane already showing
 /// them, else open one where [`launch_target`] puts it.
 pub fn open_metrics(app: AppSignals, project: &ProjectId, place: &ReportSource) {
-    let mut layout = app.layout;
-    let content = PaneContent::Metrics {
-        project: project.clone(),
-        place: place.clone(),
-    };
-    let shown = layout
-        .peek()
-        .contents()
-        .find_map(|(pane, open)| (*open == content).then_some(pane));
-    if let Some(pane) = shown {
-        layout.write().focus(pane);
-        return;
-    }
-    if let Some(pane) = launch_target(app) {
-        let mut layout = layout.write();
-        layout.set_content(pane, content);
-        layout.focus(pane);
-    }
+    show_content(
+        app,
+        PaneContent::Metrics {
+            project: project.clone(),
+            place: place.clone(),
+        },
+    );
     let mut projects = app.projects;
     projects.write().select(project);
 }
@@ -97,41 +85,19 @@ fn reader_at(
     project: &ProjectId,
     place: &ReportSource,
 ) -> Result<MetricsReader, String> {
-    let ReportSource::Agent { agent, workspace } = place else {
-        return Err("only a gateway agent's turns are measured".to_owned());
-    };
-    let context = project_context(&app.projects.peek(), &app.configs.peek(), project)?;
-    let spec = context
-        .config
-        .agent(agent)
-        .ok_or_else(|| format!("agent `{agent}` is not declared anymore"))?;
-    // A place names the shared workspace by leaving the key out.
-    let workspace = workspace.clone().unwrap_or(PaneWorkspace {
-        key: String::new(),
-        scope: WorkspaceScope::Shared,
-    });
-    MetricsReader::resolve(&spec, ukai_acp::system_lookup, Some(&workspace))
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent `{agent}` names no gateway agent"))
+    at_place(
+        app,
+        project,
+        place,
+        |_| Err("only a gateway agent's turns are measured".to_owned()),
+        |spec, workspace, _| MetricsReader::resolve(spec, ukai_acp::system_lookup, Some(workspace)),
+    )
 }
 
 /// Show the turns of every gateway the open projects declare: focus the
 /// pane already showing them, else open one where [`launch_target`] puts it.
 pub fn open_overview(app: AppSignals) {
-    let mut layout = app.layout;
-    let shown = layout
-        .peek()
-        .contents()
-        .find_map(|(pane, open)| (*open == PaneContent::MetricsOverview).then_some(pane));
-    if let Some(pane) = shown {
-        layout.write().focus(pane);
-        return;
-    }
-    if let Some(pane) = launch_target(app) {
-        let mut layout = layout.write();
-        layout.set_content(pane, PaneContent::MetricsOverview);
-        layout.focus(pane);
-    }
+    show_content(app, PaneContent::MetricsOverview);
 }
 
 /// Whether a pane shows the turns of every gateway.

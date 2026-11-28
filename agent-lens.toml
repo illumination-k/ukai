@@ -4,3 +4,5 @@ path = "crates"
 tools = ["hotspot", "complexity", "similarity", "cohesion"]
 format = "md"
 exclude-tests = true
+# Someone else's minified code, which would lead every list.
+exclude = ["**/assets/vendor/**"]

@@ -8,6 +8,7 @@
 //! come back through [`REVIEW_PATH`] (`ukai.gateway.v1.Files.Annotate`).
 //! What may be written is `ukai_core::review`'s to say.
 
+use crate::mirror::mirror;
 use serde::{Deserialize, Serialize};
 use ukai_proto::gateway::v1 as gw;
 
@@ -136,25 +137,14 @@ fn priority_of(priority: gw::Priority) -> Option<Priority> {
     }
 }
 
-impl From<Review> for gw::Review {
-    fn from(review: Review) -> Self {
-        Self {
-            summary: review.summary,
-            annotations: review.annotations.into_iter().map(Into::into).collect(),
-            updated: review.updated,
-        }
+mirror!(
+    Review,
+    gw::Review {
+        summary,
+        annotations: each,
+        updated
     }
-}
-
-impl From<gw::Review> for Review {
-    fn from(review: gw::Review) -> Self {
-        Self {
-            summary: review.summary,
-            annotations: review.annotations.into_iter().map(Into::into).collect(),
-            updated: review.updated,
-        }
-    }
-}
+);
 
 impl From<Annotation> for gw::Annotation {
     fn from(annotation: Annotation) -> Self {

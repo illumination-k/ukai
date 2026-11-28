@@ -388,6 +388,23 @@ fn a_failed_load_forgets_the_session() {
 }
 
 #[test]
+fn a_client_whose_session_was_taken_over_still_gets_its_answer() {
+    let mut hub = with_session();
+    let turn = prompt(&mut hub, A, 3, "long job");
+    hub.connect(B);
+    hub.from_client(B, req(1, "session/load", json!({ "sessionId": SID })));
+    let out = hub.from_agent(result(json!(turn), json!({ "stopReason": "end_turn" })));
+    assert_eq!(
+        client_messages(&out, A),
+        [result(json!(3), json!({ "stopReason": "end_turn" }))]
+    );
+    assert_eq!(
+        client_messages(&out, B),
+        [turn_state(SID, "idle", Some(json!("end_turn")), None)]
+    );
+}
+
+#[test]
 fn a_new_attachment_takes_the_session_over() {
     let mut hub = with_session();
     hub.connect(B);

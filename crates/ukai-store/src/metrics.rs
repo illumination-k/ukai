@@ -31,6 +31,7 @@ use ukai_acp::metrics::{
 use ukai_proto::metrics::v1 as pb;
 
 use crate::db::StoreConfig;
+use crate::request::{reached, workspace};
 
 pub const DATABASE: &str = "metrics";
 
@@ -421,17 +422,7 @@ impl Service {
     }
 
     fn store(&self) -> Result<&Metrics, Status> {
-        self.store
-            .get()
-            .ok_or_else(|| Status::unavailable("the metrics store is not reached yet"))
-    }
-}
-
-fn workspace(workspace: &str) -> Result<&str, Status> {
-    if workspace.is_empty() {
-        Err(Status::invalid_argument("the request names no workspace"))
-    } else {
-        Ok(workspace)
+        reached(&self.store, "metrics")
     }
 }
 

@@ -51,45 +51,77 @@ impl Api {
         Ok(access::plan(&self.gateway, agent, pane.as_deref())?)
     }
 
-    /// The relay of the workspace's running pod; FAILED_PRECONDITION when
-    /// it has none, since nothing here starts one.
-    async fn running_relay(&self, plan: &Plan) -> Result<RelayEndpoint, Status> {
-        access::running_relay(&self.gateway, plan)
+    /// The relay of the running workspace of `agent` a request names;
+    /// FAILED_PRECONDITION when it has none, since nothing here starts one.
+    async fn relay<'a>(
+        &'a self,
+        agent: &'a str,
+        workspace: Option<gw::Workspace>,
+    ) -> Result<Relay<'a>, Status> {
+        let plan = self.plan(agent, workspace)?;
+        let endpoint = access::running_relay(&self.gateway, &plan)
             .await?
             .ok_or_else(|| {
                 Status::failed_precondition(
                     "the agent's workspace is not running; open the agent to start it",
                 )
-            })
+            })?;
+        Ok(Relay {
+            http: &self.gateway.http,
+            agent,
+            plan,
+            endpoint,
+        })
     }
 }
 
-/// Send `request` to a workspace's relay and read its JSON answer. With
-/// `problem`, what the relay says is wrong (422) goes back through it as it
-/// is; any other failure is logged as `failure` and is UNAVAILABLE.
-async fn ask_relay<R: serde::de::DeserializeOwned>(
-    request: reqwest::RequestBuilder,
-    agent: &str,
-    failure: &'static str,
-    problem: Option<fn(String) -> Status>,
-) -> Result<R, Status> {
-    let unavailable = |error: reqwest::Error| {
-        tracing::warn!(%agent, %error, "{failure}");
-        Status::unavailable(failure)
-    };
-    let response = request.send().await.map_err(unavailable)?;
-    if let Some(problem) = problem
-        && response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    {
-        let text = response.text().await.map_err(unavailable)?;
-        return Err(problem(text));
+/// The relay of a running workspace, asked for `agent`.
+struct Relay<'a> {
+    http: &'a reqwest::Client,
+    agent: &'a str,
+    plan: Plan,
+    endpoint: RelayEndpoint,
+}
+
+impl Relay<'_> {
+    /// A GET of `url`, with the relay's token.
+    fn get(&self, url: String) -> reqwest::RequestBuilder {
+        self.http.get(url).bearer_auth(&self.endpoint.token)
     }
-    response
-        .error_for_status()
-        .map_err(unavailable)?
-        .json::<R>()
-        .await
-        .map_err(unavailable)
+
+    /// A POST to `url`, with the relay's token.
+    fn post(&self, url: String) -> reqwest::RequestBuilder {
+        self.http.post(url).bearer_auth(&self.endpoint.token)
+    }
+
+    /// Send `request` and read the relay's JSON answer. With `problem`,
+    /// what the relay says is wrong (422) goes back through it as it is;
+    /// any other failure is logged as `failure` and is UNAVAILABLE.
+    async fn ask<R: serde::de::DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        failure: &'static str,
+        problem: Option<fn(String) -> Status>,
+    ) -> Result<R, Status> {
+        let agent = self.agent;
+        let unavailable = |error: reqwest::Error| {
+            tracing::warn!(%agent, %error, "{failure}");
+            Status::unavailable(failure)
+        };
+        let response = request.send().await.map_err(unavailable)?;
+        if let Some(problem) = problem
+            && response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        {
+            let text = response.text().await.map_err(unavailable)?;
+            return Err(problem(text));
+        }
+        response
+            .error_for_status()
+            .map_err(unavailable)?
+            .json::<R>()
+            .await
+            .map_err(unavailable)
+    }
 }
 
 #[tonic::async_trait]
@@ -166,19 +198,14 @@ impl gw::ports_server::Ports for Api {
     ) -> Result<Response<gw::PortListing>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let listing: PortListing = ask_relay(
-            self.gateway
-                .http
-                .get(relay.ports_url())
-                .bearer_auth(&relay.token)
-                .timeout(LIST_TIMEOUT),
-            &request.agent,
-            "cannot list the workspace's ports",
-            None,
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let listing: PortListing = relay
+            .ask(
+                relay.get(relay.endpoint.ports_url()).timeout(LIST_TIMEOUT),
+                "cannot list the workspace's ports",
+                None,
+            )
+            .await?;
         Ok(Response::new(listing.into()))
     }
 }
@@ -199,19 +226,16 @@ impl gw::flows_server::Flows for Api {
     ) -> Result<Response<gw::FlowListing>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let listing: FlowListing = ask_relay(
-            self.gateway
-                .http
-                .get(relay.flows_url(""))
-                .bearer_auth(&relay.token)
-                .timeout(LIST_TIMEOUT),
-            &request.agent,
-            "cannot list the workspace's flows",
-            None,
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let listing: FlowListing = relay
+            .ask(
+                relay
+                    .get(relay.endpoint.flows_url(""))
+                    .timeout(LIST_TIMEOUT),
+                "cannot list the workspace's flows",
+                None,
+            )
+            .await?;
         Ok(Response::new(listing.into()))
     }
 
@@ -222,24 +246,21 @@ impl gw::flows_server::Flows for Api {
         self.authorize(&request)?;
         let request = request.into_inner();
         let suffix = run_suffix(&request.run)?;
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let run: RunChunk = ask_relay(
-            self.gateway
-                .http
-                .get(format!(
-                    "{}?after={}",
-                    relay.flows_url(&suffix),
-                    request.after
-                ))
-                .bearer_auth(&relay.token)
-                .timeout(LIST_TIMEOUT),
-            &request.agent,
-            "cannot read the workspace's flow",
-            // What is wrong with the run asked for.
-            Some(Status::aborted),
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let run: RunChunk = relay
+            .ask(
+                relay
+                    .get(format!(
+                        "{}?after={}",
+                        relay.endpoint.flows_url(&suffix),
+                        request.after
+                    ))
+                    .timeout(LIST_TIMEOUT),
+                "cannot read the workspace's flow",
+                // What is wrong with the run asked for.
+                Some(Status::aborted),
+            )
+            .await?;
         Ok(Response::new(run.into()))
     }
 
@@ -250,26 +271,23 @@ impl gw::flows_server::Flows for Api {
         self.authorize(&request)?;
         let request = request.into_inner();
         let suffix = run_suffix(&request.run)?;
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let ordered: Ordered = ask_relay(
-            self.gateway
-                .http
-                .post(relay.flows_url(&suffix))
-                .bearer_auth(&relay.token)
-                .json(&Order {
-                    node: request.node,
-                    message: request.message,
-                })
-                // ayaito's command line, which answers within the relay's
-                // own limit.
-                .timeout(RUN_TIMEOUT),
-            &request.agent,
-            "cannot reach the workspace's flow",
-            // Why ayaito refused, word for word.
-            Some(Status::aborted),
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let ordered: Ordered = relay
+            .ask(
+                relay
+                    .post(relay.endpoint.flows_url(&suffix))
+                    .json(&Order {
+                        node: request.node,
+                        message: request.message,
+                    })
+                    // ayaito's command line, which answers within the relay's
+                    // own limit.
+                    .timeout(RUN_TIMEOUT),
+                "cannot reach the workspace's flow",
+                // Why ayaito refused, word for word.
+                Some(Status::aborted),
+            )
+            .await?;
         Ok(Response::new(gw::FlowOrdered { said: ordered.said }))
     }
 }
@@ -282,19 +300,14 @@ impl gw::files_server::Files for Api {
     ) -> Result<Response<gw::FileListing>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let listing: FileListing = ask_relay(
-            self.gateway
-                .http
-                .get(relay.files_url())
-                .bearer_auth(&relay.token)
-                .timeout(LIST_TIMEOUT),
-            &request.agent,
-            "cannot list the workspace's files",
-            None,
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let listing: FileListing = relay
+            .ask(
+                relay.get(relay.endpoint.files_url()).timeout(LIST_TIMEOUT),
+                "cannot list the workspace's files",
+                None,
+            )
+            .await?;
         Ok(Response::new(listing.into()))
     }
 
@@ -305,21 +318,18 @@ impl gw::files_server::Files for Api {
         self.authorize(&request)?;
         let request = request.into_inner();
         let base: DiffBase = request.base().into();
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let diff: CheckoutDiff = ask_relay(
-            self.gateway
-                .http
-                .get(relay.diff_url(base))
-                .bearer_auth(&relay.token)
-                // A few git commands, which a large checkout makes slow.
-                .timeout(RUN_TIMEOUT),
-            &request.agent,
-            "cannot diff the workspace's checkout",
-            // What is wrong with the checkout.
-            Some(Status::aborted),
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let diff: CheckoutDiff = relay
+            .ask(
+                relay
+                    .get(relay.endpoint.diff_url(base))
+                    // A few git commands, which a large checkout makes slow.
+                    .timeout(RUN_TIMEOUT),
+                "cannot diff the workspace's checkout",
+                // What is wrong with the checkout.
+                Some(Status::aborted),
+            )
+            .await?;
         Ok(Response::new(diff.into()))
     }
 
@@ -329,24 +339,21 @@ impl gw::files_server::Files for Api {
     ) -> Result<Response<gw::Review>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let review: Review = ask_relay(
-            self.gateway
-                .http
-                .post(relay.review_url())
-                .bearer_auth(&relay.token)
-                .json(&AnnotateRequest {
-                    id: request.id,
-                    reply: request.reply,
-                    resolved: request.resolved,
-                })
-                .timeout(LIST_TIMEOUT),
-            &request.agent,
-            "cannot answer the agent's review",
-            Some(Status::aborted),
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let review: Review = relay
+            .ask(
+                relay
+                    .post(relay.endpoint.review_url())
+                    .json(&AnnotateRequest {
+                        id: request.id,
+                        reply: request.reply,
+                        resolved: request.resolved,
+                    })
+                    .timeout(LIST_TIMEOUT),
+                "cannot answer the agent's review",
+                Some(Status::aborted),
+            )
+            .await?;
         Ok(Response::new(review.into()))
     }
 
@@ -362,21 +369,18 @@ impl gw::files_server::Files for Api {
                 MAX_UPLOAD_BYTES / 1024 / 1024
             )));
         }
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        let uploaded: Uploaded = ask_relay(
-            self.gateway
-                .http
-                .post(relay.upload_url(&request.name))
-                .bearer_auth(&relay.token)
-                .body(request.content)
-                .timeout(RUN_TIMEOUT),
-            &request.agent,
-            "cannot upload the file to the workspace",
-            // What is wrong with the file.
-            Some(Status::invalid_argument),
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        let uploaded: Uploaded = relay
+            .ask(
+                relay
+                    .post(relay.endpoint.upload_url(&request.name))
+                    .body(request.content)
+                    .timeout(RUN_TIMEOUT),
+                "cannot upload the file to the workspace",
+                // What is wrong with the file.
+                Some(Status::invalid_argument),
+            )
+            .await?;
         Ok(Response::new(gw::Uploaded {
             path: uploaded.path,
         }))
@@ -394,25 +398,22 @@ impl gw::commands_server::Commands for Api {
         if request.command.trim().is_empty() {
             return Err(Status::invalid_argument("the command is empty"));
         }
-        let plan = self.plan(&request.agent, request.workspace)?;
-        let relay = self.running_relay(&plan).await?;
-        tracing::info!(agent = %request.agent, job = %plan.job_name(), "running a command for the user");
-        let output: CommandOutput = ask_relay(
-            self.gateway
-                .http
-                .post(relay.run_url())
-                .bearer_auth(&relay.token)
-                .json(&RunRequest {
-                    command: request.command,
-                })
-                // The relay stops the command itself; this is for a relay
-                // that does not answer at all.
-                .timeout(RUN_TIMEOUT + LIST_TIMEOUT),
-            &request.agent,
-            "cannot run the command in the workspace",
-            None,
-        )
-        .await?;
+        let relay = self.relay(&request.agent, request.workspace).await?;
+        tracing::info!(agent = %request.agent, job = %relay.plan.job_name(), "running a command for the user");
+        let output: CommandOutput = relay
+            .ask(
+                relay
+                    .post(relay.endpoint.run_url())
+                    .json(&RunRequest {
+                        command: request.command,
+                    })
+                    // The relay stops the command itself; this is for a relay
+                    // that does not answer at all.
+                    .timeout(RUN_TIMEOUT + LIST_TIMEOUT),
+                "cannot run the command in the workspace",
+                None,
+            )
+            .await?;
         Ok(Response::new(output.into()))
     }
 }

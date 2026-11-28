@@ -198,6 +198,42 @@ fn long_events_are_read_in_parts() {
     assert_eq!(read.len(), 1_001_000);
 }
 
+#[test]
+fn a_line_longer_than_two_parts_is_read_to_its_end() {
+    let checkout = Checkout::new();
+    checkout.put("run", "graph.json", GRAPH);
+    let long = format!("{}\n", "x".repeat(2 * MAX_CHUNK + 10));
+    checkout.put(
+        "run",
+        "events.jsonl",
+        &format!("{long}next\n{}", "y".repeat(10)),
+    );
+    let store = checkout.store();
+    let first = store
+        .read("run", 0)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
+    assert_eq!(
+        (first.events.len(), first.next),
+        (long.len(), long.len() as u64)
+    );
+    let rest = store
+        .read("run", first.next)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
+    assert_eq!(rest.events, "next\n");
+}
+
+#[test]
+fn a_long_line_still_being_written_waits() {
+    let checkout = Checkout::new();
+    checkout.put("run", "graph.json", GRAPH);
+    checkout.put("run", "events.jsonl", &"x".repeat(2 * MAX_CHUNK + 10));
+    let chunk = checkout
+        .store()
+        .read("run", 0)
+        .unwrap_or_else(|e| panic!("the run is read: {e:?}"));
+    assert_eq!((chunk.events.as_str(), chunk.next), ("", 0));
+}
+
 #[rstest]
 #[case(b"", 0)]
 #[case(b"abc", 0)]

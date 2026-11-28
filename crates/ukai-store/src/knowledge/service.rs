@@ -6,6 +6,7 @@
 //! a person reviews, and each agent workspace changes at most
 //! [`WORKSPACE_CHANGES`] notes per [`WORKSPACE_WINDOW`].
 
+use crate::request::reached;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -72,9 +73,7 @@ impl Service {
     }
 
     fn store(&self) -> Result<&Knowledge, Status> {
-        self.store
-            .get()
-            .ok_or_else(|| Status::unavailable("the knowledge store is not reached yet"))
+        reached(&self.store, "knowledge")
     }
 
     /// Count a change by `caller`, refusing it when its workspace has made

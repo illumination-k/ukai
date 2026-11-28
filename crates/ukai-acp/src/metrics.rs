@@ -791,6 +791,8 @@ pub struct TurnsSummary {
 pub mod wire {
     use ukai_proto::metrics::v1 as pb;
 
+    use crate::mirror::mirror;
+
     use super::{
         Context, Group, SlowCall, Split, Spread, Summary, TokenTotals, Tokens, ToolKind,
         ToolRecord, TurnRecord, TurnsSummary,
@@ -888,31 +890,17 @@ pub mod wire {
         }
     }
 
-    impl From<Spread> for pb::Spread {
-        fn from(s: Spread) -> Self {
-            Self {
-                count: s.count,
-                total: s.total,
-                mean: s.mean,
-                median: s.median,
-                p90: s.p90,
-                max: s.max,
-            }
+    mirror!(
+        Spread,
+        pb::Spread {
+            count,
+            total,
+            mean,
+            median,
+            p90,
+            max
         }
-    }
-
-    impl From<pb::Spread> for Spread {
-        fn from(s: pb::Spread) -> Self {
-            Self {
-                count: s.count,
-                total: s.total,
-                mean: s.mean,
-                median: s.median,
-                p90: s.p90,
-                max: s.max,
-            }
-        }
-    }
+    );
 
     impl From<Summary> for pb::Summary {
         fn from(s: Summary) -> Self {

@@ -398,3 +398,12 @@ fn only_runs_that_start_while_looking_are_new() {
     let (fresh, _) = new_runs(Some(&known), &later);
     assert!(fresh.is_empty(), "a run is new once");
 }
+
+#[test]
+fn nodes_that_share_an_id_are_not_followed_in_circles() {
+    let node = |parent: &str| format!(r#"{{"id":"g","kind":"flow","name":"x"{parent}}}"#);
+    let inside = node(r#","parent":"g""#);
+    let graph = Graph::parse(&format!(r#"{{"nodes":[{},{inside},{inside}]}}"#, node("")))
+        .unwrap_or_else(|error| panic!("the graph parses: {error}"));
+    assert_eq!(view(&graph, &[]).nodes.len(), 3);
+}

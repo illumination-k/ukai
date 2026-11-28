@@ -13,6 +13,7 @@ use ukai_proto::gateway::v1 as gw;
 
 use crate::ResolveError;
 use crate::gateway::GatewayAgent;
+use crate::mirror::mirror;
 use ukai_config::{AgentSpec, Source};
 
 /// Where a relay lists its sessions (`GET`) and starts one (`POST`, with a
@@ -113,33 +114,18 @@ pub fn clip(text: &str, max: usize) -> String {
     }
 }
 
-impl From<SessionSummary> for gw::SessionSummary {
-    fn from(summary: SessionSummary) -> Self {
-        Self {
-            id: summary.id,
-            title: summary.title,
-            running: summary.running,
-            stop_reason: summary.stop_reason,
-            waiting: summary.waiting,
-            last_prompt: summary.last_prompt,
-            last_reply: summary.last_reply,
-        }
+mirror!(
+    SessionSummary,
+    gw::SessionSummary {
+        id,
+        title,
+        running,
+        stop_reason,
+        waiting,
+        last_prompt,
+        last_reply,
     }
-}
-
-impl From<gw::SessionSummary> for SessionSummary {
-    fn from(summary: gw::SessionSummary) -> Self {
-        Self {
-            id: summary.id,
-            title: summary.title,
-            running: summary.running,
-            stop_reason: summary.stop_reason,
-            waiting: summary.waiting,
-            last_prompt: summary.last_prompt,
-            last_reply: summary.last_reply,
-        }
-    }
-}
+);
 
 /// A workspace with a running pod, as the app's secretary pane lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]

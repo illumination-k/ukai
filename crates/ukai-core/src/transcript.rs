@@ -872,10 +872,10 @@ pub fn updated_label(updated_at: &str) -> String {
         && bytes[7] == b'-'
         && bytes[10] == b'T'
         && bytes[13] == b':';
-    if shaped {
-        format!("{} {}", &updated_at[..10], &updated_at[11..16])
-    } else {
-        updated_at.to_owned()
+    // What an agent sends may hold a character that straddles a cut.
+    match (updated_at.get(..10), updated_at.get(11..16)) {
+        (Some(date), Some(time)) if shaped => format!("{date} {time}"),
+        _ => updated_at.to_owned(),
     }
 }
 
@@ -1029,6 +1029,7 @@ mod tests {
     #[case::iso("2026-10-14T12:34:56Z", "2026-10-14 12:34")]
     #[case::offset("2026-10-14T12:34:56.789+09:00", "2026-10-14 12:34")]
     #[case::other("yesterday", "yesterday")]
+    #[case::cut_in_a_character("2026-10-14T12:3é", "2026-10-14T12:3é")]
     fn updated_labels(#[case] updated_at: &str, #[case] expected: &str) {
         assert_eq!(updated_label(updated_at), expected);
     }

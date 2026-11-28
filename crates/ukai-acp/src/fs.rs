@@ -56,6 +56,11 @@ impl FsRoot {
             match existing.canonicalize() {
                 Ok(resolved) => break resolved,
                 Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    // A link to nothing is not found either, and a write
+                    // through it lands wherever it points.
+                    if existing.symlink_metadata().is_ok() {
+                        return Err(FsError::OutsideRoot(path.to_owned()));
+                    }
                     let (Some(parent), Some(name)) = (existing.parent(), existing.file_name())
                     else {
                         return Err(FsError::Io {
@@ -222,5 +227,18 @@ mod tests {
             Err(FsError::OutsideRoot(_))
         ));
         assert!(!fx.outside.join("planted").exists());
+    }
+
+    #[cfg(unix)]
+    #[rstest]
+    fn rejects_a_write_through_a_link_to_nothing(fx: Fixture) {
+        let link = fx.root.join("link");
+        let planted = fx.outside.join("planted");
+        std::os::unix::fs::symlink(&planted, &link).unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(
+            fx.fs.write(&link, "x"),
+            Err(FsError::OutsideRoot(_))
+        ));
+        assert!(!planted.exists());
     }
 }

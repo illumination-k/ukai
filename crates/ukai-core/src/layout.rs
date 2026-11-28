@@ -342,7 +342,10 @@ impl Layout {
             if self.active > index || self.active == self.tabs.len() {
                 self.active -= 1;
             }
-            self.focused = self.active_tab().root.first_pane();
+            // Closing another tab leaves the focus where it was.
+            if removed.contains(&self.focused) {
+                self.focused = self.active_tab().root.first_pane();
+            }
         }
         removed
     }
