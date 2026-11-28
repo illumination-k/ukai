@@ -26,6 +26,7 @@ pub mod gateways;
 mod grpc;
 pub mod knowledge;
 pub mod metrics;
+mod mirror;
 pub mod ports;
 pub mod reconnect;
 pub mod reports;

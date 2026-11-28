@@ -29,6 +29,7 @@ use ukai_proto::gateway::v1::files_client::FilesClient;
 
 use crate::gateway::GatewayAgent;
 use crate::grpc::{self, Channel};
+use crate::mirror::mirror;
 use crate::review::{AnnotateRequest, Review};
 use crate::{PaneWorkspace, ResolveError};
 
@@ -719,25 +720,14 @@ impl Checkout {
     }
 }
 
-impl From<FileListing> for gw::FileListing {
-    fn from(listing: FileListing) -> Self {
-        Self {
-            root: listing.root,
-            files: listing.files,
-            truncated: listing.truncated,
-        }
+mirror!(
+    FileListing,
+    gw::FileListing {
+        root,
+        files,
+        truncated
     }
-}
-
-impl From<gw::FileListing> for FileListing {
-    fn from(listing: gw::FileListing) -> Self {
-        Self {
-            root: listing.root,
-            files: listing.files,
-            truncated: listing.truncated,
-        }
-    }
-}
+);
 
 impl From<DiffBase> for gw::DiffBase {
     fn from(base: DiffBase) -> Self {
@@ -757,49 +747,25 @@ impl From<gw::DiffBase> for DiffBase {
     }
 }
 
-impl From<CheckoutDiff> for gw::CheckoutDiff {
-    fn from(diff: CheckoutDiff) -> Self {
-        Self {
-            base: diff.base,
-            patch: diff.patch,
-            truncated: diff.truncated,
-            review: diff.review.map(Into::into),
-        }
+mirror!(
+    CheckoutDiff,
+    gw::CheckoutDiff {
+        base,
+        patch,
+        truncated,
+        review: option
     }
-}
+);
 
-impl From<gw::CheckoutDiff> for CheckoutDiff {
-    fn from(diff: gw::CheckoutDiff) -> Self {
-        Self {
-            base: diff.base,
-            patch: diff.patch,
-            truncated: diff.truncated,
-            review: diff.review.map(Into::into),
-        }
+mirror!(
+    CommandOutput,
+    gw::CommandOutput {
+        exit_code,
+        output,
+        truncated,
+        timed_out
     }
-}
-
-impl From<CommandOutput> for gw::CommandOutput {
-    fn from(output: CommandOutput) -> Self {
-        Self {
-            exit_code: output.exit_code,
-            output: output.output,
-            truncated: output.truncated,
-            timed_out: output.timed_out,
-        }
-    }
-}
-
-impl From<gw::CommandOutput> for CommandOutput {
-    fn from(output: gw::CommandOutput) -> Self {
-        Self {
-            exit_code: output.exit_code,
-            output: output.output,
-            truncated: output.truncated,
-            timed_out: output.timed_out,
-        }
-    }
-}
+);
 
 #[cfg(test)]
 mod tests {

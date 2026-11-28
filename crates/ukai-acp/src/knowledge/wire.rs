@@ -3,6 +3,7 @@
 //! optional, an editor this side does not know), so reading one is
 //! fallible; writing one is not.
 
+use crate::mirror::mirror;
 use ukai_proto::knowledge::v1 as pb;
 
 use super::{Approved, ApprovedSummary, Editor, Note, NoteSpec, NoteSummary, Provenance, Revision};
@@ -34,45 +35,17 @@ fn spec(spec: Option<pb::NoteSpec>) -> Result<NoteSpec, Malformed> {
     spec.map(NoteSpec::from).ok_or(Malformed("note spec"))
 }
 
-impl From<NoteSpec> for pb::NoteSpec {
-    fn from(spec: NoteSpec) -> Self {
-        Self {
-            description: spec.description,
-            body: spec.body,
-            tags: spec.tags,
-            on_demand: spec.on_demand,
-        }
+mirror!(
+    NoteSpec,
+    pb::NoteSpec {
+        description,
+        body,
+        tags,
+        on_demand
     }
-}
+);
 
-impl From<pb::NoteSpec> for NoteSpec {
-    fn from(spec: pb::NoteSpec) -> Self {
-        Self {
-            description: spec.description,
-            body: spec.body,
-            tags: spec.tags,
-            on_demand: spec.on_demand,
-        }
-    }
-}
-
-impl From<Provenance> for pb::Provenance {
-    fn from(provenance: Provenance) -> Self {
-        Self {
-            workspace: provenance.workspace,
-            commit: provenance.commit,
-        }
-    }
-}
-
-impl From<pb::Provenance> for Provenance {
-    fn from(provenance: pb::Provenance) -> Self {
-        Self {
-            workspace: provenance.workspace,
-            commit: provenance.commit,
-        }
-    }
-}
+mirror!(Provenance, pb::Provenance { workspace, commit });
 
 impl From<Approved> for pb::Approved {
     fn from(approved: Approved) -> Self {
@@ -130,27 +103,15 @@ impl TryFrom<pb::Note> for Note {
     }
 }
 
-impl From<ApprovedSummary> for pb::ApprovedSummary {
-    fn from(approved: ApprovedSummary) -> Self {
-        Self {
-            revision: approved.revision,
-            description: approved.description,
-            tags: approved.tags,
-            on_demand: approved.on_demand,
-        }
+mirror!(
+    ApprovedSummary,
+    pb::ApprovedSummary {
+        revision,
+        description,
+        tags,
+        on_demand
     }
-}
-
-impl From<pb::ApprovedSummary> for ApprovedSummary {
-    fn from(approved: pb::ApprovedSummary) -> Self {
-        Self {
-            revision: approved.revision,
-            description: approved.description,
-            tags: approved.tags,
-            on_demand: approved.on_demand,
-        }
-    }
-}
+);
 
 impl From<NoteSummary> for pb::NoteSummary {
     fn from(note: NoteSummary) -> Self {
