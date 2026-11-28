@@ -23,6 +23,7 @@ use ukai_core::publication::{self, Publication, Published, WORKSPACE_MAX};
 use ukai_proto::reports::v1 as pb;
 
 use crate::db::StoreConfig;
+use crate::request::{reached, workspace};
 
 pub const DATABASE: &str = "reports";
 
@@ -182,17 +183,7 @@ impl Service {
     }
 
     fn store(&self) -> Result<&Reports, Status> {
-        self.store
-            .get()
-            .ok_or_else(|| Status::unavailable("the reports store is not reached yet"))
-    }
-}
-
-fn workspace(workspace: &str) -> Result<&str, Status> {
-    if workspace.is_empty() {
-        Err(Status::invalid_argument("the request names no workspace"))
-    } else {
-        Ok(workspace)
+        reached(&self.store, "reports")
     }
 }
 
