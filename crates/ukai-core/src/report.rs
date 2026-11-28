@@ -125,7 +125,7 @@ pub fn list_detailed(root: &Path, reports: &Reports) -> Vec<Listed> {
                 };
                 if file_type.is_dir() {
                     pending.push(path);
-                } else if globs.is_match(&path) && found.len() < MAX_LISTED {
+                } else if globs.is_match(&path) {
                     let modified = entry
                         .metadata()
                         .and_then(|m| m.modified())
@@ -137,6 +137,8 @@ pub fn list_detailed(root: &Path, reports: &Reports) -> Vec<Listed> {
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found.dedup_by(|a, b| a.1 == b.1);
+    // Cut once sorted, so that it is the oldest that are left out.
+    found.truncate(MAX_LISTED);
     found
         .into_iter()
         .map(|(modified, path)| Listed { path, modified })

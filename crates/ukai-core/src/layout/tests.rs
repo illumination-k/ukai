@@ -146,6 +146,18 @@ fn closing_an_earlier_tab_keeps_the_active_one() {
     assert_eq!(layout.focused(), third);
 }
 
+#[test]
+fn closing_another_tab_keeps_the_focus() {
+    let mut layout = Layout::default();
+    layout.new_tab();
+    let first = layout.new_tab();
+    let second = layout
+        .split(first, Direction::Horizontal)
+        .unwrap_or_else(|| panic!("the pane is split"));
+    layout.close_tab(0);
+    assert_eq!(layout.focused(), second);
+}
+
 #[rstest]
 #[case::first_child(&[], 0, 0.25, vec![0.5, 1.5, 2.0])]
 #[case::clamped_low(&[], 1, 0.0, vec![1.0, 0.15, 2.85])]

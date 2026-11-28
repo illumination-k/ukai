@@ -438,34 +438,7 @@ pub fn view(graph: &Graph, events: &[RunEvent]) -> RunView {
         .map(|node| (node.id.as_str(), node))
         .collect();
 
-    // The node a case of a branch starts at: the edge leads to the first
-    // step inside it.
-    let mut cases: HashMap<&str, (&str, &str)> = HashMap::new();
-    for edge in &graph.edges {
-        let Some(choice) = by_id.get(edge.from.as_str()) else {
-            continue;
-        };
-        let (Some(when), Some(name)) = (&edge.when, &choice.name) else {
-            continue;
-        };
-        let mut top = by_id.get(edge.to.as_str()).copied();
-        // Bounded by the graph's size, should the parents form a cycle.
-        for _ in 0..graph.nodes.len() {
-            match top {
-                Some(node) if node.parent.is_some() && node.parent != choice.parent => {
-                    top = node
-                        .parent
-                        .as_deref()
-                        .and_then(|parent| by_id.get(parent))
-                        .copied();
-                }
-                _ => break,
-            }
-        }
-        if let Some(top) = top {
-            cases.insert(&top.id, (when, name));
-        }
-    }
+    let cases = branch_cases(graph, &by_id);
 
     let mut rows: Vec<(NodeView, Option<&str>, bool)> = Vec::new();
     let mut order: Vec<(&GraphNode, usize, bool)> = Vec::new();
@@ -480,73 +453,7 @@ pub fn view(graph: &Graph, events: &[RunEvent]) -> RunView {
         } else {
             state.map_or(Status::Pending, |state| state.status)
         };
-        let wraps = graph
-            .edges
-            .iter()
-            .filter(|edge| edge.to == node.id)
-            .flat_map(|edge| &edge.wraps);
-        let mut seen: Vec<&String> = Vec::new();
-        for wrap in wraps {
-            if !seen.contains(&wrap) {
-                seen.push(wrap);
-            }
-        }
-        let mut detail: Vec<String> = Vec::new();
-        if let Some(key) = &node.assign {
-            detail.push(format!("→ {key}"));
-        }
-        if node.worktree {
-            detail.push("worktree".to_owned());
-        }
-        let all_finish = node.fail_fast == Some(false);
-        match node.kind {
-            NodeKind::ForEach => {
-                let mut each = "each item".to_owned();
-                if let Some(concurrency) = node.concurrency {
-                    each.push_str(&format!(", {concurrency} at a time"));
-                }
-                if all_finish {
-                    each.push_str(", all finish");
-                }
-                detail.push(each);
-            }
-            NodeKind::Until => {
-                if let Some(max) = node.max {
-                    detail.push(format!("at most {max}"));
-                }
-            }
-            NodeKind::Parallel => detail.push(
-                if all_finish {
-                    "parallel, all finish"
-                } else {
-                    "parallel"
-                }
-                .to_owned(),
-            ),
-            _ => {}
-        }
-        detail.extend(seen.into_iter().cloned());
-        if untaken && !untaken_above {
-            detail.push("not taken".to_owned());
-        }
-        if let Some(state) = state {
-            if state.runs > 1 {
-                detail.push(format!("×{}", state.runs));
-            }
-            if let Some(attempt) = state.attempt
-                && status == Status::Running
-            {
-                detail.push(format!("attempt {}", attempt + 1.0));
-            }
-            if let Some(ms) = state.ms
-                && status != Status::Running
-            {
-                detail.push(time(ms));
-            }
-            if state.usd > 0.0 {
-                detail.push(money(state.usd));
-            }
-        }
+        let detail = detail(graph, node, state, status, untaken && !untaken_above);
         let label = match &node.key {
             Some(key) if *key != node.label => format!("{key}: {}", node.label),
             _ => node.label.clone(),
@@ -561,7 +468,7 @@ pub fn view(graph: &Graph, events: &[RunEvent]) -> RunView {
                 label,
                 when: from.map(|(when, _)| (*when).to_owned()),
                 status,
-                detail: detail.join(" · "),
+                detail,
                 error: state
                     .filter(|_| status == Status::Failed)
                     .and_then(|state| state.error.clone()),
@@ -593,21 +500,7 @@ pub fn view(graph: &Graph, events: &[RunEvent]) -> RunView {
         if members.is_empty() {
             continue;
         }
-        let has = |status| members.contains(&status);
-        let status = if has(Status::Running) {
-            Status::Running
-        } else if has(Status::Failed) {
-            Status::Failed
-        } else if has(Status::Stopped) {
-            Status::Stopped
-        } else if !has(Status::Pending) {
-            Status::Done
-        } else if has(Status::Done) || has(Status::Skipped) {
-            Status::Running
-        } else {
-            Status::Pending
-        };
-        rows[index].0.status = status;
+        rows[index].0.status = group_status(&members);
     }
 
     let usd = events
@@ -625,6 +518,138 @@ pub fn view(graph: &Graph, events: &[RunEvent]) -> RunView {
         done,
         total,
         usd,
+    }
+}
+
+/// The node each case of a branch starts at, with the case and the name of
+/// the branch: the edge leads to the first step inside the case.
+fn branch_cases<'a>(
+    graph: &'a Graph,
+    by_id: &HashMap<&str, &'a GraphNode>,
+) -> HashMap<&'a str, (&'a str, &'a str)> {
+    let mut cases: HashMap<&str, (&str, &str)> = HashMap::new();
+    for edge in &graph.edges {
+        let Some(choice) = by_id.get(edge.from.as_str()) else {
+            continue;
+        };
+        let (Some(when), Some(name)) = (&edge.when, &choice.name) else {
+            continue;
+        };
+        let mut top = by_id.get(edge.to.as_str()).copied();
+        // Bounded by the graph's size, should the parents form a cycle.
+        for _ in 0..graph.nodes.len() {
+            match top {
+                Some(node) if node.parent.is_some() && node.parent != choice.parent => {
+                    top = node
+                        .parent
+                        .as_deref()
+                        .and_then(|parent| by_id.get(parent))
+                        .copied();
+                }
+                _ => break,
+            }
+        }
+        if let Some(top) = top {
+            cases.insert(&top.id, (when, name));
+        }
+    }
+    cases
+}
+
+/// What wraps `node` and what it took, joined by ` · `. `not_taken` is for
+/// the case of a branch that chose another.
+fn detail(
+    graph: &Graph,
+    node: &GraphNode,
+    state: Option<&NodeState>,
+    status: Status,
+    not_taken: bool,
+) -> String {
+    let mut detail: Vec<String> = Vec::new();
+    if let Some(key) = &node.assign {
+        detail.push(format!("→ {key}"));
+    }
+    if node.worktree {
+        detail.push("worktree".to_owned());
+    }
+    let all_finish = node.fail_fast == Some(false);
+    match node.kind {
+        NodeKind::ForEach => {
+            let mut each = "each item".to_owned();
+            if let Some(concurrency) = node.concurrency {
+                each.push_str(&format!(", {concurrency} at a time"));
+            }
+            if all_finish {
+                each.push_str(", all finish");
+            }
+            detail.push(each);
+        }
+        NodeKind::Until => {
+            if let Some(max) = node.max {
+                detail.push(format!("at most {max}"));
+            }
+        }
+        NodeKind::Parallel => detail.push(
+            if all_finish {
+                "parallel, all finish"
+            } else {
+                "parallel"
+            }
+            .to_owned(),
+        ),
+        _ => {}
+    }
+    // What wraps the edges that lead here, each once, in the graph's order.
+    let wraps = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.to == node.id)
+        .flat_map(|edge| &edge.wraps);
+    let before = detail.len();
+    for wrap in wraps {
+        if !detail[before..].contains(wrap) {
+            detail.push(wrap.clone());
+        }
+    }
+    if not_taken {
+        detail.push("not taken".to_owned());
+    }
+    if let Some(state) = state {
+        if state.runs > 1 {
+            detail.push(format!("×{}", state.runs));
+        }
+        if let Some(attempt) = state.attempt
+            && status == Status::Running
+        {
+            detail.push(format!("attempt {}", attempt + 1.0));
+        }
+        if let Some(ms) = state.ms
+            && status != Status::Running
+        {
+            detail.push(time(ms));
+        }
+        if state.usd > 0.0 {
+            detail.push(money(state.usd));
+        }
+    }
+    detail.join(" · ")
+}
+
+/// How far a group without events of its own is, from its members.
+fn group_status(members: &[Status]) -> Status {
+    let has = |status| members.contains(&status);
+    if has(Status::Running) {
+        Status::Running
+    } else if has(Status::Failed) {
+        Status::Failed
+    } else if has(Status::Stopped) {
+        Status::Stopped
+    } else if !has(Status::Pending) {
+        Status::Done
+    } else if has(Status::Done) || has(Status::Skipped) {
+        Status::Running
+    } else {
+        Status::Pending
     }
 }
 
@@ -665,6 +690,11 @@ fn collect<'a>(
             || node.name.is_none()
         {
             continue;
+        }
+        // No node comes twice, so two that share an id, each the other's
+        // parent, cannot be followed in circles.
+        if order.len() >= graph.nodes.len() {
+            return;
         }
         order.push((node, depth, untaken));
         if node.kind.is_group() {

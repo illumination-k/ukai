@@ -531,16 +531,29 @@ struct Utf8(Vec<u8>);
 impl Utf8 {
     fn push(&mut self, bytes: &[u8]) -> String {
         self.0.extend_from_slice(bytes);
-        let valid = match std::str::from_utf8(&self.0) {
-            Ok(_) => self.0.len(),
+        let mut text = String::new();
+        let mut read = 0;
+        loop {
+            let error = match std::str::from_utf8(&self.0[read..]) {
+                Ok(rest) => {
+                    text.push_str(rest);
+                    read = self.0.len();
+                    break;
+                }
+                Err(error) => error,
+            };
+            let valid = read + error.valid_up_to();
+            text.push_str(&String::from_utf8_lossy(&self.0[read..valid]));
+            read = valid;
             // An incomplete character at the end waits for the next chunk;
             // anything else invalid is replaced.
-            Err(error) if error.error_len().is_none() => error.valid_up_to(),
-            Err(_) => self.0.len(),
-        };
-        let rest = self.0.split_off(valid);
-        let text = String::from_utf8_lossy(&self.0).into_owned();
-        self.0 = rest;
+            let Some(invalid) = error.error_len() else {
+                break;
+            };
+            text.push(char::REPLACEMENT_CHARACTER);
+            read += invalid;
+        }
+        self.0.drain(..read);
         text
     }
 }
@@ -649,6 +662,10 @@ mod tests {
     #[case::whole(&[&b"h\xc3\xa9"[..]], &["hé"])]
     #[case::split(&[&b"h\xc3"[..], &b"\xa9!"[..]], &["h", "é!"])]
     #[case::invalid(&[&b"a\xffb"[..]], &["a\u{fffd}b"])]
+    #[case::invalid_then_split(
+        &[&b"\xffa\xe3\x81"[..], &b"\x82"[..]],
+        &["\u{fffd}a", "\u{3042}"]
+    )]
     fn decodes_output_across_chunks(#[case] chunks: &[&[u8]], #[case] expected: &[&str]) {
         let mut utf8 = Utf8::default();
         let decoded: Vec<String> = chunks.iter().map(|chunk| utf8.push(chunk)).collect();

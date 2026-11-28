@@ -318,7 +318,7 @@ impl Store {
     /// lines. An offset past the end — the events were written anew — reads
     /// from the start.
     pub fn read(&self, run: &str, after: u64) -> Result<RunChunk, FlowError> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::{BufRead, Read, Seek, SeekFrom};
 
         let folder = self.find(run)?;
         let graph = std::fs::read_to_string(folder.join("graph.json"))
@@ -336,10 +336,21 @@ impl Store {
                     .map_err(|error| io("read the run's events", &error))?;
                 let mut bytes = Vec::new();
                 // One line more than fits may follow, to end on a line.
-                file.take(2 * MAX_CHUNK as u64)
+                (&mut file)
+                    .take(2 * MAX_CHUNK as u64)
                     .read_to_end(&mut bytes)
                     .map_err(|error| io("read the run's events", &error))?;
-                let whole = whole_lines(&bytes);
+                let mut whole = whole_lines(&bytes);
+                // A line longer than that is read to its end, or the reader
+                // would be handed nothing, and ask from here again, forever.
+                if whole == 0 && bytes.len() == 2 * MAX_CHUNK {
+                    std::io::BufReader::new(&mut file)
+                        .read_until(b'\n', &mut bytes)
+                        .map_err(|error| io("read the run's events", &error))?;
+                    if bytes.ends_with(b"\n") {
+                        whole = bytes.len();
+                    }
+                }
                 (
                     String::from_utf8_lossy(&bytes[..whole]).into_owned(),
                     from + whole as u64,
@@ -852,7 +863,9 @@ impl Flows {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+/// Run `work` on the store, which reads files, off the threads that serve
+/// everything else.
+pub async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, FlowError> + Send + 'static,
 ) -> Result<T, FlowError> {
     tokio::task::spawn_blocking(work)
